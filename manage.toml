@@ -1,0 +1,21 @@
+# nbm (NoneBot Manager) 配置文件
+# 请根据你的实际情况修改此文件
+
+[manager]
+# [必填] 你的 GitHub组织/用户名，用于存放所有插件的 Fork
+github_org = "PoleSudBot"
+
+# [可选] 存放插件源码的本地目录名
+plugins_src_dir = "plugins"
+
+# [可选] 记录插件仓库地址列表的文件名
+plugins_list_file = "plugins.txt"
+
+# [可选] 你希望在插件 Fork 中使用的主要开发分支名
+dev_branch = "L7dev"
+
+# [可选] 并发执行任务时使用的最大线程数
+max_workers = 8
+
+# [可选] 执行外部命令（如 git, uv）的超时时间（秒）
+command_timeout = 1200
