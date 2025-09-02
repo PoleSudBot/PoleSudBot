@@ -147,4 +147,18 @@ backup/
 resources/
 .vscode/launch.json
 
-./.env.dev
+# -------------------------------------------------------------------
+manage.log
+.manage_sync_state.json
+.manage_history/
+requirements.prod.in
+
+# VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+# JetBrains (PyCharm, etc.)
+.idea/
+
+# 插件源码目录，由 nbm 脚本管理，不应由主仓库追踪
+plugins/
