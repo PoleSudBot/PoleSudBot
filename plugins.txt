@@ -31,7 +31,7 @@ https://github.com/lgc-NB2Dev/nonebot-plugin-multincm
 # bilichat
 https://github.com/Well2333/nonebot-plugin-bilichat
 # 音视频解析器
-https://github.com/fllesser/nonebot-plugin-resolver2
+#https://github.com/fllesser/nonebot-plugin-resolver2
 # github解析
 https://github.com/ElainaFanBoy/nonebot_plugin_githubcard
 # 词云
