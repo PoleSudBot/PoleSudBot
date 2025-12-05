@@ -48,6 +48,33 @@ def ensure_venv_exists():
             sys.exit(1)
 
 
+# def _overwrite_with_editable_installs():
+#     """
+#     使用可编辑模式强制重新安装所有本地插件。
+#     这会覆盖掉 `uv sync` 创建的复制版安装。
+#     """
+#     config.logger.info("🛠️  Overwriting local plugins with editable mode...")
+
+#     local_plugin_paths = [p for p in config.PLUGINS_SRC_DIR.iterdir() if p.is_dir()]
+
+#     if not local_plugin_paths:
+#         config.logger.info("  - No local plugins found to install in editable mode.")
+#         return
+
+#     # 构建 uv pip install 命令，一次性安装所有插件以提高效率
+#     install_args = ["pip", "install", "--no-deps", "--no-cache-dir"]
+#     for plugin_path in local_plugin_paths:
+#         install_args.extend(["-e", str(plugin_path)])
+
+#     try:
+#         process.uv(install_args, config.PROJECT_ROOT)
+#         config.logger.info("  - ✅ All local plugins are now in editable mode.")
+#     except CommandError as e:
+#         config.logger.error(f"❌ Failed to install local plugins in editable mode: {e}")
+#         # 在实际命令中，错误会向上抛出，这里只在直接调用时记录日志
+#         raise  # 重新抛出异常，让调用方处理
+
+
 # --- Command Base Classes ---
 class CommandBase:
     """Base class for all commands, handling argument parsing and target selection."""
@@ -169,7 +196,7 @@ class InitCommand(CommandBase):
         )
         try:
             # CORRECTED: Use process.uv, not config.uv
-            process.uv(["lock"], config.PROJECT_ROOT)
+            process.uv_streamed(["lock"], config.PROJECT_ROOT)
         except CommandError as e:
             config.logger.error(
                 f"\n❌ Dependency resolution failed! There might be conflicts.\n{e}"
@@ -180,7 +207,9 @@ class InitCommand(CommandBase):
         if getattr(self.args, "install", False):
             config.logger.info("\n🔧 Syncing virtual environment...")
             # CORRECTED: Use process.uv, not config.uv
-            process.uv(["sync", "--all-extras"], config.PROJECT_ROOT)
+            process.uv_streamed(["sync", "--all-extras"], config.PROJECT_ROOT)
+
+        # _overwrite_with_editable_installs()
 
         config.logger.info("\n🎉 Project initialization complete!")
 
@@ -209,9 +238,33 @@ class AddCommand(CommandBase):
             return
 
         project.update_plugins_list(url=url, action="add")
-        config.logger.info(
-            f"\n🎉 Plugin '{path.name}' added successfully! Run 'nbm init --install' or 'uv sync' to update your environment."
-        )
+        if self.args.install:
+            config.logger.info(
+                "\n--install flag detected. Performing full environment update..."
+            )
+            try:
+                config.logger.info("  - Step 1/3: Locking dependencies...")
+                process.uv_streamed(["lock"], config.PROJECT_ROOT)
+
+                config.logger.info("  - Step 2/3: Syncing environment...")
+                process.uv_streamed(["sync", "--all-extras"], config.PROJECT_ROOT)
+
+                config.logger.info("  - Step 3/3: Applying editable mode...")
+                # _overwrite_with_editable_installs()
+
+                config.logger.info(
+                    f"\n🎉 Plugin '{path.name}' added and installed successfully!"
+                )
+            except CommandError as e:
+                config.logger.error(f"\n❌ Environment update failed: {e}")
+                config.logger.info(
+                    "💡 Please try running 'nbm init --install' to fix potential issues."
+                )
+        else:
+            # --- 原有的提示信息 ---
+            config.logger.info(
+                f"\n🎉 Plugin '{path.name}' added successfully! Run 'nbm init --install' or 'uv sync' to update your environment."
+            )
 
 
 class RemoveCommand(CommandBase):
@@ -575,6 +628,11 @@ def main():
             )
         elif name == "add":
             p.add_argument("plugin_url", help="The GitHub URL of the plugin to add")
+            p.add_argument(
+                "--install",
+                action="store_true",
+                help="Lock, sync, and install the new plugin immediately.",
+            )
         elif name == "remove":
             p.add_argument(
                 "plugin_name", help="The name of the plugin folder to remove"
