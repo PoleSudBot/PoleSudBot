@@ -1,118 +1,358 @@
+# bot.py (修复增强版)
+import importlib
+import importlib.util
+import os
 from pathlib import Path
 import pkgutil
+import sys
 
 import nonebot
+from nonebot.adapters.onebot.v11 import Adapter
 from nonebot.log import logger
 from nonebot.plugin import get_loaded_plugins
 
-# --- 核心初始化 ---
+# --- NoneBot 初始化 ---
 nonebot.init()
 app = nonebot.get_asgi()
-from nonebot.adapters.onebot.v11 import Adapter
-
 driver = nonebot.get_driver()
 driver.register_adapter(Adapter)
 
 
-def load_all_plugins_explicitly():
+# ========== 手动配置区 ==========
+PRIORITY_PLUGINS: list[str] = [
+    # 如需优先加载的插件（按顺序），写模块名或包名的猜测：
+    # "nonebot_plugin_apscheduler",
+]
+
+MANUAL_USER_PLUGINS: list[str] = [
+    # 手动标记为用户插件（可写猜测名，脚本会尝试解析）：
+    "nonebot_plugin_acgalaxy",
+    "yetanotherpicsearch",
+]
+
+env_manual = os.getenv("NB_MANUAL_PLUGINS", "")
+if env_manual:
+    for p in [x.strip() for x in env_manual.split(",") if x.strip()]:
+        MANUAL_USER_PLUGINS.append(p)
+
+env_priority = os.getenv("NB_PLUGIN_PRIORITY", "")
+if env_priority:
+    for p in [x.strip() for x in env_priority.split(",") if x.strip()]:
+        PRIORITY_PLUGINS.append(p)
+# ==============================
+
+
+def _normalize_name_for_fs(name: str) -> str:
+    return name.replace("-", "_").lower()
+
+
+def _to_module_path_candidate(raw: str) -> str:
+    raw = raw.strip()
+    if "." in raw:
+        return raw
+    if raw.startswith("nonebot_plugin_"):
+        return raw
+    return f"plugins.{raw}"
+
+
+def resolve_module_name(candidate: str, available_modules: list[str]) -> str | None:
     """
-    一个显式、有序、带分类的终极插件加载器。
-    - 发现所有插件，构建一个有序的加载计划。
-    - 逐一加载，实时跟踪状态，根除重复加载问题。
-    - 提供精准的分类审计报告。
+    尝试将用户提供的 candidate（可能含 'plugins.' 前缀或分发名）解析为实际可 import 的模块名。
+    返回可直接传给 nonebot.load_plugin 的模块名，或 None（解析失败）。
     """
-    # --- 1. 发现阶段：构建加载计划 ---
+    # 1) 如果 candidate 可直接 import，直接返回
+    try:
+        if importlib.util.find_spec(candidate) is not None:
+            return candidate
+    except Exception:
+        pass
+
+    # 2) 尝试一些常见的变形（去前缀/加前缀/替换 - -> _ / 只取最后一段）
+    name = candidate.split(".")[-1]
+    variants = [
+        name,
+        name.replace("-", "_"),
+        f"nonebot_plugin_{name}",
+        f"nonebot_plugin_{name.replace('-', '_')}",
+        f"plugins.{name}",
+        f"plugins.{name.replace('-', '_')}",
+        f"zhenxun.{name}",
+        f"zhenxun.{name.replace('-', '_')}",
+        f"zhenxun_plugin_{name}",
+        f"zhenxun_plugin_{name.replace('-', '_')}",
+    ]
+
+    for v in variants:
+        try:
+            if importlib.util.find_spec(v) is not None:
+                return v
+        except Exception:
+            continue
+
+    # 3) 在系统已安装模块列表中做归一化匹配（大小写 / '-' -> '_'）
+    norm_target = name.lower().replace("-", "_")
+    for m in available_modules:
+        if m.lower().replace("-", "_") == norm_target:
+            return m
+
+    # 4) 再做更宽松的包含匹配（避免太多误判）
+    for m in available_modules:
+        nm = m.lower().replace("-", "_")
+        if norm_target in nm or nm in norm_target:
+            return m
+
+    return None
+
+
+def load_plugins_and_report():
     PROJECT_ROOT = Path(__file__).resolve().parent
     BUILTIN_PLUGINS_ROOT = PROJECT_ROOT / "zhenxun" / "builtin_plugins"
-    USER_PLUGINS_ROOT = PROJECT_ROOT / "zhenxun" / "plugins"
+    ZHENXUN_PLUGINS_ROOT = PROJECT_ROOT / "zhenxun" / "plugins"
+    USER_PLUGINS_ROOT = PROJECT_ROOT / "plugins"
 
-    # 用户插件白名单，用于分类
-    user_plugin_names = {
-        item.name.replace("-", "_")
-        for item in USER_PLUGINS_ROOT.iterdir()
-        if item.is_dir() and not item.name.startswith((".", "_"))
-    }
+    plugin_classification = {}
 
-    # 构建有序的加载计划列表，格式为 (module_path, category)
-    plugins_to_load = []
-
-    # 计划A: 内建插件
+    # 发现内建与真寻（文件夹）
     if BUILTIN_PLUGINS_ROOT.is_dir():
-        for subpath in BUILTIN_PLUGINS_ROOT.iterdir():
-            if subpath.is_dir() and not subpath.name.startswith((".", "_")):
-                # 使用点分隔路径作为模块路径
-                module_path = f"zhenxun.builtin_plugins.{subpath.name}"
-                plugins_to_load.append((module_path, "builtin"))
+        for item in BUILTIN_PLUGINS_ROOT.iterdir():
+            if item.is_dir() and not item.name.startswith((".", "_")):
+                module_name = f"zhenxun.builtin_plugins.{item.name}"
+                plugin_classification[module_name] = "内建"
 
-    # 计划B: 已安装的第三方插件
+    if ZHENXUN_PLUGINS_ROOT.is_dir():
+        for item in ZHENXUN_PLUGINS_ROOT.iterdir():
+            if item.is_dir() and not item.name.startswith((".", "_")):
+                module_name = f"zhenxun.plugins.{item.name}"
+                plugin_classification[module_name] = "真寻"
+
+    # 本地 plugins/ 下的目录集合
+    user_plugin_names: set[str] = set()
+    try:
+        if USER_PLUGINS_ROOT.is_dir():
+            for item in USER_PLUGINS_ROOT.iterdir():
+                if item.is_dir() and not item.name.startswith((".", "_")):
+                    user_plugin_names.add(_normalize_name_for_fs(item.name))
+    except Exception:
+        pass
+
+    # 手动用户插件标记
+    manual_candidates = []
+    for raw in MANUAL_USER_PLUGINS:
+        cand = _to_module_path_candidate(raw)
+        plugin_classification[cand] = "用户"
+        manual_candidates.append(cand)
+
+    # 从已安装模块发现 nonebot 插件包
+    available_modules = [m.name for m in pkgutil.iter_modules()]
+
     for _, name, _ in pkgutil.iter_modules():
         if name.startswith("nonebot_plugin_") or name.startswith("_nb_plugin"):
-            category = "user" if name in user_plugin_names else "dependency"
-            plugins_to_load.append((name, category))
+            if name in plugin_classification:
+                continue
+            if name.lower() in user_plugin_names:
+                plugin_classification[name] = "用户"
+            else:
+                plugin_classification[name] = "依赖"
 
-    # --- 2. 执行阶段：逐一加载 ---
-    logger.info(
-        f"--- 发现 {len(plugins_to_load)} 个待加载插件，开始执行加载计划... ---"
-    )
+    # 统计结构
     stats = {
-        "builtin": {"succeeded": 0},
-        "user": {"succeeded": 0, "failed": 0},
-        "dependency": {"succeeded": 0, "failed": 0},
+        "内建": {"succeeded": 0, "failed": 0},
+        "真寻": {"succeeded": 0, "failed": 0},
+        "用户": {"succeeded": 0, "failed": 0},
+        "依赖": {"succeeded": 0, "failed": 0},
         "skipped": 0,
     }
+
     loaded_plugin_names = {p.name for p in get_loaded_plugins()}
 
-    for module_path, category in plugins_to_load:
-        # 实时检查插件是否已被依赖链提前加载
-        # 注意: NoneBot 对插件名的处理可能和模块路径不完全一致，我们检查最核心的部分
+    logger.info(
+        f"--- 发现 {len(plugin_classification)} 个待加载插件，开始执行静默加载计划... ---"
+    )
+
+    failed_list = []
+    succeeded_list = []
+    skipped_list = []
+
+    # 构造加载顺序：priority -> manual -> rest
+    final_order = []
+    for raw in PRIORITY_PLUGINS:
+        cand = _to_module_path_candidate(raw)
+        if cand not in final_order:
+            final_order.append(cand)
+            if cand not in plugin_classification:
+                plugin_classification[cand] = "依赖"
+
+    for cand in manual_candidates:
+        if cand not in final_order:
+            final_order.append(cand)
+
+    for cand in sorted(plugin_classification.keys()):
+        if cand not in final_order:
+            final_order.append(cand)
+
+    for module_path in final_order:
+        category = plugin_classification.get(module_path, "依赖")
         plugin_name_base = module_path.split(".")[-1]
+
         if (
             module_path in loaded_plugin_names
             or plugin_name_base in loaded_plugin_names
         ):
-            logger.debug(f"插件 {module_path} 已被提前加载，跳过。")
             stats["skipped"] += 1
+            skipped_list.append(module_path)
             continue
 
-        log_prefix_map = {
-            "builtin": "🏠 内建",
-            "user": "👤 用户",
-            "dependency": "🔩 依赖",
-        }
-        log_prefix = log_prefix_map[category]
+        # 先解析实际可 import 的模块名
+        resolved = resolve_module_name(module_path, available_modules)
+        to_load = resolved or module_path
 
         try:
-            nonebot.load_plugin(module_path)
-            logger.success(f"✅ {log_prefix}插件 {module_path} 加载成功。")
+            nonebot.load_plugin(to_load)
             stats[category]["succeeded"] += 1
-            # 关键：实时更新我们自己的状态，包括新加载的插件本身及其可能引入的依赖
+            succeeded_list.append(to_load)
             loaded_plugin_names.update(p.name for p in get_loaded_plugins())
-        except Exception as e:
-            logger.opt(exception=e).error(
-                f"❌ {log_prefix}插件 {module_path} 加载失败。"
+            if resolved and resolved != module_path:
+                logger.info(f"✅ 解析并加载: '{module_path}' -> 实际模块 '{resolved}'")
+        except ModuleNotFoundError as mnfe:
+            # 若尝试过解析但仍未找到，记录并继续
+            logger.opt(exception=mnfe).error(
+                f"❌ 无法找到模块 '{to_load}'（原始: {module_path}），跳过。"
             )
-            if category != "builtin":
-                stats[category]["failed"] += 1
+            stats[category]["failed"] += 1
+            failed_list.append((module_path, repr(mnfe)))
+        except RuntimeError as re_ex:
+            txt = str(re_ex)
+            # 如果是 "not loaded as a plugin" 这类错误，尝试从 sys.modules 清理并重试一次（谨慎）
+            if "not loaded as a plugin" in txt.lower():
+                if to_load in sys.modules:
+                    logger.warning(
+                        f"⚠️ 模块 '{to_load}' 已被普通 import（非插件方式）导入。尝试从 sys.modules 删除并重试加载（有副作用）。"
+                    )
+                    try:
+                        del sys.modules[to_load]
+                    except Exception:
+                        logger.exception("从 sys.modules 删除失败，跳过重试。")
+                    else:
+                        try:
+                            nonebot.load_plugin(to_load)
+                            stats[category]["succeeded"] += 1
+                            succeeded_list.append(to_load)
+                            loaded_plugin_names.update(
+                                p.name for p in get_loaded_plugins()
+                            )
+                            logger.info(f"✅ 通过清理 sys.modules 成功加载 '{to_load}'")
+                            continue
+                        except Exception as e2:
+                            logger.opt(exception=e2).error(
+                                f"❌ 重试加载 '{to_load}' 失败（清理后）。"
+                            )
+                            stats[category]["failed"] += 1
+                            failed_list.append((module_path, repr(e2)))
+                            continue
+            # 其它 runtime 错误记录
+            logger.opt(exception=re_ex).error(
+                f"❌ 插件 {to_load} 加载失败（RuntimeError）。"
+            )
+            stats[category]["failed"] += 1
+            failed_list.append((module_path, repr(re_ex)))
+        except Exception as e:
+            logger.opt(exception=e).error(f"❌ 插件 {to_load} 加载失败（未知异常）。")
+            stats[category]["failed"] += 1
+            failed_list.append((module_path, repr(e)))
 
-    # --- 3. 报告阶段 ---
-    logger.info("--- 插件加载审计报告 ---")
-    # ... (报告部分与上一版相同，此处省略以保持简洁，你可以直接复用)
-    b_s = stats["builtin"]["succeeded"]
-    u_s, u_f = stats["user"]["succeeded"], stats["user"]["failed"]
-    d_s, d_f = stats["dependency"]["succeeded"], stats["dependency"]["failed"]
-    skipped = stats["skipped"]
-    total_succeeded = b_s + u_s + d_s
-    total_failed = u_f + d_f
-    logger.info(f"内建插件: {b_s} 个成功加载")
-    logger.info(f"用户插件: {u_s} 个成功, {u_f} 个失败")
-    logger.info(f"依赖插件: {d_s} 个成功, {d_f} 个失败")
-    summary_message = f"总计: {total_succeeded} 个成功, {total_failed} 个失败, {skipped} 个跳过(已提前加载)。"
-    if total_failed > 0:
-        logger.warning(summary_message)
+    # 输出表格报告（保留原风格）
+    BOX_CHAR = {
+        "top_left": "╔",
+        "top_right": "╗",
+        "bottom_left": "╚",
+        "bottom_right": "╝",
+        "horizontal": "═",
+        "vertical": "║",
+        "mid_left": "╠",
+        "mid_right": "╣",
+    }
+    HEADER = "🔌 插件加载审计报告 🔌"
+    WIDTH = 66
+
+    logger.info(" ")
+    logger.info(
+        f"{BOX_CHAR['top_left']}{BOX_CHAR['horizontal'] * (WIDTH - 2)}{BOX_CHAR['top_right']}"
+    )
+    logger.info(
+        f"{BOX_CHAR['vertical']} {HEADER.center(WIDTH - 4)} {BOX_CHAR['vertical']}"
+    )
+    logger.info(
+        f"{BOX_CHAR['mid_left']}{BOX_CHAR['horizontal'] * (WIDTH - 2)}{BOX_CHAR['mid_right']}"
+    )
+
+    total_succeeded = sum(
+        stats[c]["succeeded"] for c in ("内建", "真寻", "用户", "依赖")
+    )
+    total_failed = sum(stats[c]["failed"] for c in ("内建", "真寻", "用户", "依赖"))
+
+    for category in ("内建", "真寻", "用户", "依赖"):
+        s_count = stats[category]["succeeded"]
+        f_count = stats[category]["failed"]
+        line = f"  {category:<8} {s_count:>3} 个成功 | {f_count:>3} 个失败"
+        logger.info(f"{BOX_CHAR['vertical']}{line:<{WIDTH - 2}}{BOX_CHAR['vertical']}")
+
+    logger.info(
+        f"{BOX_CHAR['mid_left']}{BOX_CHAR['horizontal'] * (WIDTH - 2)}{BOX_CHAR['mid_right']}"
+    )
+    skipped_line = f"  ⏭️ 已跳过 : {stats['skipped']} 个 (已加载或被依赖提前加载)"
+    logger.info(
+        f"{BOX_CHAR['vertical']}{skipped_line:<{WIDTH - 2}}{BOX_CHAR['vertical']}"
+    )
+
+    summary_line = f"  ✅ 总计: {total_succeeded} 个成功, {total_failed} 个失败"
+    if total_failed == 0:
+        logger.info(
+            f"{BOX_CHAR['vertical']}{summary_line:<{WIDTH - 2}}{BOX_CHAR['vertical']}"
+        )
     else:
-        logger.success(summary_message)
+        logger.warning(
+            f"{BOX_CHAR['vertical']}{summary_line:<{WIDTH - 2}}{BOX_CHAR['vertical']}"
+        )
+
+    logger.info(
+        f"{BOX_CHAR['bottom_left']}{BOX_CHAR['horizontal'] * (WIDTH - 2)}{BOX_CHAR['bottom_right']}"
+    )
+    logger.info(" ")
+
+    if succeeded_list:
+        logger.info("--- ✅ 加载成功（清单）---")
+        for name in succeeded_list:
+            logger.info(f"  • {name}")
+
+    if failed_list:
+        logger.info("--- ❌ 加载失败（示例）---")
+        for name, err in failed_list:
+            logger.info(f"  • {name} -> {err}")
+
+    if skipped_list:
+        logger.info("--- ⏭️ 跳过的插件 ---")
+        for name in skipped_list:
+            logger.info(f"  • {name}")
+
+    logger.info(" ")
+    user_plugin_list = sorted(
+        [n for n, c in plugin_classification.items() if c == "用户"]
+    )
+    dependency_plugin_list = sorted(
+        [n for n, c in plugin_classification.items() if c == "依赖"]
+    )
+
+    if user_plugin_list:
+        logger.info("--- 👤 用户插件列表 (User Plugins) ---")
+        for name in user_plugin_list:
+            logger.info(f"  • {name}")
+    if dependency_plugin_list:
+        logger.info("--- 🔩 依赖插件列表 (Dependency Plugins) ---")
+        for name in dependency_plugin_list:
+            logger.info(f"  • {name}")
+    logger.info(" ")
 
 
 if __name__ == "__main__":
-    load_all_plugins_explicitly()
+    load_plugins_and_report()
     nonebot.run(app="__mp_main__:app")

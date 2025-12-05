@@ -3,8 +3,8 @@
 High-level functions for managing the NoneBot project and its plugins.
 """
 
-import shutil
 from pathlib import Path
+import shutil
 from typing import Literal
 
 import tomlkit
@@ -12,8 +12,6 @@ from tomlkit.items import Array, Item, Table
 
 from . import config, git, process
 from .exceptions import CommandError
-
-# ... (Template constants remain the same) ...
 
 MANAGE_TOML_TEMPLATE = """# nbm (NoneBot Manager) 配置文件
 # 请根据你的实际情况修改此文件
@@ -62,6 +60,7 @@ def _get_package_name_from_plugin_dir(plugin_path: Path) -> str | None:
 
 
 def check_and_setup_configs() -> None:
+    # ... (This function is correct, no changes needed) ...
     is_first_run = not (config.PROJECT_ROOT / "manage.toml").exists()
     files_to_check = {
         "manage.toml": MANAGE_TOML_TEMPLATE,
@@ -133,28 +132,64 @@ def setup_plugin_repo(
 
 def add_local_dependency(plugin_path: Path) -> None:
     """
-    Adds a local plugin as an editable dependency, with pre-flight checks.
-
-    Raises:
-        CommandError: If `uv add` fails.
-        FileNotFoundError: If the plugin is not a valid Python project.
+    将本地插件作为可编辑依赖添加到 pyproject.toml。
+    此函数会同时更新 [project.dependencies] 和 [tool.uv.sources]。
     """
-    pyproject_path = plugin_path / "pyproject.toml"
-    setup_py_path = plugin_path / "setup.py"
+    main_pyproject_path = config.PROJECT_ROOT / "pyproject.toml"
+    if not main_pyproject_path.exists():
+        raise FileNotFoundError("主项目的 pyproject.toml 未找到！")
 
-    # --- 新增的预检 ---
-    if not pyproject_path.exists() and not setup_py_path.exists():
-        error_msg = (
-            f"Plugin '{plugin_path.name}' is not a valid Python package.\n"
-            f"Reason: Missing 'pyproject.toml' or 'setup.py' in its root directory.\n"
-            "Please add a 'pyproject.toml' to the plugin repository before adding it."
+    # 1. 智能解析包名，并规范化为小写+中划线
+    pkg_name = _get_package_name_from_plugin_dir(plugin_path)
+    if not pkg_name:
+        pkg_name = plugin_path.name  # 回退到文件夹名
+        config.logger.warning(
+            f"⚠️  无法从 '{plugin_path.name}' 的 pyproject.toml 解析包名。"
+            f"将回退使用文件夹名: '{pkg_name}'"
         )
-        # 抛出一个更具体的错误，而不是让 uv 失败
-        raise FileNotFoundError(error_msg)
-    # --- 预检结束 ---
 
-    rel_path = plugin_path.resolve().relative_to(config.PROJECT_ROOT).as_posix()
-    process.uv(["add", rel_path, "--editable"], config.PROJECT_ROOT, check=True)
+    # 规范化包名 (PEP 规范推荐小写)
+    normalized_pkg_name = pkg_name.replace("_", "-").lower()
+
+    # 2. 使用 tomlkit 原子化地写入
+    doc = tomlkit.parse(main_pyproject_path.read_text("utf-8"))
+
+    # 3. 更新 [project.dependencies]
+    project_table = doc.setdefault("project", tomlkit.table())
+    dependencies = project_table.setdefault("dependencies", tomlkit.array())
+
+    # 检查依赖是否已存在，避免重复
+    if not any(str(d).strip().startswith(normalized_pkg_name) for d in dependencies):
+        dependencies.add_line(normalized_pkg_name)
+        dependencies.multiline(True)
+        config.logger.info(
+            f"  - ✅ 已将 '{normalized_pkg_name}' 添加到 [project.dependencies]"
+        )
+    else:
+        config.logger.debug(
+            f"  - 依赖 '{normalized_pkg_name}' 已存在于 [project.dependencies]，跳过。"
+        )
+
+    # 4. 更新 [tool.uv.sources]
+    tool_table = doc.setdefault("tool", tomlkit.table())
+    uv_table = tool_table.setdefault("uv", tomlkit.table())
+    sources_table = uv_table.setdefault("sources", tomlkit.table())
+
+    relative_path = plugin_path.relative_to(config.PROJECT_ROOT).as_posix()
+
+    # 创建一个新的 Table 来表示 {path = "...", editable = true}
+    source_entry = tomlkit.inline_table()
+    source_entry.update({"path": relative_path, "editable": True})
+
+    # 检查是否已存在
+    if sources_table.get(normalized_pkg_name) != source_entry:
+        sources_table[normalized_pkg_name] = source_entry
+        config.logger.info(
+            f"  - ✅ 已将 '{normalized_pkg_name}' 的可编辑路径添加到 [tool.uv.sources]"
+        )
+
+    # 5. 写回文件
+    main_pyproject_path.write_text(tomlkit.dumps(doc), "utf-8")
 
 
 def remove_dependency(pkg_name: str) -> bool:

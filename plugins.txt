@@ -3,11 +3,10 @@
 # ==================================
 # ===      娱乐功能类插件      ===
 # ==================================
-
 # 今日老婆
 https://github.com/glamorgan9826/nonebot-plugin-today-waifu
 # 今日运势
-#https://github.com/MinatoAquaCrews/nonebot_plugin_fortune
+https://github.com/MinatoAquaCrews/nonebot_plugin_fortune
 # 塔罗牌
 https://github.com/MinatoAquaCrews/nonebot_plugin_tarot
 # 算卦
@@ -19,15 +18,14 @@ https://github.com/lgc-NB2Dev/nonebot-plugin-ottohzys
 # 决斗
 https://github.com/Redmomn/nonebot-plugin-duel
 # 猜宝可梦
-https://github.com/Proito666/nonebot-plugin-pokemonle
+#https://github.com/Proito666/nonebot-plugin-pokemonle
 # vv
-https://github.com/StillMisty/nonebot_plugin_vv
-
-
+#https://github.com/StillMisty/nonebot_plugin_vv
+#复读
+#https://github.com/yejue/nonebot-plugin-plus-one
 # ==================================
 # ===      实用工具类插件      ===
 # ==================================
-
 # 网易云多选点歌
 https://github.com/lgc-NB2Dev/nonebot-plugin-multincm
 # bilichat
@@ -47,34 +45,40 @@ https://github.com/zouXH-god/nonebot-plugin-ACGalaxy
 # 和风天气
 https://github.com/kexue-z/nonebot-plugin-heweather
 # 简单骰子
-https://github.com/MinatoAquaCrews/nonebot_plugin_roll
+#https://github.com/MinatoAquaCrews/nonebot_plugin_roll
 # 论文
-#https://github.com/BalconyJH/nonebot-plugin-paper
+https://github.com/BalconyJH/nonebot-plugin-paper
 # 谁艾特我
 https://github.com/enKl03B/nonebot-plugin-whoasked
-
-
+# 这是什么
+https://github.com/djkcyl/nonebot-plugin-zssm
+#语录
+#https://github.com/webjoin111/zhenxun_plugin_quote
+#搜图
+https://github.com/lgc-NB2Dev/YetAnotherPicSearch
+#pixiv
+#https://github.com/bot-ssttkkl/nonebot-plugin-pixivbot
+#简单图片处理
+https://github.com/MemeCrafters/nonebot-plugin-imagetools
+#表情包保存
+https://github.com/colasama/nonebot-plugin-sticker-saver
 # ==================================
 # ===      游戏相关插件      ===
 # ==================================
-
 # tsugu
 https://github.com/WindowsSov8forUs/nonebot-plugin-tsugu-bangdream-bot
 # maimai
 #https://github.com/Yuri-YuzuChaN/nonebot-plugin-maimaidx
-# 喵斯
 # pjsk表情生成
 https://github.com/lgc-NB2Dev/nonebot-plugin-meme-stickers
 # 明日方舟森空岛
-https://github.com/FrostN0v0/nonebot-plugin-skland
+#https://github.com/FrostN0v0/nonebot-plugin-skland
 # 游戏王
-https://github.com/fireinsect/nonebot-plugin-ocgbot-v2
 # ba抽卡
 #https://github.com/lengmianzz/nonebot-plugin-BAgacha
-# pjsk相关
 # mc模组
 https://github.com/chrysoljq/nonebot-plugin-mcmod
 # mc监控
 #https://github.com/Lonely-Sails/nonebot-plugin-mc-watcher
 # lolmatch
-https://github.com/MaxCrazy1101/nonebot_plugin_lolmatch
+#https://github.com/MaxCrazy1101/nonebot_plugin_lolmatch
