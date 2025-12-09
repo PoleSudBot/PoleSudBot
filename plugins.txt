@@ -29,7 +29,6 @@ https://github.com/Redmomn/nonebot-plugin-duel
 # 网易云多选点歌
 https://github.com/lgc-NB2Dev/nonebot-plugin-multincm
 # bilichat
-https://github.com/Well2333/nonebot-plugin-bilichat
 # 音视频解析器
 #https://github.com/fllesser/nonebot-plugin-resolver2
 # github解析
@@ -82,3 +81,4 @@ https://github.com/chrysoljq/nonebot-plugin-mcmod
 #https://github.com/Lonely-Sails/nonebot-plugin-mc-watcher
 # lolmatch
 #https://github.com/MaxCrazy1101/nonebot_plugin_lolmatch
+https://github.com/zhaomaoniu/nonebot-plugin-manosaba-memes
