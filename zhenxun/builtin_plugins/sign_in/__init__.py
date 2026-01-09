@@ -29,8 +29,6 @@ __plugin_meta__ = PluginMetadata(
     name="签到",
     description="每日签到，证明你在这里",
     usage="""
-    每日签到
-    会影响色图概率和开箱次数，以及签到的随机道具获取
     指令:
         签到
         我的签到
