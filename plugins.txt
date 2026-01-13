@@ -16,7 +16,6 @@ https://github.com/Cvandia/nonebot-plugin-whateat-pic
 # 活字印刷
 https://github.com/lgc-NB2Dev/nonebot-plugin-ottohzys
 # 决斗
-https://github.com/Redmomn/nonebot-plugin-duel
 # 猜宝可梦
 #https://github.com/Proito666/nonebot-plugin-pokemonle
 # vv
@@ -38,9 +37,7 @@ https://github.com/he0119/nonebot-plugin-wordcloud
 # meme生成
 https://github.com/MemeCrafters/nonebot-plugin-memes
 # emoji合成
-https://github.com/noneplugin/nonebot-plugin-emojimix
 # 漫展查询
-https://github.com/zouXH-god/nonebot-plugin-ACGalaxy
 # 和风天气
 https://github.com/kexue-z/nonebot-plugin-heweather
 # 简单骰子
@@ -50,7 +47,6 @@ https://github.com/BalconyJH/nonebot-plugin-paper
 # 谁艾特我
 https://github.com/enKl03B/nonebot-plugin-whoasked
 # 这是什么
-https://github.com/djkcyl/nonebot-plugin-zssm
 #语录
 #https://github.com/webjoin111/zhenxun_plugin_quote
 #搜图
@@ -58,7 +54,6 @@ https://github.com/lgc-NB2Dev/YetAnotherPicSearch
 #pixiv
 #https://github.com/bot-ssttkkl/nonebot-plugin-pixivbot
 #简单图片处理
-https://github.com/MemeCrafters/nonebot-plugin-imagetools
 #表情包保存
 https://github.com/colasama/nonebot-plugin-sticker-saver
 # ==================================
@@ -76,7 +71,6 @@ https://github.com/lgc-NB2Dev/nonebot-plugin-meme-stickers
 # ba抽卡
 #https://github.com/lengmianzz/nonebot-plugin-BAgacha
 # mc模组
-https://github.com/chrysoljq/nonebot-plugin-mcmod
 # mc监控
 #https://github.com/Lonely-Sails/nonebot-plugin-mc-watcher
 # lolmatch
