@@ -456,15 +456,6 @@ wheels = [
 ]
 
 [[package]]
-name = "bbcode"
-version = "1.1.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/70/67/526c92e1c4cbba188766871c2fed76d98748c3b1d5a2028166fdd51d4204/bbcode-1.1.0.tar.gz", hash = "sha256:eac4fb1d0f6c7ce5c41e4b5c0522562b15a1ac036fb9131adc59e9a28c7dc1d0", size = 11136, upload-time = "2019-12-31T16:10:26.326Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/2c/6d/18cdee16855ecf972c64969bb920735a4fbebb4f2b0a3b3881acb5fb7728/bbcode-1.1.0-py2.py3-none-any.whl", hash = "sha256:83802f4b40c92426841a98350bd6ff9ea8fdf8f9b37df1968a88c5864fd225fa", size = 11264, upload-time = "2019-12-31T16:10:24.774Z" },
-]
-
-[[package]]
 name = "beautifulsoup4"
 version = "4.13.5"
 source = { registry = "https://pypi.org/simple" }
@@ -2208,28 +2199,6 @@ wheels = [
 ]
 
 [[package]]
-name = "msvc-runtime"
-version = "14.44.35112"
-source = { registry = "https://pypi.org/simple" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/79/6d/db7a1f232aaaab3fb639db8d5c5d846af32ebed9dcb2373335de8767169b/msvc_runtime-14.44.35112-cp311-cp311-win32.whl", hash = "sha256:438a584930820238141162ef9b92bd8099ccca62a67fa0ddef63ed88b8eb4e0d", size = 1921504, upload-time = "2025-08-08T03:57:50.173Z" },
-    { url = "https://files.pythonhosted.org/packages/ce/92/5a10262c2a489d5854f96d69e287923d6f720c4935dd26634deb7a5426e9/msvc_runtime-14.44.35112-cp311-cp311-win_amd64.whl", hash = "sha256:aba7fbe71897d25ed53fbb7f391e9f50289378a8a9ae218ba18530c663448391", size = 1921911, upload-time = "2025-08-08T03:57:51.814Z" },
-    { url = "https://files.pythonhosted.org/packages/cc/33/88002539f2f5f2cc1fe978bf44cc5d140044473326da3baf52d99a6d8128/msvc_runtime-14.44.35112-cp311-cp311-win_arm64.whl", hash = "sha256:3a9c137951944fdc121377947bb4787dcd1007b505d7cf26f62d308d2b8df280", size = 3208236, upload-time = "2025-08-08T03:57:53.338Z" },
-    { url = "https://files.pythonhosted.org/packages/1f/7d/f86050e24fd78e76e56145b326bfd3e7ae2c028e87e0732802a0c5144223/msvc_runtime-14.44.35112-cp312-cp312-win32.whl", hash = "sha256:7c5af6756056dbf6f3593f69b0f4575dbbd9e8ec10d3108ff00437da811a7b67", size = 1921505, upload-time = "2025-08-08T03:57:54.509Z" },
-    { url = "https://files.pythonhosted.org/packages/21/3b/134d04268ab8e35853cd007582076429b45d60d6abb1036d159be9c50342/msvc_runtime-14.44.35112-cp312-cp312-win_amd64.whl", hash = "sha256:32f9c706009e16ccc319d6947ce3bffe20e5192bee52b18cf48313f9e7bedfbe", size = 1921899, upload-time = "2025-08-08T03:57:55.648Z" },
-    { url = "https://files.pythonhosted.org/packages/a0/38/f245d6d30a76655293575683aaa5f72a7a70fc8efa1637bf6fd9e5e7e665/msvc_runtime-14.44.35112-cp312-cp312-win_arm64.whl", hash = "sha256:62f272c51f30ce0de1b7a796e50af4d3911b76cbc9bc909917435d094f68d5fe", size = 3208186, upload-time = "2025-08-08T03:57:57.401Z" },
-    { url = "https://files.pythonhosted.org/packages/b0/3b/590fcbf92fee8f0d3ac46cd8b32069b058d6ce7bfb8be6c07a35d9c9188b/msvc_runtime-14.44.35112-cp313-cp313-win32.whl", hash = "sha256:e60781114472891c34fe14cc45a19ac28d80e0084dfbce882b7475c40c743152", size = 1921506, upload-time = "2025-08-08T03:57:58.888Z" },
-    { url = "https://files.pythonhosted.org/packages/fe/17/7a1eace5a7c6083bd99db861625c08bb37010dfbe90ed7a0194ae0281689/msvc_runtime-14.44.35112-cp313-cp313-win_amd64.whl", hash = "sha256:d4f6cf106aaf235f2a90952f9ec7de49e9946323880d051abf9745a6d4bf60bf", size = 1921893, upload-time = "2025-08-08T03:58:00.234Z" },
-    { url = "https://files.pythonhosted.org/packages/33/0d/88d6183846ad33b4a8fcb82fc86f26f9b7e21d776a925b6c8ab89618234a/msvc_runtime-14.44.35112-cp313-cp313-win_arm64.whl", hash = "sha256:359152dc9769559fee4ffdaa19f1fc2b72ab1535631a6105116776b263a235ac", size = 3208191, upload-time = "2025-08-08T03:58:02.35Z" },
-    { url = "https://files.pythonhosted.org/packages/d7/9c/b9ee5402fe9daf6f4dba458f11238289c606df05e0cc9f0750d5ada4ff3b/msvc_runtime-14.44.35112-cp314-cp314-win32.whl", hash = "sha256:99c22caa2755c76cfa34b741e96bee99c461480d709fb9c582492ccc0f03c7ae", size = 1976509, upload-time = "2025-08-08T03:58:03.698Z" },
-    { url = "https://files.pythonhosted.org/packages/d2/48/7fb574a4bfa697574a7dc7105bc15ef6882125e7c77c794c5e73429de832/msvc_runtime-14.44.35112-cp314-cp314-win_amd64.whl", hash = "sha256:af179a6c552070e660493765efd5856283af3fed971ddc3577203a7d3f1ee8e7", size = 1976906, upload-time = "2025-08-08T03:58:05.079Z" },
-    { url = "https://files.pythonhosted.org/packages/93/b3/bdb7c215d1080ea08deb5e151dc261f74f5b1d25544947e31e902eb1253f/msvc_runtime-14.44.35112-cp314-cp314-win_arm64.whl", hash = "sha256:81eb9346ab2a269ea934bf13492fe5c1cd50af871a2fbb973f0a514031e81b6a", size = 3300540, upload-time = "2025-08-08T03:58:06.52Z" },
-    { url = "https://files.pythonhosted.org/packages/95/99/271ff26cf07d875766efa4a376fe9415c033f07fe85a1371a071aaa37aca/msvc_runtime-14.44.35112-cp314-cp314t-win32.whl", hash = "sha256:38d64f2db707be465a79c87f0bec347249af89614550d10ed0345f6a7f80cf73", size = 1976674, upload-time = "2025-08-08T03:58:07.902Z" },
-    { url = "https://files.pythonhosted.org/packages/47/eb/76fd58fd64209e7f3dbfe59237e2c49ee6bdd4c21eba9efe5a2354dacd3e/msvc_runtime-14.44.35112-cp314-cp314t-win_amd64.whl", hash = "sha256:1105f8f8117ee210b85bd8c771dbefff8f8d35771ee7ce3291ddd91d2a03eff1", size = 1977068, upload-time = "2025-08-08T03:58:09.376Z" },
-    { url = "https://files.pythonhosted.org/packages/e2/38/b1ff1734e257c99a6450c60a1632d0c9ddbdb049ee4095439a591a0949a5/msvc_runtime-14.44.35112-cp314-cp314t-win_arm64.whl", hash = "sha256:a2ab094e35fa04172f6fd5cfc7d2a2017755ea9c3ff39cad5c2a4456e0bff689", size = 3300780, upload-time = "2025-08-08T03:58:11.061Z" },
-]
-
-[[package]]
 name = "multidict"
 version = "6.6.4"
 source = { registry = "https://pypi.org/simple" }
@@ -2394,25 +2363,6 @@ wheels = [
 ]
 
 [[package]]
-name = "nonebot-plugin-acgalaxy"
-version = "1.1.1"
-source = { editable = "plugins/nonebot-plugin-ACGalaxy" }
-dependencies = [
-    { name = "httpx" },
-    { name = "nonebot-plugin-alconna" },
-    { name = "nonebot2" },
-    { name = "playwright" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = ">=0.18.0,<1.0.0" },
-    { name = "nonebot-plugin-alconna", specifier = ">=0.38.0" },
-    { name = "nonebot2", specifier = ">=2.2.0" },
-    { name = "playwright", specifier = ">=1.36.0" },
-]
-
-[[package]]
 name = "nonebot-plugin-alconna"
 version = "0.60.3"
 source = { registry = "https://pypi.org/simple" }
@@ -2486,39 +2436,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/5c/21/e0d2d1a3b11962183bc86fc3a48d5f8b41b91761a488f01a5d8d4467d331/nonebot_plugin_datastore-1.3.1.tar.gz", hash = "sha256:099c65ee2edc6c4216f6b9b7dd67aac86d1d050bc9a2195c835eab709be9d1a8", size = 19498, upload-time = "2025-08-13T15:03:19.459Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4a/3a/3742894d5c774ec9fcc786ef629a058e21760d22c0c7acdc9a7820b57e57/nonebot_plugin_datastore-1.3.1-py3-none-any.whl", hash = "sha256:3f6fa91e9fac8edd143b7213371307c40598faa3c2a5f20fbda1f3b686a4fa95", size = 26791, upload-time = "2025-08-13T15:03:18.244Z" },
-]
-
-[[package]]
-name = "nonebot-plugin-duel"
-source = { editable = "plugins/nonebot-plugin-duel" }
-dependencies = [
-    { name = "nonebot-adapter-onebot" },
-    { name = "nonebot2" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "nonebot-adapter-onebot", specifier = ">=2.0.0" },
-    { name = "nonebot2", specifier = ">=2.0.0" },
-]
-
-[[package]]
-name = "nonebot-plugin-emojimix"
-version = "0.4.1"
-source = { editable = "plugins/nonebot-plugin-emojimix" }
-dependencies = [
-    { name = "emoji" },
-    { name = "httpx" },
-    { name = "nonebot-plugin-alconna" },
-    { name = "nonebot2" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "emoji", specifier = ">=2.0.0,<3.0.0" },
-    { name = "httpx", specifier = ">=0.26.0,<1.0.0" },
-    { name = "nonebot-plugin-alconna", specifier = ">=0.38.0,<1.0.0" },
-    { name = "nonebot2", specifier = ">=2.3.0,<3.0.0" },
 ]
 
 [[package]]
@@ -2598,25 +2515,6 @@ wheels = [
 ]
 
 [[package]]
-name = "nonebot-plugin-imagetools"
-version = "0.5.1"
-source = { editable = "plugins/nonebot-plugin-imagetools" }
-dependencies = [
-    { name = "httpx" },
-    { name = "nonebot-plugin-alconna" },
-    { name = "nonebot2" },
-    { name = "pil-utils" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = ">=0.20.0,<1.0.0" },
-    { name = "nonebot-plugin-alconna", specifier = ">=0.40.1,<1.0.0" },
-    { name = "nonebot2", specifier = ">=2.3.0,<3.0.0" },
-    { name = "pil-utils", specifier = ">=0.2.0,<0.3.0" },
-]
-
-[[package]]
 name = "nonebot-plugin-localstore"
 version = "0.7.4"
 source = { registry = "https://pypi.org/simple" }
@@ -2647,26 +2545,6 @@ requires-dist = [
     { name = "nonebot2", specifier = ">=2.4.4" },
     { name = "sketchbook-py", specifier = "==0.2.1" },
 ]
-
-[[package]]
-name = "nonebot-plugin-mcmod"
-version = "1.3.7b4"
-source = { editable = "plugins/nonebot-plugin-mcmod" }
-dependencies = [
-    { name = "aiohttp" },
-    { name = "beautifulsoup4" },
-    { name = "nonebot-adapter-onebot" },
-    { name = "nonebot2" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiohttp", specifier = ">=3.11.0" },
-    { name = "beautifulsoup4", specifier = ">=4.12.0" },
-    { name = "nonebot-adapter-onebot", specifier = ">=2.0.0" },
-    { name = "nonebot2", specifier = ">=2.3.0" },
-]
-provides-extras = ["dev"]
 
 [[package]]
 name = "nonebot-plugin-meme-stickers"
@@ -3126,36 +3004,6 @@ dev = [
 ]
 
 [[package]]
-name = "nonebot-plugin-zssm"
-version = "0.3.7"
-source = { editable = "plugins/nonebot-plugin-zssm" }
-dependencies = [
-    { name = "httpx" },
-    { name = "nonebot-plugin-alconna" },
-    { name = "nonebot2", extra = ["fastapi", "websockets"] },
-    { name = "pillow" },
-    { name = "playwright" },
-    { name = "pymupdf" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "nonebot-plugin-alconna", specifier = ">=0.57.2" },
-    { name = "nonebot2", extras = ["fastapi", "websockets"] },
-    { name = "pillow", specifier = ">=11.0.0" },
-    { name = "playwright", specifier = ">=1.51.0" },
-    { name = "pymupdf", specifier = ">=1.25.5" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "nonebot-adapter-satori", specifier = ">=0.13.4" },
-    { name = "pre-commit", specifier = "~=4.1" },
-    { name = "ruff", specifier = "~=0.9" },
-]
-
-[[package]]
 name = "nonebot2"
 version = "2.4.4"
 source = { registry = "https://pypi.org/simple" }
@@ -3182,9 +3030,6 @@ fastapi = [
 ]
 httpx = [
     { name = "httpx", extra = ["http2"] },
-]
-websockets = [
-    { name = "websockets" },
 ]
 
 [[package]]
@@ -3381,24 +3226,6 @@ wheels = [
 ]
 
 [[package]]
-name = "opencv-python-headless"
-version = "4.11.0.86"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/36/2f/5b2b3ba52c864848885ba988f24b7f105052f68da9ab0e693cc7c25b0b30/opencv-python-headless-4.11.0.86.tar.gz", hash = "sha256:996eb282ca4b43ec6a3972414de0e2331f5d9cda2b41091a49739c19fb843798", size = 95177929, upload-time = "2025-01-16T13:53:40.22Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/dc/53/2c50afa0b1e05ecdb4603818e85f7d174e683d874ef63a6abe3ac92220c8/opencv_python_headless-4.11.0.86-cp37-abi3-macosx_13_0_arm64.whl", hash = "sha256:48128188ade4a7e517237c8e1e11a9cdf5c282761473383e77beb875bb1e61ca", size = 37326460, upload-time = "2025-01-16T13:52:57.015Z" },
-    { url = "https://files.pythonhosted.org/packages/3b/43/68555327df94bb9b59a1fd645f63fafb0762515344d2046698762fc19d58/opencv_python_headless-4.11.0.86-cp37-abi3-macosx_13_0_x86_64.whl", hash = "sha256:a66c1b286a9de872c343ee7c3553b084244299714ebb50fbdcd76f07ebbe6c81", size = 56723330, upload-time = "2025-01-16T13:55:45.731Z" },
-    { url = "https://files.pythonhosted.org/packages/45/be/1438ce43ebe65317344a87e4b150865c5585f4c0db880a34cdae5ac46881/opencv_python_headless-4.11.0.86-cp37-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:6efabcaa9df731f29e5ea9051776715b1bdd1845d7c9530065c7951d2a2899eb", size = 29487060, upload-time = "2025-01-16T13:51:59.625Z" },
-    { url = "https://files.pythonhosted.org/packages/dd/5c/c139a7876099916879609372bfa513b7f1257f7f1a908b0bdc1c2328241b/opencv_python_headless-4.11.0.86-cp37-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:0e0a27c19dd1f40ddff94976cfe43066fbbe9dfbb2ec1907d66c19caef42a57b", size = 49969856, upload-time = "2025-01-16T13:53:29.654Z" },
-    { url = "https://files.pythonhosted.org/packages/95/dd/ed1191c9dc91abcc9f752b499b7928aacabf10567bb2c2535944d848af18/opencv_python_headless-4.11.0.86-cp37-abi3-win32.whl", hash = "sha256:f447d8acbb0b6f2808da71fddd29c1cdd448d2bc98f72d9bb78a7a898fc9621b", size = 29324425, upload-time = "2025-01-16T13:52:49.048Z" },
-    { url = "https://files.pythonhosted.org/packages/86/8a/69176a64335aed183529207ba8bc3d329c2999d852b4f3818027203f50e6/opencv_python_headless-4.11.0.86-cp37-abi3-win_amd64.whl", hash = "sha256:6c304df9caa7a6a5710b91709dd4786bf20a74d57672b3c31f7033cc638174ca", size = 39402386, upload-time = "2025-01-16T13:52:56.418Z" },
-]
-
-[[package]]
 name = "packaging"
 version = "25.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3419,24 +3246,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/8d/30/39c44f7af6e41673819aad87f6dd00a6c1121d8b792abad5ede41840bcca/picimagesearch-3.12.11.tar.gz", hash = "sha256:d5d0678798cbb7fdddcbd910a98ab0ff0333c23b94a8358ab8045017be459566", size = 601143, upload-time = "2025-08-26T19:16:30.83Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d9/5d/d60f530c43cb1a316bf402f222ba1e1b25758b9bb7549dd1a276310abb71/picimagesearch-3.12.11-py3-none-any.whl", hash = "sha256:1b6e04d0d3518a7b4957098b53683a11ea26ff6e69bb0f3d0de7df393a898a20", size = 68417, upload-time = "2025-08-26T19:16:29.513Z" },
-]
-
-[[package]]
-name = "pil-utils"
-version = "0.2.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "bbcode" },
-    { name = "msvc-runtime", marker = "sys_platform == 'win32'" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "opencv-python-headless" },
-    { name = "pillow" },
-    { name = "skia-python" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/a3/7a/69d326549b848f1fcad1badd8717208256fe12bc4e72666e3e5b3d13a165/pil_utils-0.2.2.tar.gz", hash = "sha256:4d7855ec387691dec5eddaaef2583d82b4855c13006dc980c7fffb7bd35bc4ef", size = 14423, upload-time = "2024-11-30T05:00:50.926Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/14/e1/4f537d2f0f18f081489a678478ef675cf01eb6bdf8cf3c64be4caabaf4a9/pil_utils-0.2.2-py3-none-any.whl", hash = "sha256:6fec6ba0caebddffdcdb0b0b60719968173ddc15427bded47f81c7ba121a0211", size = 15512, upload-time = "2024-11-30T05:00:43.028Z" },
 ]
 
 [[package]]
@@ -4011,21 +3820,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/55/b3/6d2b3f149bc5413b0a29761c2c5832d8ce904a1d7f621e86616d96f505cc/pymdown_extensions-10.16.1.tar.gz", hash = "sha256:aace82bcccba3efc03e25d584e6a22d27a8e17caa3f4dd9f207e49b787aa9a91", size = 853277, upload-time = "2025-07-28T16:19:34.167Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e4/06/43084e6cbd4b3bc0e80f6be743b2e79fbc6eed8de9ad8c629939fa55d972/pymdown_extensions-10.16.1-py3-none-any.whl", hash = "sha256:d6ba157a6c03146a7fb122b2b9a121300056384eafeec9c9f9e584adfdb2a32d", size = 266178, upload-time = "2025-07-28T16:19:31.401Z" },
-]
-
-[[package]]
-name = "pymupdf"
-version = "1.26.4"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/90/35/031556dfc0d332d8e9ed9b61ca105138606d3f8971b9eb02e20118629334/pymupdf-1.26.4.tar.gz", hash = "sha256:be13a066d42bfaed343a488168656637c4d9843ddc63b768dc827c9dfc6b9989", size = 83077563, upload-time = "2025-08-25T14:20:29.499Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/27/ae/3be722886cc7be2093585cd94f466db1199133ab005645a7a567b249560f/pymupdf-1.26.4-cp39-abi3-macosx_10_9_x86_64.whl", hash = "sha256:cb95562a0a63ce906fd788bdad5239063b63068cf4a991684f43acb09052cb99", size = 23061974, upload-time = "2025-08-25T14:16:58.811Z" },
-    { url = "https://files.pythonhosted.org/packages/fc/b0/9a451d837e1fe18ecdbfbc34a6499f153c8a008763229cc634725383a93f/pymupdf-1.26.4-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:67e9e6b45832c33726651c2a031e9a20108fd9e759140b9e843f934de813a7ff", size = 22410112, upload-time = "2025-08-25T14:17:24.511Z" },
-    { url = "https://files.pythonhosted.org/packages/d8/13/0916e8e02cb5453161fb9d9167c747d0a20d58633e30728645374153f815/pymupdf-1.26.4-cp39-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:2604f687dd02b6a1b98c81bd8becfc0024899a2d2085adfe3f9e91607721fd22", size = 23454948, upload-time = "2025-08-25T21:20:07.71Z" },
-    { url = "https://files.pythonhosted.org/packages/4e/c6/d3cfafc75d383603884edeabe4821a549345df954a88d79e6764e2c87601/pymupdf-1.26.4-cp39-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:973a6dda61ebd34040e4df3753bf004b669017663fbbfdaa294d44eceba98de0", size = 24060686, upload-time = "2025-08-25T14:17:56.536Z" },
-    { url = "https://files.pythonhosted.org/packages/72/08/035e9d22c801e801bba50c6745bc90ba8696a042fe2c68793e28bf0c3b07/pymupdf-1.26.4-cp39-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:299a49797df5b558e695647fa791329ba3911cbbb31ed65f24a6266c118ef1a7", size = 24265046, upload-time = "2025-08-25T14:18:21.238Z" },
-    { url = "https://files.pythonhosted.org/packages/28/8c/c201e4846ec0fb6ae5d52aa3a5d66f9355f0c69fb94230265714df0de65e/pymupdf-1.26.4-cp39-abi3-win32.whl", hash = "sha256:51b38379aad8c71bd7a8dd24d93fbe7580c2a5d9d7e1f9cd29ebbba315aa1bd1", size = 17127332, upload-time = "2025-08-25T14:18:39.132Z" },
-    { url = "https://files.pythonhosted.org/packages/d1/c4/87d27b108c2f6d773aa5183c5ae367b2a99296ea4bc16eb79f453c679e30/pymupdf-1.26.4-cp39-abi3-win_amd64.whl", hash = "sha256:0b6345a93a9afd28de2567e433055e873205c52e6b920b129ca50e836a3aeec6", size = 18743491, upload-time = "2025-08-25T14:19:01.104Z" },
 ]
 
 [[package]]
@@ -5943,19 +5737,14 @@ dependencies = [
     { name = "multidict" },
     { name = "nb-cli" },
     { name = "nonebot-adapter-onebot" },
-    { name = "nonebot-plugin-acgalaxy" },
     { name = "nonebot-plugin-alconna" },
     { name = "nonebot-plugin-apscheduler" },
     { name = "nonebot-plugin-datastore" },
-    { name = "nonebot-plugin-duel" },
-    { name = "nonebot-plugin-emojimix" },
     { name = "nonebot-plugin-fortune" },
     { name = "nonebot-plugin-githubcard" },
     { name = "nonebot-plugin-heweather" },
     { name = "nonebot-plugin-htmlrender" },
-    { name = "nonebot-plugin-imagetools" },
     { name = "nonebot-plugin-manosaba-memes" },
-    { name = "nonebot-plugin-mcmod" },
     { name = "nonebot-plugin-meme-stickers" },
     { name = "nonebot-plugin-memes" },
     { name = "nonebot-plugin-multincm" },
@@ -5972,7 +5761,6 @@ dependencies = [
     { name = "nonebot-plugin-whateat-pic" },
     { name = "nonebot-plugin-whoasked" },
     { name = "nonebot-plugin-wordcloud" },
-    { name = "nonebot-plugin-zssm" },
     { name = "nonebot2", extra = ["fastapi"] },
     { name = "pillow" },
     { name = "playwright" },
@@ -6024,19 +5812,14 @@ requires-dist = [
     { name = "multidict", specifier = ">=6.0.0,!=6.3.2" },
     { name = "nb-cli", specifier = ">=1.3.0,<2.0.0" },
     { name = "nonebot-adapter-onebot", specifier = ">=2.3.1,<3.0.0" },
-    { name = "nonebot-plugin-acgalaxy", editable = "plugins/nonebot-plugin-ACGalaxy" },
     { name = "nonebot-plugin-alconna", specifier = ">=0.59.0" },
     { name = "nonebot-plugin-apscheduler", specifier = ">=0.5,<0.6" },
     { name = "nonebot-plugin-datastore" },
-    { name = "nonebot-plugin-duel", editable = "plugins/nonebot-plugin-duel" },
-    { name = "nonebot-plugin-emojimix", editable = "plugins/nonebot-plugin-emojimix" },
     { name = "nonebot-plugin-fortune", editable = "plugins/nonebot_plugin_fortune" },
     { name = "nonebot-plugin-githubcard", editable = "plugins/nonebot_plugin_githubcard" },
     { name = "nonebot-plugin-heweather", editable = "plugins/nonebot-plugin-heweather" },
     { name = "nonebot-plugin-htmlrender", specifier = ">=0.6.0,<1.0.0" },
-    { name = "nonebot-plugin-imagetools", editable = "plugins/nonebot-plugin-imagetools" },
     { name = "nonebot-plugin-manosaba-memes", editable = "plugins/nonebot-plugin-manosaba-memes" },
-    { name = "nonebot-plugin-mcmod", editable = "plugins/nonebot-plugin-mcmod" },
     { name = "nonebot-plugin-meme-stickers", editable = "plugins/nonebot-plugin-meme-stickers" },
     { name = "nonebot-plugin-memes", editable = "plugins/nonebot-plugin-memes" },
     { name = "nonebot-plugin-multincm", editable = "plugins/nonebot-plugin-multincm" },
@@ -6053,7 +5836,6 @@ requires-dist = [
     { name = "nonebot-plugin-whateat-pic", editable = "plugins/nonebot-plugin-whateat-pic" },
     { name = "nonebot-plugin-whoasked", editable = "plugins/nonebot-plugin-whoasked" },
     { name = "nonebot-plugin-wordcloud", editable = "plugins/nonebot-plugin-wordcloud" },
-    { name = "nonebot-plugin-zssm", editable = "plugins/nonebot-plugin-zssm" },
     { name = "nonebot2", extras = ["fastapi"], specifier = ">=2.3.3,<3.0.0" },
     { name = "nonebug", marker = "extra == 'dev'", specifier = ">=0.4,<0.5" },
     { name = "pillow", specifier = ">=11.0.0" },
