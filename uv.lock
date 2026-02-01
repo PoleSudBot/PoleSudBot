@@ -1761,6 +1761,15 @@ wheels = [
 ]
 
 [[package]]
+name = "json-repair"
+version = "0.55.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c0/de/71d6bb078d167c0d0959776cee6b6bb8d2ad843f512a5222d7151dde4955/json_repair-0.55.1.tar.gz", hash = "sha256:b27aa0f6bf2e5bf58554037468690446ef26f32ca79c8753282adb3df25fb888", size = 39231, upload-time = "2026-01-23T09:37:20.93Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/56/da/289ba9eb550ae420cfc457926f6c49b87cacf8083ee9927e96921888a665/json_repair-0.55.1-py3-none-any.whl", hash = "sha256:a1bcc151982a12bc3ef9e9528198229587b1074999cfe08921ab6333b0c8e206", size = 29743, upload-time = "2026-01-23T09:37:19.404Z" },
+]
+
+[[package]]
 name = "kiwisolver"
 version = "1.4.9"
 source = { registry = "https://pypi.org/simple" }
@@ -2959,7 +2968,7 @@ dependencies = [
     { name = "nonebot-plugin-localstore" },
     { name = "nonebot-plugin-orm" },
     { name = "nonebot-plugin-uninfo" },
-    { name = "nonebot2", extra = ["fastapi"] },
+    { name = "nonebot2" },
     { name = "tzdata" },
     { name = "wordcloud" },
 ]
@@ -2975,7 +2984,7 @@ requires-dist = [
     { name = "nonebot-plugin-localstore", specifier = ">=0.6.0" },
     { name = "nonebot-plugin-orm", specifier = ">=0.7.0" },
     { name = "nonebot-plugin-uninfo", specifier = ">=0.6.2" },
-    { name = "nonebot2", extras = ["fastapi"], specifier = ">=2.2.0" },
+    { name = "nonebot2", specifier = ">=2.2.0" },
     { name = "tzdata" },
     { name = "wordcloud", specifier = ">=1.8.1" },
 ]
@@ -2993,6 +3002,7 @@ dev = [
     { name = "nonebot-adapter-onebot", specifier = ">=2.4.4" },
     { name = "nonebot-plugin-datastore", specifier = ">=1.3.0" },
     { name = "nonebot-plugin-orm", extras = ["default"], specifier = ">=0.7.4" },
+    { name = "nonebot2", extras = ["fastapi"], specifier = ">=2.2.0" },
     { name = "nonebug", specifier = ">=0.4.3" },
     { name = "nonebug-saa", specifier = ">=0.5.0" },
     { name = "poethepoet", specifier = ">=0.31.1" },
@@ -5733,6 +5743,7 @@ dependencies = [
     { name = "dateparser" },
     { name = "feedparser" },
     { name = "imagehash" },
+    { name = "json-repair" },
     { name = "lxml" },
     { name = "multidict" },
     { name = "nb-cli" },
@@ -5808,6 +5819,7 @@ requires-dist = [
     { name = "dateparser", specifier = ">=1.2.0,<2.0.0" },
     { name = "feedparser", specifier = ">=6.0.11,<7.0.0" },
     { name = "imagehash", specifier = ">=4.3.1,<5.0.0" },
+    { name = "json-repair", specifier = ">=0.54.0,<0.60.0" },
     { name = "lxml", specifier = ">=5.1.0,<6.0.0" },
     { name = "multidict", specifier = ">=6.0.0,!=6.3.2" },
     { name = "nb-cli", specifier = ">=1.3.0,<2.0.0" },

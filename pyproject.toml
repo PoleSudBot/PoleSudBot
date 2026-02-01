@@ -53,7 +53,7 @@ dependencies = [
     "nonebot-plugin-uninfo>0.4.1",
     "nonebot-plugin-waiter>=0.8.1,<0.9.0",
     "multidict>=6.0.0,!=6.3.2",
-    "json_repair=^0.54.0",
+    "json_repair>=0.54.0,<0.60.0",
     "alibabacloud-devops20210625>=5.0.2,<6.0.0",
     "nonebot-plugin-datastore",
     "nonebot-plugin-memes",
