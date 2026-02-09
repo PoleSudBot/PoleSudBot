@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Message Render</title>
+    <style>
+        body {
+            margin: 15px;
+            padding: 10px;
+            font-family: sans-serif;
+            background-color: #f8f9fa;
+            border-radius: 8px;
+            width: fit-content;
+            min-width: 300px;
+            max-width: 600px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        p {
+            white-space: pre-wrap;
+            margin-top: 0.5em;
+            margin-bottom: 0.5em;
+            line-height: 1.6;
+            word-wrap: break-word;
+        }
+
+        img {
+            max-width: 100%;
+            height: auto;
+            display: block;
+            margin-top: 8px;
+            margin-bottom: 8px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+
+<body>
+    {{ content | safe }}
+</body>
+
+</html>
