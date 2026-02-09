@@ -164,3 +164,9 @@ requirements.prod.in
 plugins/
 config/
 cache/
+
+# === 自定义修改 ===
+# 允许追踪 zhenxun/plugins 下的内容
+!zhenxun/plugins/
+# 再次强调忽略该目录下的 pycache (双重保险，防止白名单覆盖了全局忽略)
+zhenxun/plugins/**/__pycache__/
