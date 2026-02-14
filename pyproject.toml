@@ -75,6 +75,8 @@ dependencies = [
     "nonebot-plugin-manosaba-memes",
     "playwright-stealth>=2.0.1",
     "tomli-w>=1.2.0",
+    "asyncpg>=0.30.0",
+    "cryptography>=44.0.3",
 ]
 # --- 修改部分结束 ---
 
