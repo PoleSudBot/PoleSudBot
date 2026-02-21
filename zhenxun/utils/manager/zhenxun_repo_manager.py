@@ -74,10 +74,8 @@ class ZhenxunRepoConfig:
     WEBUI_BACKUP_PATH = DATA_PATH / "web_ui" / "backup_public"
 
     # 资源管理相关配置
-    RESOURCE_GIT = "https://github.com/zhenxun-org/zhenxun-bot-resources.git"
-    RESOURCE_GITHUB_URL = (
-        "https://github.com/zhenxun-org/zhenxun-bot-resources/tree/main"
-    )
+    RESOURCE_GIT = "https://github.com/PoleSudBot/resources.git"
+    RESOURCE_GITHUB_URL = "https://github.com/PoleSudBot/resources/tree/main"
     RESOURCE_ZIP_FILE_STRING = "resources.zip"
     RESOURCE_ZIP_FILE = TEMP_PATH / RESOURCE_ZIP_FILE_STRING
     RESOURCE_UNZIP_PATH = TEMP_PATH / "resources"
@@ -408,20 +406,13 @@ class ZhenxunRepoManagerClass:
             branch: 分支名称
             force: 是否强制更新
         """
-        if source == "git":
-            return await GithubRepoManager.update_via_git(
-                self.config.RESOURCE_GIT,
-                self.config.RESOURCE_PATH,
-                branch=branch,
-                force=force,
-            )
-        else:
-            return await AliyunRepoManager.update_via_git(
-                self.config.RESOURCE_GIT,
-                self.config.RESOURCE_PATH,
-                branch=branch,
-                force=force,
-            )
+        # 用户已使用私人资源仓库，阿里云镜像不再适用，强制使用 git 更新
+        return await GithubRepoManager.update_via_git(
+            self.config.RESOURCE_GIT,
+            self.config.RESOURCE_PATH,
+            branch=branch,
+            force=force,
+        )
 
     async def resources_update(
         self,

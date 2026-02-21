@@ -46,7 +46,7 @@ class UpdateManager:
             "HibiKier", "zhenxun_bot", "__version__"
         )
         res_commit_date_task = cls._get_latest_commit_date(
-            "zhenxun-org", "zhenxun-bot-resources", "__version__"
+            "PoleSudBot", "resources", "__version__"
         )
 
         (
