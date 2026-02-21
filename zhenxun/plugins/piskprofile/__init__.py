@@ -6,7 +6,7 @@ from nonebot.plugin import PluginMetadata
 from nonebot_plugin_session import EventSession
 
 from zhenxun.configs.config import Config
-from zhenxun.configs.utils import PluginCdBlock, PluginExtraData, RegisterConfig
+from zhenxun.configs.utils.models import PluginCdBlock, PluginExtraData, RegisterConfig
 from zhenxun.services.log import logger
 from zhenxun.utils.message import MessageUtils
 
@@ -17,27 +17,24 @@ __plugin_meta__ = PluginMetadata(
     name="PJSK个人档案",
     description="Project Sekai 个人档案查询",
     usage="""
-## PJSK 个人档案助手
+## 🎮 PJSK 个人档案助手
 
+截图数据与前端页面由 Moesekai (pjsk.moe) 提供，作者：Exmeaning (東雪)。
 
-### 绑定与解绑
-- `s绑定 [区服] <游戏ID>` — 绑定账号（区服可选，默认 jp）
-  - 示例：`s绑定 jp 123456789`、`s绑定 123456789`
-- `s解绑` — 解除当前绑定
+### 🔗 绑定与解绑
 
-### 查询档案
-- `s个人信息` — 查询已绑定账号的档案截图
-- `s查询 [区服] <游戏ID>` — 直接查询指定账号（无需绑定）
-  - 示例：`s查询 cn 987654321`
+- **s绑定 [区服] <游戏ID>** - 绑定账号（区服可选，默认 jp）
+  示例：`s绑定 jp 123456789`
+  示例：`s绑定 123456789`
+- **s解绑** - 解除当前绑定
 
-> 区服可选值：jp / cn / tw，默认 jp
-> 查询类指令有 3 秒冷却时间
+### 🔍 查询档案
 
----
-**致谢 & 数据来源**
-- 截图数据与前端页面由 SnowyBot (snowyviewer.exmeaning.com) 提供，
-  作者：Exmeaning (東雪)。
+- **s个人信息** - 查询已绑定账号的档案截图
+- **s查询 [区服] <游戏ID>** - 直接查询指定账号（无需绑定）
+  示例：`s查询 cn 987654321`
 
+> 💡 提示：区服可选值：jp / cn / tw，默认 jp。查询类指令有 3 秒冷却时间。
 """.strip(),
     extra=PluginExtraData(
         author="kiyu (k1yuyu)",
