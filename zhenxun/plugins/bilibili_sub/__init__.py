@@ -1,7 +1,7 @@
 import asyncio
-import time
 from datetime import datetime
 from pathlib import Path
+import time
 from typing import List, cast
 
 import nonebot
@@ -38,69 +38,43 @@ __plugin_meta__ = PluginMetadata(
     name="B站订阅",
     description="非常便利的B站订阅通知",
     usage="""
-## B站订阅
+## 📺 B站订阅
+
 一个功能强大且易于使用的B站订阅插件，支持UP主、直播和番剧。
 
 ### 📖 通用指令 (需要群管或更高权限)
 
-*   **`bilisub list`**
-    查看当前会话（群聊或私聊）的所有订阅。
-
-*   **`bilisub add [--live] <内容...>`**
-    为当前会话添加一个或多个订阅。
-    - `<内容>`: **UP主UID**、**直播间ID**、**番剧名称** 或 **番剧ID (ss/ep)**。
-    - `--live`: 添加直播间ID时必须使用此参数。
-    - **示例**:
-        - `bilisub add 732482333` (订阅UP主)
-        - `bilisub add --live 21452505` (订阅直播间)
-        - `bilisub add 葬送的芙莉莲` (通过名称订阅番剧)
-
-*   **`bilisub del <ID...>`**
-    从当前会话删除一个或多个订阅。ID通过 `bilisub list` 查看。
-
-*   **`bilisub config <ID...> <设置...>`**
-    为当前会话中的指定订阅ID批量配置推送选项。
-    - **推送类型**:
-        - `+dynamic` / `-dynamic`: 开启/关闭 **动态** 推送
-        - `+video` / `-video`: 开启/关闭 **视频/剧集** 推送
-        - `+live` / `-live`: 开启/关闭 **直播** 推送
-        - `+all` / `-all`: 开启/关闭 **全部** 推送
-    - **艾特全体**:
-        - `+at:dynamic` / `-at:dynamic`: 动态推送时@全体
-        - `+at:video` / `-at:video`: 视频/剧集推送时@全体
-        - `+at:live` / `-at:live`: 直播推送时@全体
-        - `+at:all` / `-at:all`: 所有推送都@全体
-    - **示例**: `bilisub config 3 4 +live -dynamic +at:live`
-
-*   **`bilisub clear`**
-    **[危险]** 清空当前会话的所有订阅，操作前会请求确认。
+- **bilisub list** - 查看当前会话（群聊或私聊）的所有订阅
+- **bilisub add [--live] <内容...>** - 为当前会话添加一个或多个订阅
+  `<内容>`: UP主UID、直播间ID、番剧名称 或 番剧ID (ss/ep)
+  `--live`: 添加直播间ID时必须使用此参数
+  示例：`bilisub add 732482333`
+  示例：`bilisub add --live 21452505`
+  示例：`bilisub add 葬送的芙莉莲`
+- **bilisub del <ID...>** - 从当前会话删除一个或多个订阅。ID通过 bilisub list 查看
+- **bilisub config <ID...> <设置...>** - 为当前会话中的指定订阅ID批量配置推送选项
+  推送类型: `+dynamic` / `-dynamic` (动态), `+video` / `-video` (视频/剧集), `+live` / `-live` (直播), `+all` / `-all` (全部)
+  艾特全体: `+at:dynamic` / `-at:dynamic` (动态@全体), `+at:video` / `-at:video` (视频/剧集@全体), `+at:live` / `-at:live` (直播@全体), `+at:all` / `-at:all` (全部@全体)
+  示例：`bilisub config 3 4 +live -dynamic +at:live`
+- **bilisub clear** - [危险] 清空当前会话的所有订阅，操作前会请求确认
 
 ### 🛠️ 超级用户指令
 
-*   **跨群管理与清空**
-    - 在 `add`, `del`, `list` 命令后附加 `-g, --group <群号...>` 参数，可以跨群管理订阅。
-    - `bilisub clear -g <群号...>`: 清空**指定群组**的订阅。
-    - `bilisub clear --all`: **[高危]** 清空**所有**目标（所有群和私聊）的订阅。
+- **bilisub add / del / list -g <群号...>** - 跨群管理订阅
+- **bilisub clear -g <群号...>** - 清空指定群组的订阅
+- **bilisub clear --all** - [高危] 清空所有目标（所有群和私聊）的订阅
+- **bilisub login** - 通过扫描二维码登录B站账号，以获取和保存凭证
+- **bilisub status** - 检查当前B站账号凭证的有效状态
+- **bilisub logout** - 清除已保存的B站凭证，退出登录
+- **bilisub checkall** - 立即对所有已订阅的项目进行一次更新检查
+- **bilisub forcepush <ID...>** - 强制推送指定ID订阅的最新内容，无论之前是否已推送
 
-*   **账号与全局管理**
-    - `bilisub login`: 通过扫描二维码登录B站账号，以获取和保存凭证。
-    - `bilisub status`: 检查当前B站账号凭证的有效状态。
-    - `bilisub logout`: 清除已保存的B站凭证，退出登录。
-    - `bilisub checkall`: 立即对所有已订阅的项目进行一次更新检查。
-    - `bilisub forcepush <ID...>`: 强制推送指定ID订阅的最新内容，无论之前是否已推送。
-
-### ⚙ 配置文件
-
-*   **下面的功能需要在配置文件或WebUI中修改**
-    - 检测时间间隔（分钟）
-    - 是否开启B站订阅定时休眠
-    - 是否开启广告过滤
-    - 是否推送动态中的图片
-
+> 💡 提示：相关配置（检测时间间隔、休眠、广告过滤等）需要在配置文件或WebUI中修改
 """.strip(),
     extra=PluginExtraData(
         author="HibiKier",
         version="1.2.1",
+        menu_type="一些工具",
         configs=[
             RegisterConfig(
                 module="bilibili_sub",
@@ -401,8 +375,8 @@ async def send_sub_msg(notification: Notification, sub: BiliSub, bot: Bot):
         logger.warning(f"B站订阅推送收到空消息列表: UID={sub.uid}")
         return
 
-    sub_targets: List[str] = cast(
-        List[str],
+    sub_targets: list[str] = cast(
+        list[str],
         await BiliSubTarget.filter(subscription_id=sub.id).values_list(
             "target_id", flat=True
         ),
@@ -511,4 +485,4 @@ async def send_sub_msg(notification: Notification, sub: BiliSub, bot: Bot):
     )
 
 
-from . import commands  # noqa: E402, F401
+from . import commands  # noqa: F401

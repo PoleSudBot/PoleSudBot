@@ -9,12 +9,13 @@ build-backend = "hatchling.build"
 # 项目核心元数据 (PEP 621)
 # =================================================================
 [project]
-name = "zhenxun_bot"
+name = "PoleSudBot"
 version = "0.2.4"
 description = "基于 Nonebot2 和 go-cqhttp 开发，以 postgresql 作为数据库，非常可爱的绪山真寻bot"
 requires-python = ">=3.10, <4.0"
 license = { text = "AGPL" }
 authors = [
+    { name = "PoleSudBot" },
     { name = "HibiKier", email = "775757368@qq.com" },
 ]
 
@@ -63,7 +64,6 @@ dependencies = [
     "nonebot-plugin-today-waifu",
     "nonebot-plugin-multincm",
     "nonebot-plugin-ottohzys",
-    "nonebot-plugin-resolver2",
     "nonebot-plugin-sticker-saver",
     "nonebot-plugin-githubcard",
     "nonebot-plugin-tarot",
@@ -77,6 +77,7 @@ dependencies = [
     "tomli-w>=1.2.0",
     "asyncpg>=0.30.0",
     "cryptography>=44.0.3",
+    "bilibili-api-python>=17.4.1",
 ]
 # --- 修改部分结束 ---
 

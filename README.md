@@ -6,36 +6,6 @@
 </div>
 
 <div align=center>
-<a href="./LICENSE">
-    <img src="https://img.shields.io/badge/license-AGPL3.0-FE7D37" alt="license">
-</a>
-<a href="https://www.python.org">
-    <img src="https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-blue" alt="python">
-</a>
-<a href="https://nonebot.dev/">
-    <img src="https://img.shields.io/badge/nonebot-v2.1.3-EA5252" alt="nonebot">
-</a>
-<a href="https://onebot.dev/">
-  <img src="https://img.shields.io/badge/OneBot-v11-black?style=social&logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABABAMAAABYR2ztAAAAIVBMVEUAAAAAAAADAwMHBwceHh4UFBQNDQ0ZGRkoKCgvLy8iIiLWSdWYAAAAAXRSTlMAQObYZgAAAQVJREFUSMftlM0RgjAQhV+0ATYK6i1Xb+iMd0qgBEqgBEuwBOxU2QDKsjvojQPvkJ/ZL5sXkgWrFirK4MibYUdE3OR2nEpuKz1/q8CdNxNQgthZCXYVLjyoDQftaKuniHHWRnPh2GCUetR2/9HsMAXyUT4/3UHwtQT2AggSCGKeSAsFnxBIOuAggdh3AKTL7pDuCyABcMb0aQP7aM4AnAbc/wHwA5D2wDHTTe56gIIOUA/4YYV2e1sg713PXdZJAuncdZMAGkAukU9OAn40O849+0ornPwT93rphWF0mgAbauUrEOthlX8Zu7P5A6kZyKCJy75hhw1Mgr9RAUvX7A3csGqZegEdniCx30c3agAAAABJRU5ErkJggg==" alt="onebot">
-</a>
-<a href="https://onebot.dev/">
-  <img src="https://img.shields.io/badge/OneBot-v12-black?style=social&logo=data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABABAMAAABYR2ztAAAAIVBMVEUAAAAAAAADAwMHBwceHh4UFBQNDQ0ZGRkoKCgvLy8iIiLWSdWYAAAAAXRSTlMAQObYZgAAAQVJREFUSMftlM0RgjAQhV+0ATYK6i1Xb+iMd0qgBEqgBEuwBOxU2QDKsjvojQPvkJ/ZL5sXkgWrFirK4MibYUdE3OR2nEpuKz1/q8CdNxNQgthZCXYVLjyoDQftaKuniHHWRnPh2GCUetR2/9HsMAXyUT4/3UHwtQT2AggSCGKeSAsFnxBIOuAggdh3AKTL7pDuCyABcMb0aQP7aM4AnAbc/wHwA5D2wDHTTe56gIIOUA/4YYV2e1sg713PXdZJAuncdZMAGkAukU9OAn40O849+0ornPwT93rphWF0mgAbauUrEOthlX8Zu7P5A6kZyKCJy75hhw1Mgr9RAUvX7A3csGqZegEdniCx30c3agAAAABJRU5ErkJggg==" alt="onebot">
-</a>
-<a href="https://bot.q.qq.com/wiki/">
-  <img src="https://img.shields.io/badge/QQ-Bot-lightgrey?style=social&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMTIuODIgMTMwLjg5Ij48ZyBkYXRhLW5hbWU9IuWbvuWxgiAyIj48ZyBkYXRhLW5hbWU9IuWbvuWxgiAxIj48cGF0aCBkPSJNNTUuNjMgMTMwLjhjLTcgMC0xMy45LjA4LTIwLjg2IDAtMTkuMTUtLjI1LTMxLjcxLTExLjQtMzQuMjItMzAuMy00LjA3LTMwLjY2IDE0LjkzLTU5LjIgNDQuODMtNjYuNjQgMi0uNTEgNS4yMS0uMzEgNS4yMS0xLjYzIDAtMi4xMy4xNC0yLjEzLjE0LTUuNTcgMC0uODktMS4zLTEuNDYtMi4yMi0yLjMxLTYuNzMtNi4yMy03LjY3LTEzLjQxLTEtMjAuMTggNS40LTUuNTIgMTEuODctNS40IDE3LjgtLjU5IDYuNDkgNS4yNiA2LjMxIDEzLjA4LS44NiAyMS0uNjguNzQtMS43OCAxLjYtMS43OCAyLjY3djQuMjFjMCAxLjM1IDIuMiAxLjYyIDQuNzkgMi4zNSAzMS4wOSA4LjY1IDQ4LjE3IDM0LjEzIDQ1IDY2LjM3LTEuNzYgMTguMTUtMTQuNTYgMzAuMjMtMzIuNyAzMC42My04LjAyLjE5LTE2LjA3LS4wMS0yNC4xMy0uMDF6IiBmaWxsPSIjMDI5OWZlIi8+PHBhdGggZD0iTTMxLjQ2IDExOC4zOGMtMTAuNS0uNjktMTYuOC02Ljg2LTE4LjM4LTE3LjI3LTMtMTkuNDIgMi43OC0zNS44NiAxOC40Ni00Ny44MyAxNC4xNi0xMC44IDI5Ljg3LTEyIDQ1LjM4LTMuMTkgMTcuMjUgOS44NCAyNC41OSAyNS44MSAyNCA0NS4yOS0uNDkgMTUuOS04LjQyIDIzLjE0LTI0LjM4IDIzLjUtNi41OS4xNC0xMy4xOSAwLTE5Ljc5IDAiIGZpbGw9IiNmZWZlZmUiLz48cGF0aCBkPSJNNDYuMDUgNzkuNThjLjA5IDUgLjIzIDkuODItNyA5Ljc3LTcuODItLjA2LTYuMS01LjY5LTYuMjQtMTAuMTktLjE1LTQuODItLjczLTEwIDYuNzMtOS44NHM2LjM3IDUuNTUgNi41MSAxMC4yNnoiIGZpbGw9IiMxMDlmZmUiLz48cGF0aCBkPSJNODAuMjcgNzkuMjdjLS41MyAzLjkxIDEuNzUgOS42NC01Ljg4IDEwLTcuNDcuMzctNi44MS00LjgyLTYuNjEtOS41LjItNC4zMi0xLjgzLTEwIDUuNzgtMTAuNDJzNi41OSA0Ljg5IDYuNzEgOS45MnoiIGZpbGw9IiMwODljZmUiLz48L2c+PC9nPjwvc3ZnPg==" alt="QQ">
-</a>
-<a href="https://github.com/psf/black">
-  <img src="https://img.shields.io/badge/code%20style-black-000000.svg?logo=python&logoColor=edb641" alt="black">
-</a>
-<a href="https://github.com/Microsoft/pyright">
-  <img src="https://img.shields.io/badge/types-pyright-797952.svg?logo=python&logoColor=edb641" alt="pyright">
-</a>
-<a href="https://github.com/astral-sh/ruff">
-  <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/charliermarsh/ruff/main/assets/badge/v2.json" alt="ruff">
-</a>
-</div>
-
-<div align=center>
 
 [![tencent-qq](https://img.shields.io/badge/%E7%BE%A4-是真寻酱哒-red?style=logo=tencent-qq)](https://qm.qq.com/q/mRNtLSl6uc)
 [![tencent-qq](https://img.shields.io/badge/%E7%BE%A4-真寻的技术群-c73e7e?style=logo=tencent-qq)](https://qm.qq.com/q/YYYt5rkMYc)
@@ -50,7 +20,9 @@
 
 <div align=center>
 
-## 绪山真寻 Bot
+## PoleSudBot
+
+_基于 [HibiKier/zhenxun_bot](https://github.com/HibiKier/zhenxun_bot) fork 并修改的机器人_
 
 </div>
 
@@ -67,14 +39,6 @@
 |       [LLOneBot](https://github.com/LLOneBot/LLOneBot)        | NTQQ |        linyuchen         | 可用 |
 |         [Napcat](https://github.com/NapNeko/NapCatQQ)         | NTQQ |         NapNeko          | 可用 |
 | [Lagrange.Core](https://github.com/LagrangeDev/Lagrange.Core) | NTQQ | LagrangeDev/Linwenxuan04 | 可用 |
-
-</div>
-
-<div align=center>
-
-<img width="100%" src="https://starify.komoridevs.icu/api/starify?owner=HibiKier&repo=zhenxun_bot" alt="starify" />
-
-<img src="https://api.star-history.com/svg?repos=HibiKier/zhenxun_bot&type=Timeline" alt="Star Trend" width="800" />
 
 </div>
 
@@ -152,18 +116,22 @@ AccessToken: PUBLIC_ZHENXUN_TEST
 
 ```bash
 # 获取代码
-git clone https://github.com/HibiKier/zhenxun_bot.git
+git clone https://github.com/PoleSudBot/PoleSudBot.git
 
 # 进入目录
-cd zhenxun_bot
+cd PoleSudBot
 
 # 安装依赖
-pip install poetry      # 安装 poetry
-poetry install          # 安装依赖
+pip install uv          # 安装 uv 包管理器
+uv sync                 # 安装依赖环境
 
 # 开始运行
-poetry run python bot.py
+uv run bot.py
 ```
+
+> [!TIP]
+> 本项目使用 `uv` 替代了原版的 `poetry`，并内置了 `nbm.py` 脚本来进行第三方插件和 Bot 本体的管理。
+> 首次部署时也可以直接使用：`python nbm.py init --install` 快速初始化运行环境！
 
 ## 📝 简单配置
 
@@ -338,29 +306,6 @@ LOGO 设计：[FrostN0v0](https://github.com/FrostN0v0)
 [Kyomotoi / AnimeThesaurus](https://github.com/Kyomotoi/AnimeThesaurus) ：一个~~特二刺螈~~（文爱）的适用于任何 bot 的词库  
 [Ailitonia / omega-miya](https://github.com/Ailitonia/omega-miya) ：基于 nonebot2 的 qq 机器人  
 [KimigaiiWuyi / GenshinUID](https://github.com/KimigaiiWuyi/GenshinUID) ：一个基于 HoshinoBot/NoneBot2 的原神 UID 查询插件
-
-## 📊 统计与活跃贡献者
-
-<a href="https://next.ossinsight.io/widgets/official/compose-last-28-days-stats?repo_id=368008334" target="_blank" style="display: block" align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://next.ossinsight.io/widgets/official/compose-last-28-days-stats/thumbnail.png?repo_id=368008334&image_size=auto&color_scheme=dark" width="800" height="auto">
-    <img alt="Performance Stats of HibiKier/zhenxun_bot - Last 28 days" src="https://next.ossinsight.io/widgets/official/compose-last-28-days-stats/thumbnail.png?repo_id=368008334&image_size=auto&color_scheme=light" width="800" height="auto">
-  </picture>
-</a>
-<a href="https://next.ossinsight.io/widgets/official/compose-recent-active-contributors?repo_id=368008334&limit=30" target="_blank" style="display: block" align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://next.ossinsight.io/widgets/official/compose-recent-active-contributors/thumbnail.png?repo_id=368008334&limit=30&image_size=auto&color_scheme=dark" width="800" height="auto">
-    <img alt="Active Contributors of HibiKier/zhenxun_bot - Last 28 days" src="https://next.ossinsight.io/widgets/official/compose-recent-active-contributors/thumbnail.png?repo_id=368008334&limit=30&image_size=auto&color_scheme=light" width="800" height="auto">
-  </picture>
-</a>
-
-## 👨‍💻 开发者
-
-感谢以下开发者对 绪山真寻 Bot 作出的贡献：
-
-<a href="https://github.com/HibiKier/zhenxun_bot/graphs/contributors" style="display: block" align="center">
-  <img src="https://contrib.rocks/image?repo=HibiKier/zhenxun_bot&max=1000" alt="contributors"/>
-</a>
 
 ## 📸 WebUI 界面展示（仅展示默认主题下的 pc 端）
 

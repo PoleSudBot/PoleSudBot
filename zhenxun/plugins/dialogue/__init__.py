@@ -20,24 +20,28 @@ __plugin_meta__ = PluginMetadata(
     name="联系管理员",
     description="跨越空间与时间跟管理员对话",
     usage="""
-        滴滴滴- ?[文本] ?[图片]
-        示例：滴滴滴- 我喜欢你
-    """.strip(),
+## 💬 联系管理员
+
+- **滴滴滴- ?[文本] ?[图片]** - 跨越空间与时间跟管理员对话
+  示例：`滴滴滴- 我喜欢你`
+""".strip(),
     extra=PluginExtraData(
         author="HibiKier",
         version="0.2",
         menu_type="联系管理员",
         superuser_help="""
-            /t: 查看当前存储的消息
-            /t [user_id] [group_id] [文本]: 在group回复指定用户
-            /t [user_id] [文本]: 私聊用户
-            /t -1 [group_id] [文本]: 在group内发送消息
-            /t [id] [文本]: 回复指定id的对话，id在 /t 中获取
-            示例：/t 73747222 32848432 你好啊
-            示例：/t 73747222 你好不好
-            示例：/t -1 32848432 我不太好
-            示例：/t 0 我收到你的话了
-        """.strip(),
+## 💬 联系管理员 (超级用户)
+
+- **/t** - 查看当前存储的消息
+- **/t [user_id] [group_id] [文本]** - 在group回复指定用户
+  示例：`/t 73747222 32848432 你好啊`
+- **/t [user_id] [文本]** - 私聊用户
+  示例：`/t 73747222 你好不好`
+- **/t -1 [group_id] [文本]** - 在group内发送消息
+  示例：`/t -1 32848432 我不太好`
+- **/t [id] [文本]** - 回复指定id的对话，id在 /t 中获取
+  示例：`/t 0 我收到你的话了`
+""".strip(),
         commands=[Command(command="滴滴滴- ?[文本] ?[图片]")],
     ).to_dict(),
 )

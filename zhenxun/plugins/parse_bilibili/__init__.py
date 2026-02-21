@@ -1,55 +1,53 @@
-import traceback
 import asyncio
-from typing import Optional, Any
-from nonebot import on_message, get_driver
-from nonebot.plugin import PluginMetadata
-import httpx
+import traceback
+from typing import Any, Optional
+
 from bilibili_api import select_client
-
+import httpx
+from nonebot import get_driver, on_message
 from nonebot.adapters import Bot, Event
-from nonebot_plugin_uninfo import Uninfo
+from nonebot.plugin import PluginMetadata
+from nonebot_plugin_alconna import Image, Segment, Text, UniMessage, UniMsg
 from nonebot_plugin_session import EventSession
-from nonebot_plugin_alconna import UniMsg, UniMessage, Text, Image, Segment
+from nonebot_plugin_uninfo import Uninfo
 
+from zhenxun.configs.utils import PluginExtraData, RegisterConfig, Task
 from zhenxun.services.log import logger
+from zhenxun.utils.common_utils import CommonUtils
+from zhenxun.utils.depends import GetGroupConfig
 from zhenxun.utils.enum import PluginType
 
-from zhenxun.utils.depends import GetGroupConfig
-from zhenxun.utils.common_utils import CommonUtils
-from zhenxun.configs.utils import Task, RegisterConfig, PluginExtraData
-
+from .commands import (
+    bili_cover_matcher,
+    bili_download_matcher,
+    credential_status_matcher,
+    login_matcher,
+)
 from .config import (
-    base_config,
     MODULE_NAME,
     GroupSettings,
-    load_credential_from_file,
+    base_config,
     check_and_refresh_credential,
+    load_credential_from_file,
 )
-from .services.network_service import ParserService
+from .model import ArticleInfo, LiveInfo, SeasonInfo, UserInfo, VideoInfo
 from .services.cache_service import CacheService
+from .services.download_service import DownloadTask, download_manager
+from .services.network_service import ParserService
+from .utils.exceptions import (
+    BilibiliBaseException,
+    ResourceNotFoundError,
+    UnsupportedUrlError,
+    UrlParseError,
+)
 from .utils.message import (
     MessageBuilder,
-    render_video_info_to_image,
-    render_season_info_to_image,
     render_live_info_to_image,
+    render_season_info_to_image,
     render_user_info_to_image,
+    render_video_info_to_image,
 )
-from .utils.exceptions import (
-    UrlParseError,
-    UnsupportedUrlError,
-    ResourceNotFoundError,
-)
-from .model import VideoInfo, LiveInfo, ArticleInfo, SeasonInfo, UserInfo
 from .utils.url_parser import UrlParserRegistry, extract_bilibili_url_from_message
-from .utils.exceptions import BilibiliBaseException
-
-from .services.download_service import DownloadTask, download_manager
-from .commands import (
-    login_matcher,
-    bili_download_matcher,
-    bili_cover_matcher,
-    credential_status_matcher,
-)
 
 _ = (  # type: ignore
     login_matcher,
@@ -87,8 +85,9 @@ async def _startup():
 
 @driver.on_shutdown
 async def _shutdown():
-    from bilibili_api.utils.network import get_session
     from typing import cast
+
+    from bilibili_api.utils.network import get_session
 
     session = cast(httpx.AsyncClient, get_session())
     if session and not session.is_closed:
@@ -99,65 +98,33 @@ __plugin_meta__ = PluginMetadata(
     name="B站内容解析",
     description="B站内容解析（视频、直播、专栏/动态、番剧），支持被动解析、命令下载和自动下载。",
     usage="""
-### 插件功能
+## 📺 B站内容解析
 
-**1. 被动解析**
+自动监听消息中的 B 站链接，并发送解析结果。支持类型: 视频(av/BV)、直播、专栏(cv)、动态(t.bili/opus)、番剧/影视(ss/ep)、用户空间(space)。
 
-> 自动监听消息中的 B 站链接，并发送解析结果。
+### ✨ 基础功能
 
-- **支持类型**: 视频(av/BV)、直播、专栏(cv)、动态(t.bili/opus)、番剧/影视(ss/ep)、用户空间(space)。
-- **智能识别**: 支持短链(b23.tv)及小程序/JSON卡片（需在配置中开启）。
-- **防刷屏**: 默认5分钟内同一链接在同一会话中不重复解析（可通过 `CACHE_TTL` 配置修改）。
-- **开关控制**:
-    - 命令: `开启群被动b站解析` / `关闭群被动b站解析`
-    - WebUI: 在bot后台的「群组」->「群功能」中修改「b站解析」状态。
+- **开启群被动b站解析** / **关闭群被动b站解析** - 控制当前群的被动解析开关
+- **bili下载 [链接/ID]** - 下载 B 站视频 (支持视频链接、av/BV号、或引用)
+  别名：`b站下载`
+- **bili封面** - 获取 B 站视频或番剧的原始封面图片 (必须引用消息)
+  别名：`b站封面`
 
-**2. 手动视频下载**
+### 🛠️ 超级用户指令
 
-- **命令**: `bili下载 [链接/ID]` (别名: `b站下载`)
+- **bili自动下载 on** / **off** - 为当前群聊开启/关闭视频自动下载
+  别名：`b站自动下载`
+  支持 `-g <群号...>` 或 `-t <标签>` 批量操作
+- **bili登录** - 生成二维码进行 B 站账号登录
+- **bili状态** - 查询当前 B 站账号的登录凭证状态
 
-> 用于下载 B 站视频。支持视频链接、av/BV号、或引用包含视频链接的消息/卡片。
-
-- **功能**:
-    - 下载过程中会发送进度提示。
-    - 支持视频缓存，重复下载会直接发送缓存文件。
-    - 可通过 `VIDEO_DOWNLOAD_QUALITY` 配置项设置下载画质。
-
-**3. 获取封面**
-
-- **命令**: `bili封面` (别名: `b站封面`)
-
-> 获取 B 站视频或番剧的原始封面图片。
-
-- **使用方式**: 必须通过**引用**包含 B 站视频(av/BV)或番剧(ss/ep)链接的消息来触发。
-
-**4. 自动下载控制 (需要**管理员**权限)**
-
-- **命令**:
-    - `bili自动下载 on`: 为当前群聊开启视频自动下载。
-    - `bili自动下载 off`: 为当前群聊关闭视频自动下载。
-    - (别名: `b站自动下载`)
-
-> 开启后，被动解析到视频链接时，会自动下载并发送视频文件。
-> **超级用户**可追加 `-g <群号...>` 或 `-t <标签>` 对指定群组进行批量操作。
-
-**5. B站账号登录 (仅限**超级用户**)**
-
-- **命令**: `bili登录`
-
-> 生成二维码进行 B 站账号登录，以解析需要登录才能查看的内容和获取更高清晰度的视频。支持凭证自动刷新。
-
-**6. B站账号状态查询 (仅限**超级用户**)**
-
-- **命令**: `bili状态`
-
-> 查询当前 B 站账号的登录凭证状态，如是否有效、是否需要刷新等。
+> 💡 提示：智能识别支持短链(b23.tv)及小程序/JSON卡片（需在配置中开启）。默认5分钟内同一链接在同一会话中不重复解析。
     """.strip(),
     extra=PluginExtraData(
         author="leekooyo",
         version="1.6.0",
         plugin_type=PluginType.DEPENDANT,
-        menu_type="其他",
+        menu_type="一些工具",
         configs=[
             RegisterConfig(
                 module=MODULE_NAME,
@@ -302,7 +269,7 @@ async def _create_rendered_message(
     render_func: Any,
     builder_func: Any,
     render_enabled: bool,
-) -> Optional[UniMsg]:
+) -> UniMsg | None:
     """通用的消息构建函数，封装了渲染为图片或回退到文本的逻辑"""
     link_url = (
         getattr(info_model, "room_url", None)
@@ -336,7 +303,7 @@ async def _create_rendered_message(
 
 async def _build_article_message(
     article_info: ArticleInfo, render_enabled: bool
-) -> Optional[UniMsg]:
+) -> UniMsg | None:
     logger.debug(
         f"构建文章/动态消息: {article_info.type} {article_info.id}, 渲染模式: {render_enabled}",
         "B站解析",
@@ -362,7 +329,7 @@ async def _build_article_message(
 
 async def _build_message_for_content(
     content: Any, render_enabled: bool
-) -> Optional[UniMsg]:
+) -> UniMsg | None:
     """根据解析内容的类型，分发到相应的消息构建函数"""
     if isinstance(content, ArticleInfo):
         return await _build_article_message(content, render_enabled)
