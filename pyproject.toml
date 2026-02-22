@@ -70,7 +70,6 @@ dependencies = [
     "nonebot-plugin-whoasked",
     "nonebot-plugin-whateat-pic",
     "nonebot-plugin-tsugu-bangdream-bot",
-    "nonebot-plugin-meme-stickers",
     "nonebot-plugin-wordcloud",
     "nonebot-plugin-manosaba-memes",
     "playwright-stealth>=2.0.1",
@@ -78,6 +77,7 @@ dependencies = [
     "asyncpg>=0.30.0",
     "cryptography>=44.0.3",
     "bilibili-api-python>=17.4.1",
+    "spacy-pkuseg>=1.0.1",
 ]
 # --- 修改部分结束 ---
 
@@ -118,7 +118,6 @@ nonebot-plugin-tarot = {path = "plugins/nonebot_plugin_tarot", editable = true}
 nonebot-plugin-whoasked = {path = "plugins/nonebot-plugin-whoasked", editable = true}
 nonebot-plugin-whateat-pic = {path = "plugins/nonebot-plugin-whateat-pic", editable = true}
 nonebot-plugin-tsugu-bangdream-bot = {path = "plugins/nonebot-plugin-tsugu-bangdream-bot", editable = true}
-nonebot-plugin-meme-stickers = {path = "plugins/nonebot-plugin-meme-stickers", editable = true}
 nonebot-plugin-wordcloud = {path = "plugins/nonebot-plugin-wordcloud", editable = true}
 nonebot-plugin-manosaba-memes = {path = "plugins/nonebot-plugin-manosaba-memes", editable = true}
 
