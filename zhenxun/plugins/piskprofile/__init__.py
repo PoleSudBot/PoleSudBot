@@ -169,8 +169,6 @@ async def handle_query(event: Event, session: EventSession):
     server = match.group(1) or "jp"
     pjsk_id = match.group(2)
 
-    await MessageUtils.build_message("正在获取档案截图，请稍候...").send(reply_to=True)
-
     token = Config.get_config("piskprofile", "PJSK_PROFILE_TOKEN") or ""
     result = await take_pjsk_screenshot(server=server, pjsk_id=pjsk_id, token=token)
 

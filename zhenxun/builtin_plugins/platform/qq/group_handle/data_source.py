@@ -297,7 +297,7 @@ class GroupManager:
         image = DEFAULT_IMAGE_PATH / random.choice(os.listdir(DEFAULT_IMAGE_PATH))
         await MessageUtils.build_message(
             [
-                "新人快跑啊！！本群现状↓（快使用自定义群欢迎消息！）",
+                "欢迎新佬!（快使用自定义群欢迎消息！）",
                 image,
             ]
         ).send()
@@ -417,7 +417,7 @@ class GroupManager:
                     operator_name = operator_id
             else:
                 operator_name = ""
-            return f"{user_name} 被 {operator_name} 送走了."
+            return f"{user_name}({user_id}) 被 {operator_name} 送走了."
         elif sub_type == "leave":
-            return f"{user_name}离开了我们..."
+            return f"{user_name}({user_id})离开了我们..."
         return None
