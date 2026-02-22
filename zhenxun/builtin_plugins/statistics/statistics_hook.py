@@ -1,8 +1,9 @@
 from datetime import datetime
+from typing import Any
 
 from nonebot.adapters import Bot, Event
 from nonebot.adapters.onebot.v11 import PokeNotifyEvent
-from nonebot.matcher import Matcher
+from nonebot.matcher import Matcher, current_matcher
 from nonebot.message import run_postprocessor
 from nonebot.plugin import PluginMetadata
 from nonebot_plugin_apscheduler import scheduler
@@ -29,6 +30,18 @@ __plugin_meta__ = PluginMetadata(
 TEMP_LIST = []
 
 
+@Bot.on_called_api
+async def handle_api_call(
+    bot: Bot, exception: Exception | None, api: str, data: dict[str, Any], result: Any
+):
+    if not exception and "send" in api:
+        try:
+            matcher = current_matcher.get()
+            matcher.state["_statistics_has_sent"] = True
+        except LookupError:
+            pass
+
+
 @run_postprocessor
 async def _(
     matcher: Matcher,
@@ -37,6 +50,8 @@ async def _(
     session: Uninfo,
     event: Event,
 ):
+    if not matcher.state.get("_statistics_has_sent"):
+        return
     if matcher.type == "notice" and not isinstance(event, PokeNotifyEvent):
         """过滤除poke外的notice"""
         return
