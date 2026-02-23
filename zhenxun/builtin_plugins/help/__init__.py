@@ -1,10 +1,10 @@
 from nonebot.adapters import Bot
 from nonebot.plugin import PluginMetadata
-from nonebot.rule import to_me
 from nonebot_plugin_alconna import (
     Alconna,
     AlconnaQuery,
     Args,
+    CommandMeta,
     Match,
     Option,
     Query,
@@ -77,9 +77,9 @@ _matcher = on_alconna(
         Args["name?", str],
         Option("-s|--superuser", action=store_true, help_text="超级用户帮助"),
         Option("-d|--detail", action=store_true, help_text="详细帮助"),
+        meta=CommandMeta(compact=True),
     ),
     aliases={"help", "帮助", "菜单"},
-    rule=to_me(),
     priority=1,
     block=True,
 )
