@@ -45,7 +45,6 @@ https://github.com/kexue-z/nonebot-plugin-heweather
 # 论文
 https://github.com/BalconyJH/nonebot-plugin-paper
 # 谁艾特我
-https://github.com/enKl03B/nonebot-plugin-whoasked
 # 这是什么
 #语录
 #https://github.com/webjoin111/zhenxun_plugin_quote
