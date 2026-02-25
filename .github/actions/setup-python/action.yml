@@ -18,23 +18,23 @@ inputs:
 runs:
   using: "composite"
   steps:
-    - name: Install poetry
-      run: pipx install poetry
+    - name: Install uv
+      run: pipx install uv
       shell: bash
 
     - uses: actions/setup-python@v5
       with:
         python-version: ${{ inputs.python-version }}
-        cache: "poetry"
+        cache: "pip"
         cache-dependency-path: |
-          ./poetry.lock
-          ${{ inputs.env-dir }}/poetry.lock
+           ./uv.lock
+           ${{ inputs.env-dir }}/uv.lock
 
     - run: |
         cd ${{ inputs.env-dir }}
         if [ "${{ inputs.no-root }}" = "true" ]; then
-          poetry install --all-extras --no-root
+          uv sync --all-extras --no-install-project
         else
-          poetry install --all-extras
+          uv sync --all-extras
         fi
       shell: bash
