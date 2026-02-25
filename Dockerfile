@@ -2,18 +2,16 @@ FROM python:3.11-bookworm AS requirements-stage
 
 WORKDIR /tmp
 
-ENV POETRY_HOME="/opt/poetry" PATH="${PATH}:/opt/poetry/bin"
+ENV UV_SYSTEM_PYTHON=1
 
-RUN curl -sSL https://install.python-poetry.org | python - -y && \
-  poetry self add poetry-plugin-export
+RUN pip install uv --no-cache-dir
 
-COPY ./pyproject.toml ./poetry.lock* /tmp/
+COPY ./pyproject.toml ./uv.lock* /tmp/
 
-RUN poetry export \
-      -f requirements.txt \
-      --output requirements.txt \
-      --without-hashes \
-      --without-urls
+RUN uv export \
+      --format requirements-txt \
+      --no-hashes \
+      -o requirements.txt
 
 FROM python:3.11-bookworm AS build-stage
 
