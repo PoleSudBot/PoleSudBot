@@ -269,7 +269,7 @@ async def _create_rendered_message(
     render_func: Any,
     builder_func: Any,
     render_enabled: bool,
-) -> UniMsg | None:
+) -> list[UniMsg] | UniMsg | None:
     """通用的消息构建函数，封装了渲染为图片或回退到文本的逻辑"""
     link_url = (
         getattr(info_model, "room_url", None)
@@ -286,10 +286,10 @@ async def _create_rendered_message(
         try:
             image_bytes = await render_func(info_model)
             if image_bytes:
-                segments: list[Segment] = [Image(raw=image_bytes)]
+                msgs: list[UniMsg] = [UniMessage([Image(raw=image_bytes)])]
                 if link_url:
-                    segments.append(Text(f"\n链接: {link_url}"))
-                return UniMessage(segments)
+                    msgs.append(UniMessage([Text(f"链接: {link_url}")]))
+                return msgs
             else:
                 logger.warning(f"{type_name} 渲染函数返回空，尝试原始消息", "B站解析")
                 return await builder_func(info_model)
@@ -303,7 +303,7 @@ async def _create_rendered_message(
 
 async def _build_article_message(
     article_info: ArticleInfo, render_enabled: bool
-) -> UniMsg | None:
+) -> list[UniMsg] | UniMsg | None:
     logger.debug(
         f"构建文章/动态消息: {article_info.type} {article_info.id}, 渲染模式: {render_enabled}",
         "B站解析",
@@ -320,7 +320,7 @@ async def _build_article_message(
                 break
 
         if image_segment:
-            return UniMessage([image_segment, Text(f"\n链接: {article_info.url}")])
+            return [UniMessage([image_segment]), UniMessage([Text(f"链接: {article_info.url}")])]
         else:
             return article_message
     else:
@@ -329,7 +329,7 @@ async def _build_article_message(
 
 async def _build_message_for_content(
     content: Any, render_enabled: bool
-) -> UniMsg | None:
+) -> list[UniMsg] | UniMsg | None:
     """根据解析内容的类型，分发到相应的消息构建函数"""
     if isinstance(content, ArticleInfo):
         return await _build_article_message(content, render_enabled)
@@ -389,7 +389,11 @@ async def _(
         final_message = await _build_message_for_content(parsed_content, render_enabled)
 
         if final_message:
-            await final_message.send()  # type: ignore
+            if isinstance(final_message, list):
+                for msg in final_message:
+                    await msg.send()
+            else:
+                await final_message.send()  # type: ignore
             await CacheService.add_url_to_cache(target_url, session)
             logger.info(f"被动解析：成功解析并发送: {target_url}", session=session)
 
