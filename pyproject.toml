@@ -67,7 +67,6 @@ dependencies = [
     "nonebot-plugin-sticker-saver",
     "nonebot-plugin-githubcard",
     "nonebot-plugin-tarot",
-    "nonebot-plugin-whoasked",
     "nonebot-plugin-whateat-pic",
     "nonebot-plugin-tsugu-bangdream-bot",
     "nonebot-plugin-wordcloud",
@@ -78,6 +77,10 @@ dependencies = [
     "cryptography>=44.0.3",
     "bilibili-api-python>=17.4.1",
     "spacy-pkuseg>=1.0.1",
+    "zhdate>=0.1",
+    "chinesecalendar>=1.11.0",
+    "openai>=2.24.0",
+    "lunardate>=0.2.2",
 ]
 # --- 修改部分结束 ---
 
@@ -115,7 +118,6 @@ nonebot-plugin-ottohzys = {path = "plugins/nonebot-plugin-ottohzys", editable = 
 nonebot-plugin-sticker-saver = {path = "plugins/nonebot-plugin-sticker-saver", editable = true}
 nonebot-plugin-githubcard = {path = "plugins/nonebot_plugin_githubcard", editable = true}
 nonebot-plugin-tarot = {path = "plugins/nonebot_plugin_tarot", editable = true}
-nonebot-plugin-whoasked = {path = "plugins/nonebot-plugin-whoasked", editable = true}
 nonebot-plugin-whateat-pic = {path = "plugins/nonebot-plugin-whateat-pic", editable = true}
 nonebot-plugin-tsugu-bangdream-bot = {path = "plugins/nonebot-plugin-tsugu-bangdream-bot", editable = true}
 nonebot-plugin-wordcloud = {path = "plugins/nonebot-plugin-wordcloud", editable = true}
