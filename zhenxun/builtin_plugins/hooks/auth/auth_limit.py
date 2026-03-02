@@ -61,6 +61,8 @@ def _limit_notice_key(
     key = user_id
     if group_id and limit.watch_type == LimitWatchType.GROUP:
         key = channel_id or group_id
+    elif group_id and limit.watch_type == LimitWatchType.USER_IN_GROUP:
+        key = f"{channel_id or group_id}_{user_id}"
     return f"{limit.module}:{limit.limit_type}:{key}"
 
 
@@ -179,6 +181,8 @@ class LimitManager:
             key_type = user_id
             if group_id and limit.watch_type == LimitWatchType.GROUP:
                 key_type = channel_id or group_id
+            elif group_id and limit.watch_type == LimitWatchType.USER_IN_GROUP:
+                key_type = f"{channel_id or group_id}_{user_id}"
             logger.debug(
                 f"解除对象: {key_type} 的block限制",
                 LOGGER_COMMAND,
@@ -302,6 +306,8 @@ class LimitManager:
         key_type = user_id
         if group_id and limit.watch_type == LimitWatchType.GROUP:
             key_type = channel_id or group_id
+        elif group_id and limit.watch_type == LimitWatchType.USER_IN_GROUP:
+            key_type = f"{channel_id or group_id}_{user_id}"
         if is_limit and not limiter.check(key_type):
             if limit.result:
                 format_kwargs = {}

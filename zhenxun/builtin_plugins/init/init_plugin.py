@@ -9,7 +9,12 @@ from ruamel.yaml import YAML
 import ujson as json
 
 from zhenxun.configs.path_config import DATA_PATH
-from zhenxun.configs.utils import PluginExtraData, PluginSetting
+from zhenxun.configs.utils import (
+    PluginCdBlock,
+    PluginCountBlock,
+    PluginExtraData,
+    PluginSetting,
+)
 from zhenxun.models.group_console import GroupConsole
 from zhenxun.models.plugin_info import PluginInfo
 from zhenxun.models.plugin_limit import PluginLimit
@@ -176,6 +181,32 @@ async def _():
             if not manager.exists(limit.module, limit.limit_type):
                 """不存在，添加"""
                 manager.add(limit.module, limit)
+    # 自动为所有已加载但没有限制配置的插件补全默认模板（status=False，不影响使用）
+    # 这样第三方插件也会出现在 plugins2count.yaml / plugins2cd.yaml 中，方便手动开启限制
+    for plugin_info in plugin_list:
+        if plugin_info.plugin_type in (PluginType.HIDDEN, PluginType.PARENT):
+            continue
+        if not manager.exists(plugin_info.module, PluginLimitType.COUNT):
+            manager.add(
+                plugin_info.module,
+                PluginCountBlock(
+                    status=False,
+                    max_count=5,
+                    watch_type=LimitWatchType.USER,
+                    result="今日调用次数超过上限！",
+                ),
+            )
+        if not manager.exists(plugin_info.module, PluginLimitType.CD):
+            manager.add(
+                plugin_info.module,
+                PluginCdBlock(
+                    status=False,
+                    cd=10,
+                    check_type=BlockType.ALL,
+                    watch_type=LimitWatchType.USER,
+                    result="你冲得太快了，请稍后再冲",
+                ),
+            )
     manager.save_file()
     await manager.load_to_db()
 

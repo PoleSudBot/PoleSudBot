@@ -166,6 +166,8 @@ class LimitWatchType(StrEnum):
 
     USER = "USER"
     GROUP = "GROUP"
+    USER_IN_GROUP = "UIG"
+    """按群独立统计每个用户，私聊时回退为 USER 行为。YAML 中填写 UIG"""
     ALL = "ALL"
 
 
