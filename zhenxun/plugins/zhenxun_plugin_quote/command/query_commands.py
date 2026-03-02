@@ -1,5 +1,4 @@
-import os
-
+import aiofiles
 from arclet.alconna import Alconna, Args, Arparma, Subcommand, MultiVar
 from nonebot.adapters.onebot.v11 import Bot, Event
 from nonebot.typing import T_State
@@ -13,7 +12,6 @@ from zhenxun.utils.platform import PlatformUtils
 from ..config import (
     safe_file_exists,
     resolve_quote_image_path,
-    DATA_PATH,
 )
 from ..model import Quote
 from ..services.quote_service import QuoteService
@@ -129,22 +127,16 @@ async def record_pool_handle(bot: Bot, event: Event, arp: Arparma, state: T_Stat
         return
 
     absolute_path = resolve_quote_image_path(quote.image_path)
-    message_to_send = MessageUtils.build_message(absolute_path)
+
+    async with aiofiles.open(absolute_path, "rb") as f:
+        image_bytes = await f.read()
+    message_to_send = MessageUtils.build_message(image_bytes)
 
     if fallback_message:
         await fallback_message.send(target=target, bot=bot)
 
     await QuoteService.increment_view_count(quote.id)
     await message_to_send.send(target=target, bot=bot)
-
-    if os.path.isabs(quote.image_path):
-        try:
-            relative_path = os.path.relpath(quote.image_path, DATA_PATH)
-            quote.image_path = relative_path
-            await quote.save(update_fields=["image_path"])
-            logger.info(f"已将语录 {quote.id} 的路径更新为相对路径: {relative_path}")
-        except Exception as e:
-            logger.warning(f"惰性迁移语录 {quote.id} 路径失败: {e}")
 
 
 @quote_stats_cmd.handle()
