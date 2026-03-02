@@ -1,13 +1,10 @@
-from pathlib import Path
-
 from nonebot import get_driver
 from nonebot.plugin import PluginMetadata
 
-from zhenxun.configs.utils import PluginExtraData, RegisterConfig
-from zhenxun.services import renderer_service
-from zhenxun.services.log import logger
 from zhenxun.utils.manager.priority_manager import PriorityLifecycle
-
+from pathlib import Path
+from zhenxun.configs.utils import PluginExtraData, RegisterConfig
+from zhenxun.services.log import logger
 from .command.manage_commands import quote_manage_cmd  # noqa: F401
 from .command.query_commands import (  # noqa: F401
     quote_stats_cmd,
@@ -19,6 +16,7 @@ from .command.upload_commands import (  # noqa: F401
     save_img_cmd,
 )
 from .config import ensure_quote_path
+from zhenxun.services import renderer_service
 
 ensure_quote_path()
 driver = get_driver()
@@ -62,48 +60,54 @@ async def shutdown_services():
 __plugin_meta__ = PluginMetadata(
     name="群聊语录",
     description="一款QQ群语录库——支持上传聊天截图为语录，随机投放语录，关键词搜索语录精准投放",
-    usage="""
-## 💬 群聊语录
+    usage="""### 📷 核心功能
+`语录` `[*关键词*]` `[*@用户*]`
+> 随机发送一条语录。可提供关键词或@用户筛选。
+> **示例**: `语录` / `语录 白丝` / `语录 @小真寻`
 
-一款QQ群语录库——支持上传聊天截图为语录，随机投放语录，关键词搜索语录精准投放。
+`上传` `[图片]`
+> 上传图片作为语录。也可直接**回复**一张图片消息并发送 `上传`。
 
-### 📷 核心功能
-
-- **语录 [*关键词*] [*@用户*]** - 随机发送一条语录，可提供关键词或@用户筛选
-  示例：`语录`
-  示例：`语录 白丝`
-  示例：`语录 @小真寻`
-- **上传 [图片]** - 上传图片作为语录。也可直接回复一张图片消息并发送上传
-- **记录** - 将回复的文本内容生成一张语录图片并保存
+`记录` (回复文本消息)
+> 将回复的文本内容生成一张语录图片并保存。
 
 ### 🎨 主题与预览
+`生成` / `记录` `[-s 主题ID]` `[-n 数量]` `[-o|--only]`
+> 在生成或记录语录时，使用指定的主题样式。`生成` 命令仅预览图片而不保存。
+> **-o, --only**: 当与 `-n` 连用时，将只查找并记录被回复用户的消息，忽略其他人的发言。
 
-- **生成** / **记录 [-s 主题ID] [-n 数量] [-o|--only]** - 在生成或记录语录时，使用指定的主题样式。生成命令仅预览
-  `-o, --only`: 当与 `-n` 连用时，将只查找并记录被回复用户的消息，忽略其他人的发言。
-- **语录主题** - 查看所有可用的语录卡片主题 (超级用户)
-- **语录主题 [主题名]** - 切换全局默认的语录主题 (超级用户)
+`语录主题` (或 `quote theme`)
+> 超级用户查看所有可用的语录卡片主题，可在群聊或私聊中使用。
+
+`语录主题` *`主题名`*
+> 超级用户切换全局默认的语录主题，可在群聊或私聊中执行。
 
 ### 📊 统计功能
-
-- **语录统计 [热门/高产上传/高产被录] [*数量*]** - 显示群内语录统计信息
-  示例：`语录统计 热门`
-  示例：`语录统计 高产上传 5`
+`语录统计` `[热门/高产上传/高产被录]` `[*数量*]` (或 `quote stats ...`)
+> 显示群内语录统计信息。
+> **示例**: `语录统计 热门` / `语录统计 高产上传 5`
 
 ### 🛠️ 管理功能
+`删除` (或 `del`) [回复语录]
+> 1. **回复模式**: 回复 Bot 发送的语录图片即可将其删除。 (需为上传者或满足「删除」权限)
+> 2. **直接发送**: 直接发送 `del` 将删除本群**最后一条**保存的语录。 (仅限满足「删除」权限的管理人员)
 
-- **删除** / **del** - 删除被回复的语录 (需回复 Bot 发送的语录图片，仅限带权限的管理)
-- **语录管理 keyword [词...]** - 删除包含任一关键词的语录 (超级用户)
-- **语录管理 clear --uploader/--quoted [@用户/QQ号]** - 清空指定用户上传或被记录的所有语录 (超级用户)
-- **语录管理 cleanup** - 清理已退群用户的相关语录 (超级用户)
+`语录管理 keyword` *`词1`* `...`
+> 删除包含任一关键词的语录。 (超级用户)
+
+`语录管理 clear` `--uploader` / `--quoted` *`@用户/QQ号`*
+> 清空指定用户上传或被记录的所有语录。 (超级用户)
+
+`语录管理 cleanup`
+> 清理已退群用户的相关语录。 (超级用户)
     """,
     type="application",
     homepage="https://github.com/webjoin111/zhenxun_plugin_quote",
     supported_adapters={"~onebot.v11"},
     extra=PluginExtraData(
         author="webjoin111",
-        version="v1.1.5",
+        version="v1.1.6",
         admin_level=0,
-        menu_type="功能",
         configs=[
             RegisterConfig(
                 module="quote",

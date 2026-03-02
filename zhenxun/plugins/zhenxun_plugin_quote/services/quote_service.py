@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import random
 import base64
 from typing import Any, ClassVar
@@ -74,14 +75,8 @@ class QuoteService:
             tags_source = ocr_content if ocr_content else recorded_text
             tags = QuoteService.cut_sentence(tags_source) if tags_source else []
 
-            try:
-                relative_image_path = os.path.relpath(image_path, DATA_PATH)
-                logger.debug(
-                    f"将绝对路径 '{image_path}' 转换为相对路径 '{relative_image_path}' 进行存储。"
-                )
-            except ValueError:
-                relative_image_path = image_path
-                logger.warning(f"无法为 '{image_path}' 计算相对路径，将按原样存储。")
+            relative_image_path = os.path.relpath(image_path, DATA_PATH)
+            relative_image_path = Path(relative_image_path).as_posix()
 
             quote = await Quote.create(
                 group_id=group_id,
@@ -364,6 +359,14 @@ class QuoteService:
                 "群聊语录",
                 e=e,
             )
+            return None
+
+    @staticmethod
+    async def get_last_quote(group_id: str) -> Quote | None:
+        """获取群组内最后保存的一条语录"""
+        try:
+            return await Quote.filter(group_id=group_id).order_by("-id").first()
+        except Exception:
             return None
 
     @staticmethod
