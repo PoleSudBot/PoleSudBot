@@ -44,6 +44,8 @@ _status_matcher = on_alconna(
                 help_text="全局禁用范围",
             ),
         ),
+        Subcommand("private-block"),
+        Subcommand("private-unblock"),
     ),
     rule=admin_check("plugin_switch", "CHANGE_GROUP_SWITCH_LEVEL"),
     priority=5,
@@ -103,6 +105,34 @@ def _switch_wrapper(slot: str, content: str | None, context: dict) -> str:
         return "--task" if "被动" in content else ""
     return ""
 
+
+_status_matcher.shortcut(
+    r"关闭所有(插件|功能)私聊",
+    command="switch",
+    arguments=["private-block"],
+    prefix=True,
+)
+
+_status_matcher.shortcut(
+    r"关闭所有(插件|功能)\s+(p|private)$",
+    command="switch",
+    arguments=["private-block"],
+    prefix=True,
+)
+
+_status_matcher.shortcut(
+    r"开启所有(插件|功能)私聊",
+    command="switch",
+    arguments=["private-unblock"],
+    prefix=True,
+)
+
+_status_matcher.shortcut(
+    r"开启所有(插件|功能)\s+(p|private)$",
+    command="switch",
+    arguments=["private-unblock"],
+    prefix=True,
+)
 
 _status_matcher.shortcut(
     r"^(?P<action>开启|关闭)\s*(?P<all>所有|全部)?\s*(?P<default>默认)?\s*(?P<type>群被动|被动|插件|功能)?\s*",

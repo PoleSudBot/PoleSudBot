@@ -1,10 +1,11 @@
 from nonebot.adapters import Bot
 
 from zhenxun.models.group_console import GroupConsole
+from zhenxun.models.plugin_info import PluginInfo
 from zhenxun.services.cache import CacheRoot
-from zhenxun.services.cache.runtime_cache import GroupMemoryCache
+from zhenxun.services.cache.runtime_cache import GroupMemoryCache, PluginInfoMemoryCache
 from zhenxun.utils.common_utils import CommonUtils
-from zhenxun.utils.enum import BlockType, CacheType
+from zhenxun.utils.enum import BlockType, CacheType, PluginType
 from zhenxun.utils.platform import PlatformUtils
 
 from .strategy import get_strategy
@@ -240,6 +241,30 @@ class PluginManager:
 
         await strategy.set_all_global_status(status)
         return f"成功将所有{type_str}全局状态修改为: {'开启' if status else '关闭'}"
+
+    @classmethod
+    async def set_all_plugin_private_block(cls, block: bool) -> str:
+        """批量设置所有普通功能的私聊可用状态，不覆盖已有群聊/全局禁用。"""
+        if block:
+            updated = await PluginInfo.filter(
+                plugin_type=PluginType.NORMAL,
+                block_type__isnull=True,
+            ).update(status=False, block_type=BlockType.PRIVATE)
+        else:
+            updated = await PluginInfo.filter(
+                plugin_type=PluginType.NORMAL,
+                block_type=BlockType.PRIVATE,
+            ).update(status=True, block_type=None)
+
+        await CacheRoot.invalidate_cache(CacheType.PLUGINS)
+        await PluginInfoMemoryCache.refresh()
+
+        if not updated:
+            action_text = "禁用" if block else "启用"
+            return f"所有普通功能当前均已处于目标私聊{action_text}状态，无需重复操作。"
+
+        status_text = "禁用" if block else "启用"
+        return f"已全局{status_text}所有普通功能的私聊使用。"
 
     @classmethod
     async def superuser_set_status(
