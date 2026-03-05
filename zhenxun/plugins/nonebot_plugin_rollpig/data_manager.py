@@ -1,9 +1,7 @@
-import json
 import asyncio
 import datetime
+import json
 import time
-from pathlib import Path
-from typing import List, Optional
 
 from nonebot import get_plugin_config
 from nonebot.log import logger
@@ -22,11 +20,15 @@ def resolve_roast_cooldown_seconds() -> int:
     try:
         hours = float(raw_hours)
     except (TypeError, ValueError):
-        logger.warning(f"rollpig_roast_cooldown_hours 配置非法: {raw_hours}，已回退到 8 小时")
+        logger.warning(
+            f"rollpig_roast_cooldown_hours 配置非法: {raw_hours}，已回退到 8 小时"
+        )
         hours = 8.0
 
     if hours <= 0:
-        logger.warning(f"rollpig_roast_cooldown_hours 必须 > 0，当前值: {hours}，已回退到 8 小时")
+        logger.warning(
+            f"rollpig_roast_cooldown_hours 必须 > 0，当前值: {hours}，已回退到 8 小时"
+        )
         hours = 8.0
 
     return max(1, int(hours * 3600))
@@ -63,7 +65,9 @@ class PigDataManager:
     def _load(self) -> dict:
         if not self.file.exists():
             default = {"history": {}, "collection": {}, "usage": {}, "force_usage": {}}
-            self.file.write_text(json.dumps(default, ensure_ascii=False, indent=2), encoding="utf-8")
+            self.file.write_text(
+                json.dumps(default, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
             return default
         try:
             raw = json.loads(self.file.read_text("utf-8"))
@@ -86,7 +90,9 @@ class PigDataManager:
                     records[uid] = val["id"]
                     migrated = True
         if migrated:
-            logger.info("pig_data.json 历史数据已自动迁移（完整 dict → pig_id 字符串），开始落盘...")
+            logger.info(
+                "pig_data.json 历史数据已自动迁移（完整 dict → pig_id 字符串），开始落盘..."
+            )
             self.data = data
             self._sync_save()  # 迁移后立即落盘，防止重启丢失
         return data
@@ -96,24 +102,29 @@ class PigDataManager:
     def _sync_save(self):
         """同步原子写（仅用于启动期迁移，运行期写操作应使用 _atomic_save）。"""
         tmp = self.file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.write_text(
+            json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         tmp.replace(self.file)
 
     async def _atomic_save(self):
         """异步原子写：写入临时文件再原子替换，防止写入中途崩溃导致 JSON 损坏。"""
         tmp = self.file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.write_text(
+            json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         tmp.replace(self.file)  # 同一文件系统上是原子操作（Windows/Linux 均支持）
 
     # ---- 今日/历史 抽猪记录 ----
 
-    def get_today_pig(self, user_id: str) -> Optional[str]:
+    def get_today_pig(self, user_id: str) -> str | None:
         """返回今日已抽的 pig_id，未抽返回 None。"""
         today = datetime.date.today().isoformat()
         return self.data["history"].get(today, {}).get(user_id)
 
-    async def set_today_pig(self, user_id: str, pig_id: str):
-        """记录今日抽到的 pig_id，并同步将其写入图鉴（永久保留）。"""
+    async def set_today_pig(self, user_id: str, pig_id: str) -> bool:
+        """记录今日抽到的 pig_id，并同步将其写入图鉴（永久保留）。返回是否为新解锁的小猪。"""
+        is_new = False
         async with self._lock:
             today = datetime.date.today().isoformat()
             if today not in self.data["history"]:
@@ -125,14 +136,16 @@ class PigDataManager:
             user_col = col.setdefault(user_id, [])
             if pig_id not in user_col:
                 user_col.append(pig_id)
+                is_new = True
 
             await self._atomic_save()
+        return is_new
 
-    def get_pig_by_date(self, user_id: str, date_str: str) -> Optional[str]:
+    def get_pig_by_date(self, user_id: str, date_str: str) -> str | None:
         """返回指定日期的 pig_id，无记录返回 None。"""
         return self.data["history"].get(date_str, {}).get(user_id)
 
-    def get_user_collection(self, user_id: str) -> List[str]:
+    def get_user_collection(self, user_id: str) -> list[str]:
         return self.data.get("collection", {}).get(user_id, [])
 
     async def clean_old_history(self, days_to_keep: int = 14):
@@ -140,8 +153,11 @@ class PigDataManager:
         async with self._lock:
             today = datetime.date.today()
             dates_to_del = [
-                d for d in self.data["history"]
-                if _is_valid_date(d)  # 必须先过滤非法日期键，再做计算（防止 ValueError）
+                d
+                for d in self.data["history"]
+                if _is_valid_date(
+                    d
+                )  # 必须先过滤非法日期键，再做计算（防止 ValueError）
                 and (today - datetime.date.fromisoformat(d)).days > days_to_keep
             ]
             for d in dates_to_del:
@@ -159,7 +175,9 @@ class PigDataManager:
         # 兼容旧版数据结构
         if "usage" not in self.data or not isinstance(self.data["usage"], dict):
             self.data["usage"] = {}
-        if self.data["usage"] and isinstance(list(self.data["usage"].values())[0], dict):
+        if self.data["usage"] and isinstance(
+            list(self.data["usage"].values())[0], dict
+        ):
             self.data["usage"] = {}
 
         last_use = self.data["usage"].get(user_id, 0)
@@ -190,7 +208,9 @@ class PigDataManager:
     def check_force_roast_usage(self, user_id: str) -> bool:
         """普通用户后门：每日仅 1 次，返回今日是否仍可用。"""
         today = datetime.date.today().isoformat()
-        if "force_usage" not in self.data or not isinstance(self.data["force_usage"], dict):
+        if "force_usage" not in self.data or not isinstance(
+            self.data["force_usage"], dict
+        ):
             self.data["force_usage"] = {}
         return self.data["force_usage"].get(user_id) != today
 

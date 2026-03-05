@@ -1,61 +1,85 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh">
-<head>
-<meta charset="UTF-8" />
-<style>
-body {
-    margin: 0;
-    width: 800px;
-    height: 800px;
-    border-radius: 40px;
-    background: #ffffff;
-    font-family: "Microsoft YaHei", sans-serif;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-}
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      body {
+        margin: 0;
+        width: 800px;
+        height: 800px;
+        border-radius: 40px;
+        background: #ffffff;
+        font-family: "Microsoft YaHei", sans-serif;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        position: relative;
+      }
 
-.container {
-    width: 90%;
-    text-align: center;
-}
+      .container {
+        width: 90%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+      }
 
-.avatar {
-    width: 240px;
-    height: 240px;
-    object-fit: cover;
-}
+      .avatar-wrapper {
+        position: relative;
+        width: 240px;
+        height: 240px;
+      }
 
-.name {
-    margin-top: 20px;
-    font-size: 48px;
-    font-weight: bold;
-}
+      .avatar {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
 
-.desc {
-    margin-top: 20px;
-    font-size: 30px;
-    color: #555;
-}
+      .name {
+        margin-top: 20px;
+        font-size: 48px;
+        font-weight: bold;
+      }
 
-.analysis {
-    margin-top: 30px;
-    font-size: 28px;
-    color: #333;
-    line-height: 1.5;
-}
-</style>
-</head>
-<body>
+      .desc {
+        margin-top: 20px;
+        font-size: 30px;
+        color: #555;
+      }
+
+      .analysis {
+        margin-top: 30px;
+        font-size: 28px;
+        color: #333;
+        line-height: 1.5;
+      }
+
+      .new-icon {
+        position: absolute;
+        top: -50px;
+        right: -50px;
+        width: 180px;
+        height: auto;
+        z-index: 10;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
     <div class="container">
-
-        {% if avatar %}
+      {% if avatar %}
+      <div class="avatar-wrapper">
         <img class="avatar" src="{{ avatar }}" />
+        {% if is_new and new_icon_uri %}
+        <img class="new-icon" src="{{ new_icon_uri }}" />
         {% endif %}
-    
-        <div class="name">{{ name }}</div>
-        <div class="desc">{{ desc }}</div>
-        <div class="analysis">{{ analysis }}</div>
-    </div>    
-</body>
+      </div>
+      {% endif %}
+
+      <div class="name">{{ name }}</div>
+      <div class="desc">{{ desc }}</div>
+      <div class="analysis">{{ analysis }}</div>
+    </div>
+  </body>
 </html>
