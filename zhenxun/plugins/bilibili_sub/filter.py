@@ -1,4 +1,5 @@
 import re
+
 from zhenxun.services.log import logger
 
 from .utils import get_user_dynamics
@@ -11,93 +12,105 @@ async def is_ad(uid: int, dynamic_id: str) -> bool:
 
         logger.debug(f"[广告过滤-API] 正在获取用户动态数据: UID={uid}")
         dynamics_data = await get_user_dynamics(uid)
-        if not dynamics_data or not dynamics_data.get("cards"):
+        if not dynamics_data or not dynamics_data.get("items"):
             logger.warning(
-                f"[广告过滤-API] 未获取到动态数据: UID={uid}, 数据为空或无cards字段"
+                f"[广告过滤-API] 未获取到动态数据: UID={uid}, 数据为空或无items字段"
             )
             return False
 
+        items = dynamics_data["items"]
         logger.debug(
-            f"[广告过滤-API] 成功获取动态数据: UID={uid}, 动态数量={len(dynamics_data.get('cards', []))}"
+            f"[广告过滤-API] 成功获取动态数据: UID={uid}, 动态数量={len(items)}"
         )
 
         logger.debug(f"[广告过滤-API] 正在查找指定动态: UID={uid}, 动态ID={dynamic_id}")
         target_dynamic = None
         available_ids = []
-        for card in dynamics_data["cards"]:
-            card_dynamic_id = str(card["desc"]["dynamic_id"])
-            available_ids.append(card_dynamic_id)
-            if card_dynamic_id == str(dynamic_id):
-                target_dynamic = card
+        for item in items:
+            item_id = str(item.get("id_str", ""))
+            available_ids.append(item_id)
+            if item_id == str(dynamic_id):
+                target_dynamic = item
                 break
 
         if not target_dynamic:
             logger.warning(
-                f"[广告过滤-API] 未找到指定动态: UID={uid}, 动态ID={dynamic_id}, 可用动态ID={available_ids[:5]}..."
+                f"[广告过滤-API] 未找到指定动态: "
+                f"UID={uid}, 动态ID={dynamic_id}, "
+                f"可用动态ID={available_ids[:5]}..."
             )
             return False
 
         logger.debug(f"[广告过滤-API] 成功找到目标动态: UID={uid}, 动态ID={dynamic_id}")
 
-        dynamic_type = target_dynamic["desc"].get("type", 0)
+        # 新版 API 使用 item.type 表示动态类型
+        dynamic_type = target_dynamic.get("type", "")
         logger.debug(
-            f"[广告过滤-API] 动态类型检查: UID={uid}, 动态ID={dynamic_id}, 类型={dynamic_type}"
+            f"[广告过滤-API] 动态类型检查: "
+            f"UID={uid}, 动态ID={dynamic_id}, "
+            f"类型={dynamic_type}"
         )
 
+        # 新版 API 中的商品类型
         goods_types = {
-            19: "商品分享",
-            64: "专栏文章（可能包含商品）",
+            "DYNAMIC_TYPE_ARTICLE": "专栏文章",
+            "DYNAMIC_TYPE_COMMON_SQUARE": "商品分享",
         }
 
         if dynamic_type in goods_types:
             logger.warning(
-                f"[广告过滤-API] 检测到商品类型动态: UID={uid}, 动态ID={dynamic_id}, 类型={dynamic_type}({goods_types[dynamic_type]})"
+                f"[广告过滤-API] 检测到商品类型动态: "
+                f"UID={uid}, 动态ID={dynamic_id}, "
+                f"类型={dynamic_type}"
+                f"({goods_types[dynamic_type]})"
             )
             return True
 
         logger.debug(
-            f"[广告过滤-API] 动态类型检查通过: UID={uid}, 动态ID={dynamic_id}, 类型={dynamic_type}"
+            f"[广告过滤-API] 动态类型检查通过: "
+            f"UID={uid}, 动态ID={dynamic_id}, "
+            f"类型={dynamic_type}"
         )
 
+        # 从新版 API 的 modules 中提取文本内容
         logger.debug(f"[广告过滤-API] 开始检查动态内容: UID={uid}, 动态ID={dynamic_id}")
-        card_data = target_dynamic.get("card", "")
-        if isinstance(card_data, str):
-            try:
-                import json
-
-                card_json = json.loads(card_data)
-                logger.debug(
-                    f"[广告过滤-API] 成功解析动态卡片JSON: UID={uid}, 动态ID={dynamic_id}"
-                )
-            except (json.JSONDecodeError, ValueError) as e:
-                logger.warning(
-                    f"[广告过滤-API] 动态卡片JSON解析失败: UID={uid}, 动态ID={dynamic_id}, 错误={e}"
-                )
-                card_json = {}
-        else:
-            card_json = card_data
-            logger.debug(
-                f"[广告过滤-API] 动态卡片数据为字典格式: UID={uid}, 动态ID={dynamic_id}"
-            )
-
         text_content = ""
         content_sources = []
 
-        if "item" in card_json:
-            item = card_json["item"]
-            if "description" in item:
-                text_content += item["description"]
-                content_sources.append("item.description")
-            if "content" in item:
-                text_content += item["content"]
-                content_sources.append("item.content")
+        modules = target_dynamic.get("modules", {})
+        module_dynamic = modules.get("module_dynamic", {})
 
-        if "user" in card_json and "description" in card_json["user"]:
-            text_content += card_json["user"]["description"]
-            content_sources.append("user.description")
+        # 从 desc 中提取文字
+        desc = module_dynamic.get("desc", {})
+        if desc and desc.get("text"):
+            text_content += desc["text"]
+            content_sources.append("desc.text")
+
+        # 从 major 中提取文字
+        major = module_dynamic.get("major", {})
+        if major:
+            # opus 类型
+            if major.get("opus"):
+                summary = major["opus"].get("summary", {})
+                if summary and summary.get("text"):
+                    text_content += summary["text"]
+                    content_sources.append("major.opus.summary")
+            # article 类型
+            if major.get("article"):
+                title = major["article"].get("title", "")
+                desc_text = major["article"].get("desc", "")
+                if title:
+                    text_content += title
+                    content_sources.append("major.article.title")
+                if desc_text:
+                    text_content += desc_text
+                    content_sources.append("major.article.desc")
 
         logger.debug(
-            f"[广告过滤-API] 提取文本内容: UID={uid}, 动态ID={dynamic_id}, 来源={content_sources}, 长度={len(text_content)}"
+            f"[广告过滤-API] 提取文本内容: "
+            f"UID={uid}, 动态ID={dynamic_id}, "
+            f"来源={content_sources}, "
+            f"长度={len(text_content)}"
         )
 
         logger.debug(f"[广告过滤-API] 开始关键词检查: UID={uid}, 动态ID={dynamic_id}")
@@ -153,14 +166,16 @@ async def is_ad(uid: int, dynamic_id: str) -> bool:
 
         logger.debug(f"[广告过滤-API] 开始商品卡片检查: UID={uid}, 动态ID={dynamic_id}")
         goods_fields = []
-        if "goods" in card_json:
+        if major and major.get("goods"):
             goods_fields.append("goods")
-        if "mall" in card_json:
-            goods_fields.append("mall")
+        if major and major.get("common"):
+            goods_fields.append("common")
 
         if goods_fields:
             logger.warning(
-                f"[广告过滤-API] 检测到商品卡片: UID={uid}, 动态ID={dynamic_id}, 字段={goods_fields}"
+                f"[广告过滤-API] 检测到商品卡片: "
+                f"UID={uid}, 动态ID={dynamic_id}, "
+                f"字段={goods_fields}"
             )
             return True
 

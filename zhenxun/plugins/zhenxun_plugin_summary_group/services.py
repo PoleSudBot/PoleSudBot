@@ -21,6 +21,7 @@ class SummaryParameters(BaseModel):
     content_filter: str | None = None
     target_user_ids: set[str] | None = Field(default_factory=set)
     response_target: MsgTarget
+    time_range_type: str | None = None
 
     class Config:
         arbitrary_types_allowed = True
@@ -34,29 +35,46 @@ class SummaryService:
         self.logger = logger
         self.user_info_cache: dict[str, str] = {}
         self.processed_messages: list[dict[str, str]] = []
+        self.warning_msg: str | None = None
 
     async def _fetch_and_process_messages(self):
         """
         私有方法：获取和处理消息。
-        将原 handler 中的消息获取逻辑移到此处。
         """
         self.logger.debug(
-            f"Service: 开始获取群 {self.params.target_group_id} 的原始消息: count={self.params.message_count}",
+            f"Service: 开始获取群 {self.params.target_group_id} "
+            f"的原始消息: count={self.params.message_count}, "
+            f"time_range={self.params.time_range_type}",
             command="总结服务",
         )
         use_db = base_config.get("USE_DB_HISTORY", False)
 
-        self.processed_messages, self.user_info_cache = await get_group_messages(
+        result = await get_group_messages(
             self.params.bot,
             self.params.target_group_id,
             self.params.message_count,
             use_db=use_db,
             target_user_ids=self.params.target_user_ids,
+            time_range_type=self.params.time_range_type,
         )
+
+        if len(result) == 3:
+            self.processed_messages, self.user_info_cache, self.warning_msg = result
+        else:
+            self.processed_messages, self.user_info_cache = result
 
         if not self.processed_messages:
             if self.params.target_user_ids:
-                msg = f"在群聊 {self.params.target_group_id} 中未能获取到指定用户的有效聊天记录。"
+                msg = (
+                    f"在群聊 {self.params.target_group_id} "
+                    f"中未能获取到指定用户的有效聊天记录。"
+                )
+            elif self.params.time_range_type:
+                label = "今日" if self.params.time_range_type == "today" else "昨日"
+                msg = (
+                    f"在群聊 {self.params.target_group_id} "
+                    f"中未能获取到{label}的聊天记录。"
+                )
             else:
                 msg = f"未能获取到群聊 {self.params.target_group_id} 的聊天记录。"
             raise SummaryException(msg)
@@ -87,7 +105,8 @@ class SummaryService:
             style=self.params.style,
         )
         self.logger.debug(
-            f"Service: 群 {self.params.target_group_id} 总结生成成功，长度: {len(summary)} 字符",
+            f"Service: 群 {self.params.target_group_id} "
+            f"总结生成成功，长度: {len(summary)} 字符",
             command="总结服务",
         )
         return summary
@@ -96,11 +115,15 @@ class SummaryService:
         """
         私有方法：发送总结。
         """
+        if self.warning_msg:
+            await UniMessage.text(self.warning_msg).send(self.params.response_target)
+
         return await send_summary(
             self.params.bot,
             self.params.response_target,
             summary_text,
             self.user_info_cache,
+            group_id=self.params.target_group_id,
         )
 
     async def execute(self) -> bool:
@@ -135,7 +158,9 @@ class SummaryService:
             return False
         except Exception as e:
             self.logger.error(
-                f"总结服务执行时发生未知错误: {e}", command="总结服务", e=e
+                f"总结服务执行时发生未知错误: {e}",
+                command="总结服务",
+                e=e,
             )
             await UniMessage.text(
                 "处理总结时发生了一个未知的内部错误，请联系管理员。"

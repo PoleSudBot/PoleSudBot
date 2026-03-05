@@ -141,8 +141,48 @@ class SignManage:
             log_time = new_log.create_time.astimezone(
                 pytz.timezone("Asia/Shanghai")
             ).date()
+
+        # 计算连续签到天数（不含今天即将进行的签到）
+        continuous_sign_count = 0
+        today = now.date()
+        logs = (
+            await SignLog.filter(user_id=session.user.id)
+            .order_by("-create_time")
+            .values_list("create_time", flat=True)
+        )
+        if logs:
+            # 提取所有签到日期（转为东八区），去重并降序排列
+            tz = pytz.timezone("Asia/Shanghai")
+            sign_dates: list = sorted(
+                {
+                    log_dt.astimezone(tz).date()  # type: ignore
+                    for log_dt in logs
+                },
+                reverse=True,
+            )
+            # 从今天或昨天开始，向前计算连续天数
+            # 如果今天已签到，从今天开始数；否则从昨天开始数
+            from datetime import timedelta
+
+            if sign_dates[0] == today:
+                # 今天已签到（查看卡片场景）
+                expected = today
+            else:
+                # 今天还没签到，从昨天开始检查链条
+                expected = today - timedelta(days=1)
+
+            for d in sign_dates:
+                if d == expected:
+                    continuous_sign_count += 1
+                    expected -= timedelta(days=1)
+                elif d < expected:
+                    break
+
         if not is_card_view and (not new_log or (log_time and log_time != now.date())):
-            return await cls._handle_sign_in(user, nickname, session)
+            # 本次签到成功，连续天数+1
+            return await cls._handle_sign_in(
+                user, nickname, session, continuous_sign_count + 1
+            )
         return await get_card(
             user,
             session,
@@ -151,6 +191,7 @@ class SignManage:
             user_console.gold,
             "",
             is_card_view=is_card_view,
+            continuous_sign_count=continuous_sign_count,
         )
 
     @classmethod
@@ -159,6 +200,7 @@ class SignManage:
         user: SignUser,
         nickname: str,
         session: Uninfo,
+        continuous_sign_count: int,
     ) -> Path:
         """签到处理
 
@@ -166,6 +208,7 @@ class SignManage:
             user: SignUser
             nickname: 用户昵称
             session: Uninfo
+            continuous_sign_count: 连续签到天数
 
         返回:
             Path: 卡片路径
@@ -202,4 +245,5 @@ class SignManage:
             gold,
             gift,
             rand + add_probability > 0.97 or rand < specify_probability,
+            continuous_sign_count=continuous_sign_count,
         )

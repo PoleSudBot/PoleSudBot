@@ -1,21 +1,21 @@
 import asyncio
 import base64
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum, auto
 import json
 import time
-from dataclasses import dataclass
-from datetime import datetime, timedelta
-from enum import Enum, auto
 
-import httpx
-import nonebot
 from bilibili_api import bangumi, search
 from bilibili_api import user as bilibili_user_module
 from bilibili_api.exceptions import ResponseCodeException
+import httpx
+import nonebot
 
 from zhenxun import ui
+from zhenxun.services.log import logger
 from zhenxun.ui.models import NotebookData
 from zhenxun.utils.platform import PlatformUtils
-from zhenxun.services.log import logger
 from zhenxun.utils.utils import ResourceDirManager
 
 from .config import DYNAMIC_PATH, base_config, get_credential
@@ -547,7 +547,6 @@ async def fetch_image_with_retry(url, retries=3, delay=2):
 
 async def _get_up_status(sub: BiliSub, force_push: bool = False) -> list[Notification]:
     start_time = time.time()
-    current_time = datetime.now()
 
     try:
         video_info_raw = await get_videos(sub.uid)
@@ -614,9 +613,6 @@ async def _get_up_status(sub: BiliSub, force_push: bool = False) -> list[Notific
     notification_type: NotificationType | None = None
     is_new_video_pushed = False
 
-    time_threshold = current_time - timedelta(minutes=30)
-    logger.debug(f"设置时间阈值: UID={sub.uid}, 阈值={time_threshold}")
-
     if sub.uname != uname:
         logger.info(
             f"UP主用户名变更: UID={sub.uid}, 旧名称={sub.uname}, 新名称={uname}"
@@ -625,87 +621,110 @@ async def _get_up_status(sub: BiliSub, force_push: bool = False) -> list[Notific
         await sub.save(update_fields=["uname"])
         logger.debug(f"已更新UP主用户名: UID={sub.uid}, 新名称={uname}")
 
-    dynamic_img = None
-    dynamic_upload_time = 0
-    dynamic_images = None
+    dynamic_items: list[DynamicItem] = []
 
     if sub.push_dynamic:
         try:
-            (
-                dynamic_img,
-                dynamic_upload_time,
-                _,
-                dynamic_images,
-            ) = await get_user_dynamic(sub)
+            dynamic_items = await get_user_dynamic(sub)
         except ResponseCodeException as msg:
             logger.error(
-                f"动态获取失败: UID={sub.uid}, 错误码={getattr(msg, 'code', 'unknown')}, 错误信息={getattr(msg, 'msg', str(msg))}"
+                f"动态获取失败: UID={sub.uid}, "
+                f"错误码="
+                f"{getattr(msg, 'code', 'unknown')}, "
+                f"错误信息="
+                f"{getattr(msg, 'msg', str(msg))}"
             )
-    if dynamic_img and (
-        sub.last_dynamic_timestamp is None
-        or sub.last_dynamic_timestamp < dynamic_upload_time
-    ):
-        dynamic_time = datetime.fromtimestamp(dynamic_upload_time)
+
+    # 处理所有新动态（支持多条）
+    max_dynamic_timestamp = 0
+    for dyn in dynamic_items:
+        dynamic_time = datetime.fromtimestamp(dyn.upload_time)
         dynamic_time_str = dynamic_time.strftime("%Y-%m-%d %H:%M:%S")
-        logger.info(f"检测到新动态: UID={sub.uid}, 发布时间={dynamic_time_str}")
+        logger.info(
+            f"处理新动态: UID={sub.uid}, "
+            f"动态ID={dyn.dynamic_id}, "
+            f"发布时间={dynamic_time_str}"
+        )
 
-        is_new_and_recent = dynamic_time > time_threshold
-        if force_push or is_new_and_recent:
-            if is_new_and_recent:
-                logger.debug(
-                    f"动态在时间阈值内: UID={sub.uid}, 发布时间={dynamic_time_str}, 阈值={time_threshold}"
-                )
-
-            if base_config.get("ENABLE_AD_FILTER"):
-                logger.info(
-                    f"[广告过滤] 启用广告过滤检查: UID={sub.uid}, 用户名={sub.uname}"
-                )
-
-                dynamic_id = (await get_user_dynamics(sub.uid))["cards"][0]["desc"][
-                    "dynamic_id"
-                ]
-                logger.debug(
-                    f"[广告过滤] 提取动态ID: UID={sub.uid}, 动态ID={dynamic_id}"
-                )
-
-                filter_start_time = time.time()
-                try:
-                    is_ad_flag = await is_dynamic_ad(sub.uid, dynamic_id)
-                    filter_duration = time.time() - filter_start_time
-
-                    if is_ad_flag:
-                        logger.warning(
-                            f"[广告过滤] 动态被过滤拦截: UID={sub.uid}, 用户名={sub.uname}, 动态ID={dynamic_id}, 耗时={filter_duration:.2f}秒"
-                        )
-                        sub.last_dynamic_timestamp = dynamic_upload_time
-                        await sub.save(update_fields=["last_dynamic_timestamp"])
-                        return []
-                    else:
-                        logger.info(
-                            f"[广告过滤] 动态通过过滤检查: UID={sub.uid}, 用户名={sub.uname}, 动态ID={dynamic_id}, 耗时={filter_duration:.2f}秒"
-                        )
-                except Exception as e:
-                    filter_duration = time.time() - filter_start_time
-                    logger.error(
-                        f"[广告过滤] 过滤检查异常: UID={sub.uid}, 动态ID={dynamic_id}, 耗时={filter_duration:.2f}秒, 错误={e}"
-                    )
-
-            if not notebook:
-                notebook = NotebookData(elements=[])
-            notebook.head(f"{uname} 发布了动态！📢", level=2)
-            base64_str = base64.b64encode(dynamic_img).decode()
-            notebook.image(f"data:image/png;base64,{base64_str}")
-            notification_type = NotificationType.DYNAMIC
-
-            if not force_push:
-                sub.last_dynamic_timestamp = dynamic_upload_time
-                await sub.save(update_fields=["last_dynamic_timestamp"])
-        elif not force_push:
-            logger.debug(
-                f"动态不在时间阈值内，仅更新记录: UID={sub.uid}, 发布时间={dynamic_time_str}, 阈值={time_threshold}"
+        # 广告过滤检查
+        if base_config.get("ENABLE_AD_FILTER"):
+            logger.info(
+                f"[广告过滤] 启用广告过滤检查: UID={sub.uid}, 用户名={sub.uname}"
             )
-            sub.last_dynamic_timestamp = dynamic_upload_time
-            await sub.save(update_fields=["last_dynamic_timestamp"])
+            logger.debug(f"[广告过滤] 动态ID: UID={sub.uid}, 动态ID={dyn.dynamic_id}")
+
+            filter_start_time = time.time()
+            try:
+                is_ad_flag = await is_dynamic_ad(sub.uid, str(dyn.dynamic_id))
+                filter_duration = time.time() - filter_start_time
+
+                if is_ad_flag:
+                    logger.warning(
+                        f"[广告过滤] 动态被过滤拦截: "
+                        f"UID={sub.uid}, "
+                        f"用户名={sub.uname}, "
+                        f"动态ID={dyn.dynamic_id}, "
+                        f"耗时={filter_duration:.2f}秒"
+                    )
+                    if dyn.upload_time > max_dynamic_timestamp:
+                        max_dynamic_timestamp = dyn.upload_time
+                    continue
+                else:
+                    logger.info(
+                        f"[广告过滤] 动态通过过滤检查: "
+                        f"UID={sub.uid}, "
+                        f"用户名={sub.uname}, "
+                        f"动态ID={dyn.dynamic_id}, "
+                        f"耗时={filter_duration:.2f}秒"
+                    )
+            except Exception as e:
+                filter_duration = time.time() - filter_start_time
+                logger.error(
+                    f"[广告过滤] 过滤检查异常: "
+                    f"UID={sub.uid}, "
+                    f"动态ID={dyn.dynamic_id}, "
+                    f"耗时={filter_duration:.2f}秒, "
+                    f"错误={e}"
+                )
+
+        # 构建动态通知
+        dyn_notebook = NotebookData(elements=[])
+        dyn_notebook.head(f"{uname} 发布了动态！📢", level=2)
+        base64_str = base64.b64encode(dyn.image).decode()
+        dyn_notebook.image(f"data:image/png;base64,{base64_str}")
+
+        dyn_msg_list = []
+        dyn_img_bytes = await ui.render(dyn_notebook, frameless=True)
+        dyn_msg_list.append(dyn_img_bytes)
+
+        # 附加动态原图
+        if dyn.images and base_config.get("ENABLE_DYNAMIC_IMAGE", False):
+            logger.info(f"动态中包含 {len(dyn.images)} 张图片，将一并发送")
+            for img_url in dyn.images:
+                try:
+                    img_data = await fetch_image_bytes(img_url)
+                    dyn_msg_list.append(img_data)
+                    logger.debug(f"成功添加动态原图: {img_url}")
+                except Exception as e:
+                    logger.warning(f"下载动态原图失败: {img_url}, 错误: {e}")
+
+        # 附加动态链接
+        dyn_msg_list.append(f"\n查看详情: {dyn.url}")
+
+        notifications.append(
+            Notification(
+                content=dyn_msg_list,
+                type=NotificationType.DYNAMIC,
+            )
+        )
+
+        if dyn.upload_time > max_dynamic_timestamp:
+            max_dynamic_timestamp = dyn.upload_time
+
+    # 更新最新动态时间戳
+    if max_dynamic_timestamp > 0 and not force_push:
+        sub.last_dynamic_timestamp = max_dynamic_timestamp
+        await sub.save(update_fields=["last_dynamic_timestamp"])
 
     logger.debug(f"开始检查视频更新: UID={sub.uid}")
     video = None
@@ -724,12 +743,12 @@ async def _get_up_status(sub: BiliSub, force_push: bool = False) -> list[Notific
             f"获取到最新视频: UID={sub.uid}, 标题={video_title}, 发布时间={video_time_str}"
         )
 
-        is_new_and_recent_video = (
+        is_new_video = (
             sub.last_video_timestamp is None
             or sub.last_video_timestamp < latest_video_created
-        ) and datetime.fromtimestamp(latest_video_created) > time_threshold
+        )
 
-        if force_push or is_new_and_recent_video:
+        if force_push or is_new_video:
             logger.info(f"检测到新视频 (或强制推送): UID={sub.uid}, 标题={video_title}")
             is_new_video_pushed = True
 
@@ -738,8 +757,27 @@ async def _get_up_status(sub: BiliSub, force_push: bool = False) -> list[Notific
 
             notebook.head(f"{uname} 投稿了新视频啦！🎉", level=2)
             notebook.image(video["pic"])
-            notebook.text(f"**标题：** {video_title}")
-            notebook.text(f"**Bvid：** {video_bvid}")
+
+            # Extract description with a fallback
+            video_desc = video.get("description", "").strip()
+            if not video_desc:
+                video_desc = "暂无简介"
+
+            # Replace newlines with HTML breaks for proper rendering
+            video_desc_html = video_desc.replace("\n", "<br>")
+
+            # Add a divider before the new info
+            notebook.add_divider()
+
+            # Inject structured HTML for the minimalist PSB theme
+            custom_html = f"""<div class="bilibili-video-info">
+<div class="video-title-container">{video_title}</div>
+<div class="video-meta-row">
+    <span>发布于：{video_time_str}</span>
+</div>
+<div class="video-description">{video_desc_html}</div>
+</div>"""
+            notebook.text(custom_html)
 
             if not force_push:
                 logger.debug(
@@ -751,19 +789,6 @@ async def _get_up_status(sub: BiliSub, force_push: bool = False) -> list[Notific
                 f"视频推送消息已准备: UID={sub.uid}, 用户名={uname}, 视频BV号={video_bvid}"
             )
 
-        elif (
-            not force_push
-            and latest_video_created
-            and (
-                sub.last_video_timestamp is None
-                or latest_video_created > sub.last_video_timestamp
-            )
-        ):
-            logger.debug(
-                f"检测到较早的新视频，仅更新记录: UID={sub.uid}, 视频发布时间={video_time_str}, 阈值={time_threshold}"
-            )
-            sub.last_video_timestamp = latest_video_created
-            await sub.save(update_fields=["last_video_timestamp"])
         else:
             logger.debug(
                 f"未检测到新视频: UID={sub.uid}, 最新视频时间={video_time_str}, 本地记录时间={'无记录' if sub.last_video_timestamp is None else datetime.fromtimestamp(sub.last_video_timestamp).strftime('%Y-%m-%d %H:%M:%S')}"
@@ -776,36 +801,18 @@ async def _get_up_status(sub: BiliSub, force_push: bool = False) -> list[Notific
         img_bytes = await ui.render(notebook, frameless=True)
         msg_list_content.append(img_bytes)
 
-        # 如果有动态原图，且功能开关已开启，则添加到消息列表中
-        if (
-            notification_type == NotificationType.DYNAMIC
-            and dynamic_images
-            and base_config.get("ENABLE_DYNAMIC_IMAGE", False)
-        ):
-            logger.info(f"动态中包含 {len(dynamic_images)} 张图片，将一并发送")
-            for img_url in dynamic_images:
-                try:
-                    # 下载图片
-                    img_data = await fetch_image_bytes(img_url)
-                    msg_list_content.append(img_data)
-                    logger.debug(f"成功添加动态原图: {img_url}")
-                except Exception as e:
-                    logger.warning(f"下载动态原图失败: {img_url}, 错误: {e}")
-
         if is_new_video_pushed and video:
             video_url_for_msg = (
                 f"https://www.bilibili.com/video/{video.get('bvid', '')}"
             )
             msg_list_content.append(f"\n视频链接: {video_url_for_msg}")
-        elif notification_type == NotificationType.DYNAMIC and dynamic_upload_time > 0:
-            dynamic_id = (await get_user_dynamics(sub.uid))["cards"][0]["desc"][
-                "dynamic_id"
-            ]
-            msg_list_content.append(f"\n查看详情: https://t.bilibili.com/{dynamic_id}")
 
         if notification_type:
             notifications.append(
-                Notification(content=msg_list_content, type=notification_type)
+                Notification(
+                    content=msg_list_content,
+                    type=notification_type,
+                )
             )
 
     duration = time.time() - start_time
@@ -821,10 +828,25 @@ async def _get_up_status(sub: BiliSub, force_push: bool = False) -> list[Notific
     return notifications
 
 
+@dataclass
+class DynamicItem:
+    """单条动态的数据"""
+
+    image: bytes
+    upload_time: int
+    dynamic_id: int
+    url: str
+    images: list[str] | None
+
+
 async def get_user_dynamic(
     sub: BiliSub,
-) -> tuple[bytes | None, int, str, list[str] | None]:
-    """获取用户动态"""
+) -> list[DynamicItem]:
+    """获取用户所有新动态（支持多条）
+
+    返回一个 DynamicItem 列表，按发布时间从旧到新排序，
+    这样调用方可以按时间顺序逐条推送。
+    """
     start_time = time.time()
     uid = sub.uid
 
@@ -834,10 +856,10 @@ async def get_user_dynamic(
         logger.error(
             f"获取用户动态时返回了非JSON内容 (可能被风控): UID={uid}, 异常信息={e}"
         )
-        return None, 0, "", None
+        return []
     except ResponseCodeException as e:
         logger.error(f"获取用户动态API错误: UID={uid}, Code={e.code}, Message={e.msg}")
-        return None, 0, "", None
+        return []
     except Exception as e:
         logger.error(
             f"获取用户动态异常: UID={uid}, 异常类型={type(e).__name__}, 异常信息={e}"
@@ -845,101 +867,146 @@ async def get_user_dynamic(
         import traceback
 
         logger.debug(f"异常详细信息:\n{traceback.format_exc()}")
-        return None, 0, "", None
+        return []
 
     if not dynamic_info:
         logger.warning(f"获取到的动态数据为空: UID={uid}")
-        return None, 0, "", None
+        return []
 
-    if not dynamic_info.get("cards"):
+    if "items" not in dynamic_info:
         logger.warning(
-            f"获取到的动态数据中没有cards字段: UID={uid}, 数据={dynamic_info.keys()}"
+            f"获取到的动态数据中没有items字段: "
+            f"UID={uid}, 数据键={list(dynamic_info.keys())}"
         )
-        return None, 0, "", None
+        return []
 
-    if not dynamic_info["cards"]:
+    items = dynamic_info["items"]
+    if items is None:
+        logger.warning(f"动态数据items字段为None: UID={uid}")
+        return []
+
+    if not items:
         logger.debug(f"用户没有动态: UID={uid}")
-        return None, 0, "", None
+        return []
 
-    dynamic_upload_time = dynamic_info["cards"][0]["desc"]["timestamp"]
-    dynamic_id = dynamic_info["cards"][0]["desc"]["dynamic_id"]
-    dynamic_time_str = datetime.fromtimestamp(dynamic_upload_time).strftime(
-        "%Y-%m-%d %H:%M:%S"
-    )
+    logger.debug(f"获取到动态数据: UID={uid}, items数量={len(items)}")
+
+    last_ts = sub.last_dynamic_timestamp or 0
+    new_dynamics: list[DynamicItem] = []
+
     logger.debug(
-        f"最新动态信息: UID={uid}, 动态ID={dynamic_id}, 发布时间={dynamic_time_str}"
+        f"动态时间戳基准: UID={uid}, "
+        f"last_ts={last_ts} "
+        f"({datetime.fromtimestamp(last_ts).strftime('%Y-%m-%d %H:%M:%S') if last_ts else 'N/A'})"
     )
 
-    # 提取动态中的图片URL
-    dynamic_images = []
-    try:
-        card = dynamic_info["cards"][0]
-        card_str = card.get("card", "{}")
+    for item in items:
+        # 新版 API: id_str 是动态ID
+        # pub_ts 可能在顶层，也可能在 modules.module_author 中
+        item_dynamic_id = item.get("id_str", "")
+        item_timestamp = item.get("pub_ts", 0)
+        if not item_timestamp:
+            # 回退到 modules.module_author.pub_ts
+            modules = item.get("modules", {})
+            author = modules.get("module_author", {})
+            item_timestamp = author.get("pub_ts", 0)
+        # 确保时间戳为整数（新版API可能返回字符串）
+        item_timestamp = int(item_timestamp) if item_timestamp else 0
 
-        # 解析卡片内容
-        # 检查card_str是否已经是dict
-        if isinstance(card_str, dict):
-            card_data = card_str
-        else:
-            card_data = json.loads(card_str)
+        if not item_dynamic_id:
+            logger.warning(f"动态缺少id_str字段: UID={uid}")
+            continue
 
-        # 提取不同类型的图片（仅提取用户自己的动态图片，不包括被转发的动态）
-        if "item" in card_data:
-            item = card_data["item"]
-            # 提取图片
-            if "pictures" in item:
-                # 图文动态
-                for pic in item["pictures"]:
-                    if "img_src" in pic:
-                        dynamic_images.append(pic["img_src"])
-            elif "pic" in item:
-                # 单图片动态
-                dynamic_images.append(item["pic"])
+        # 跳过已推送过的旧动态
+        if item_timestamp <= last_ts:
+            logger.debug(
+                f"跳过旧动态: UID={uid}, "
+                f"动态ID={item_dynamic_id}, "
+                f"pub_ts={item_timestamp}, "
+                f"last_ts={last_ts}"
+            )
+            continue
 
-    except Exception as e:
-        logger.warning(f"解析动态图片时出错: {e}")
-
-    if (
-        sub.last_dynamic_timestamp is None
-        or sub.last_dynamic_timestamp < dynamic_upload_time
-    ):
+        item_time_str = datetime.fromtimestamp(item_timestamp).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
         logger.info(
-            f"检测到新动态: UID={uid}, 用户名={sub.uname}, 动态ID={dynamic_id}, 发布时间={dynamic_time_str}"
+            f"检测到新动态: UID={uid}, "
+            f"用户名={sub.uname}, "
+            f"动态ID={item_dynamic_id}, "
+            f"发布时间={item_time_str}"
         )
 
-        logger.debug(f"开始获取动态截图: UID={uid}, 动态ID={dynamic_id}")
+        # 从新版 API 的 modules 中提取图片URL
+        dynamic_images: list[str] = []
         try:
-            image = await get_dynamic_screenshot(dynamic_id)
+            modules = item.get("modules", {})
+            module_dynamic = modules.get("module_dynamic", {})
+            major = module_dynamic.get("major", {})
+
+            # 图文动态的图片在 major.draw.items 中
+            if major and major.get("draw"):
+                draw_items = major["draw"].get("items", [])
+                for draw_item in draw_items:
+                    src = draw_item.get("src", "")
+                    if src:
+                        dynamic_images.append(src)
+
+            # 也检查 major.opus 中的图片
+            if major and major.get("opus"):
+                pics = major["opus"].get("pics", [])
+                for pic in pics:
+                    url = pic.get("url", "")
+                    if url:
+                        dynamic_images.append(url)
+        except Exception as e:
+            logger.warning(f"解析动态图片时出错: {e}")
+
+        # 获取动态截图
+        logger.debug(f"开始获取动态截图: UID={uid}, 动态ID={item_dynamic_id}")
+        try:
+            image = await get_dynamic_screenshot(int(item_dynamic_id))
             if image:
                 logger.debug(
-                    f"成功获取动态截图: UID={uid}, 动态ID={dynamic_id}, 图片大小={len(image)}字节"
+                    f"成功获取动态截图: UID={uid}, "
+                    f"动态ID={item_dynamic_id}, "
+                    f"图片大小={len(image)}字节"
                 )
-
-                duration = time.time() - start_time
-                logger.info(
-                    f"获取用户动态完成: UID={uid}, 检测到新动态, 耗时={duration:.2f}秒"
-                )
-
-                return (
-                    image,
-                    dynamic_upload_time,
-                    f"https://t.bilibili.com/{dynamic_id}",
-                    dynamic_images if dynamic_images else None,
+                new_dynamics.append(
+                    DynamicItem(
+                        image=image,
+                        upload_time=item_timestamp,
+                        dynamic_id=int(item_dynamic_id),
+                        url=(f"https://t.bilibili.com/{item_dynamic_id}"),
+                        images=(dynamic_images if dynamic_images else None),
+                    )
                 )
             else:
-                logger.warning(f"动态截图获取失败: UID={uid}, 动态ID={dynamic_id}")
+                logger.warning(f"动态截图获取失败: UID={uid}, 动态ID={item_dynamic_id}")
         except Exception as e:
             logger.error(
-                f"获取动态截图异常: UID={uid}, 动态ID={dynamic_id}, 异常类型={type(e).__name__}, 异常信息={e}"
+                f"获取动态截图异常: UID={uid}, "
+                f"动态ID={item_dynamic_id}, "
+                f"异常类型={type(e).__name__}, "
+                f"异常信息={e}"
             )
             import traceback
 
             logger.debug(f"异常详细信息:\n{traceback.format_exc()}")
-    else:
+
+    if not new_dynamics:
+        duration = time.time() - start_time
         logger.debug(
-            f"未检测到新动态: UID={uid}, 最新动态时间={dynamic_time_str}, 本地记录时间={'无记录' if sub.last_dynamic_timestamp is None else datetime.fromtimestamp(sub.last_dynamic_timestamp).strftime('%Y-%m-%d %H:%M:%S')}"
+            f"获取用户动态完成: UID={uid}, 未检测到新动态, 耗时={duration:.2f}秒"
+        )
+    else:
+        # 按发布时间从旧到新排序，确保推送顺序正确
+        new_dynamics.sort(key=lambda d: d.upload_time)
+        duration = time.time() - start_time
+        logger.info(
+            f"获取用户动态完成: UID={uid}, "
+            f"检测到 {len(new_dynamics)} 条新动态, "
+            f"耗时={duration:.2f}秒"
         )
 
-    duration = time.time() - start_time
-    logger.debug(f"获取用户动态完成: UID={uid}, 未检测到新动态, 耗时={duration:.2f}秒")
-    return None, 0, "", None
+    return new_dynamics

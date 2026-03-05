@@ -186,6 +186,15 @@ _subs_lock = asyncio.Lock()
 async def _():
     await load_credential_from_file()
 
+    # 启动时重置所有订阅的时间戳为当前时间，
+    # 建立基准点，避免掉线期间积压的内容被推送
+    now_ts = int(time.time())
+    updated = await BiliSub.all().update(
+        last_dynamic_timestamp=now_ts,
+        last_video_timestamp=now_ts,
+    )
+    logger.info(f"B站订阅启动基准点已建立: 已更新 {updated} 条订阅记录的时间戳")
+
 
 @scheduler.scheduled_job("cron", hour=4, minute=0)
 async def cleanup_bilibili_sub_cache():

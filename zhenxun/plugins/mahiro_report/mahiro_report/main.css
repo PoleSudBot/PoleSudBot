@@ -6,7 +6,7 @@ body {
 
 @font-face {
   font-family: "Noto Sans SC B";
-  src: url("./res/font/NotoSansSC-Bold.otf") format("opentype");
+  src: url("../../../font/pingfangsc-regular.otf") format("opentype");
   font-weight: 700;
   font-style: normal;
   font-display: swap;
@@ -14,7 +14,7 @@ body {
 
 @font-face {
   font-family: "Noto Sans SC";
-  src: url("./res/font/NotoSansSC-Regular.otf") format("opentype");
+  src: url("../../../font/pingfangsc-regular.otf") format("opentype");
   font-weight: 400;
   font-style: normal;
   font-display: swap;
