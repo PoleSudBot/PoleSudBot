@@ -112,3 +112,65 @@ async def handle_summary(
             )
         except Exception as stat_e:
             logger.error(f"记录统计失败: {stat_e}", command="总结", e=stat_e)
+
+
+async def handle_time_range_summary(
+    bot: Bot,
+    event: GroupMessageEvent | PrivateMessageEvent,
+    result: CommandResult,
+    style: Match[str],
+    target: MsgTarget,
+    time_range_type: str = "today",
+):
+    """处理今日总结/昨日总结命令"""
+    from .. import base_config
+
+    is_superuser = await SUPERUSER(bot, event)
+    originating_group_id = (
+        event.group_id if isinstance(event, GroupMessageEvent) else None
+    )
+
+    arp = result.result
+    target_group_id_match = arp.query("g.target_group_id") if arp else None
+
+    if target_group_id_match and not is_superuser:
+        await UniMessage.text("需要超级用户权限才能使用 -g 参数指定群聊。").send(target)
+        return
+
+    if target_group_id_match and is_superuser:
+        target_group_id_to_fetch = int(target_group_id_match)
+    else:
+        target_group_id_to_fetch = originating_group_id
+
+    if target_group_id_to_fetch is None:
+        await UniMessage.text(
+            "请在群聊中使用此命令，或使用 -g <群号> 参数指定目标群聊。(仅限超级用户)"
+        ).send(target)
+        return
+
+    label = "今日" if time_range_type == "today" else "昨日"
+    feedback = f"正在生成{label}总结"
+    if style.available:
+        feedback += f"（风格: {style.result}）"
+    feedback += "，请稍候..."
+    await UniMessage.text(feedback).send(target)
+
+    max_count = int(base_config.get("SUMMARY_MAX_LENGTH", 1000))
+
+    params = SummaryParameters(
+        bot=bot,
+        target_group_id=target_group_id_to_fetch,
+        message_count=max_count,
+        style=style.result if style.available else None,
+        response_target=target,
+        time_range_type=time_range_type,
+    )
+
+    service = SummaryService(params)
+    success = await service.execute()
+
+    if success:
+        logger.debug(
+            f"{label}总结命令成功完成 (Group: {target_group_id_to_fetch})",
+            command=f"{label}总结",
+        )

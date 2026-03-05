@@ -19,6 +19,10 @@ class SummaryTaskParams(BaseModel):
     )
     style: str | None = Field(default=None, description="总结的风格")
     model: str | None = Field(default=None, description="使用的AI模型")
+    time_range_type: str | None = Field(
+        default=None,
+        description="时间范围类型: today 或 yesterday",
+    )
 
 
 @scheduler_manager.register(
@@ -48,32 +52,62 @@ async def scheduled_summary_task(
         least_message_count = params.least_message_count
         style = params.style
         model = params.model
+        time_range_type = params.time_range_type
 
         from .message_processing import get_group_messages
 
         min_len_required = base_config.get("SUMMARY_MIN_LENGTH", 50)
-        if least_message_count < min_len_required:
+
+        # 时间范围模式不检查最少消息数，因为消息量由时间决定
+        if not time_range_type and least_message_count < min_len_required:
             logger.warning(
-                f"[{task_id}] 群 {group_id} 定时任务的最少消息数 ({least_message_count}) 低于系统要求 ({min_len_required})，跳过本次执行。"
+                f"[{task_id}] 群 {group_id} 定时任务的"
+                f"最少消息数 ({least_message_count}) "
+                f"低于系统要求 ({min_len_required})"
+                f"，跳过本次执行。"
             )
             return
 
-        processed_messages, user_info_cache = await get_group_messages(
+        result = await get_group_messages(
             bot,
             int(group_id),
             least_message_count,
             use_db=base_config.get("USE_DB_HISTORY", False),
+            time_range_type=time_range_type,
         )
 
-        if not processed_messages or len(processed_messages) < min_len_required:
+        # 解析返回值（时间范围模式返回 3-tuple）
+        warning_msg = None
+        if len(result) == 3:
+            processed_messages, user_info_cache, warning_msg = result
+        else:
+            processed_messages, user_info_cache = result
+
+        if not processed_messages:
             logger.info(
-                f"[{task_id}] 群 {group_id} 消息数量不足 ({len(processed_messages)}/{min_len_required})，不生成总结。"
+                f"[{task_id}] 群 {group_id} 没有获取到消息"
+                f"{'(时间范围: ' + time_range_type + ')' if time_range_type else ''}"
+                f"，不生成总结。"
+            )
+            return
+
+        if not time_range_type and len(processed_messages) < min_len_required:
+            logger.info(
+                f"[{task_id}] 群 {group_id} 消息数量不足 "
+                f"({len(processed_messages)}/{min_len_required})"
+                f"，不生成总结。"
             )
             return
 
         from nonebot_plugin_alconna.uniseg import Target
 
         msg_target = Target.group(group_id=int(group_id))
+
+        # 如果有超出限制警告，先发送
+        if warning_msg:
+            from nonebot_plugin_alconna.uniseg import UniMessage
+
+            await UniMessage.text(warning_msg).send(msg_target, bot)
 
         summary = await messages_summary(
             target=msg_target,
@@ -82,11 +116,23 @@ async def scheduled_summary_task(
             model_name=model,
         )
 
-        await send_summary(bot, msg_target, summary, user_info_cache)
+        await send_summary(
+            bot,
+            msg_target,
+            summary,
+            user_info_cache,
+            group_id=int(group_id),
+        )
 
     except (SummaryException, LLMException) as e:
-        logger.error(f"[{task_id}] 执行定时总结失败: {e}", group_id=group_id, e=e)
+        logger.error(
+            f"[{task_id}] 执行定时总结失败: {e}",
+            group_id=group_id,
+            e=e,
+        )
     except Exception as e:
         logger.error(
-            f"[{task_id}] 执行定时总结时发生未知错误: {e}", group_id=group_id, e=e
+            f"[{task_id}] 执行定时总结时发生未知错误: {e}",
+            group_id=group_id,
+            e=e,
         )

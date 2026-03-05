@@ -22,7 +22,7 @@ class SummaryConfig:
     USER_INFO_MAX_RETRIES = 2
     USER_INFO_RETRY_DELAY = 1.0
 
-    TIME_OUT = 120
+    TIME_OUT = 300
     MAX_RETRIES = 3
     RETRY_DELAY = 2
     CONCURRENT_TASKS = 2
@@ -96,6 +96,16 @@ class SummaryConfig:
     def get_concurrent_tasks(cls) -> int:
         """获取同时处理总结任务的最大数量"""
         return getattr(cls, "CONCURRENT_TASKS", 2)
+
+    @classmethod
+    def get_day_boundary(cls) -> tuple[int, int]:
+        """获取每日分界时间 (hour, minute)，默认 06:00"""
+        raw = base_config.get("SUMMARY_DAY_BOUNDARY", "06:00")
+        try:
+            parts = str(raw).split(":")
+            return int(parts[0]), int(parts[1])
+        except Exception:
+            return 6, 0
 
 
 summary_config = SummaryConfig()

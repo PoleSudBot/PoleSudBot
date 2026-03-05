@@ -98,9 +98,11 @@ __plugin_meta__ = PluginMetadata(
         "  `总结 <数量> @用户` - 总结特定用户的发言\n"
         "  `总结 <数量> <关键词>` - 总结含特定关键词的消息\n"
         "  `总结 <数量> -p <风格>` - 指定本次总结的风格\n"
+        "  `今日总结` - 总结今天（分界点至今）的消息\n"
+        "  `昨日总结` - 总结昨天（分界点前24h）的消息\n"
         "  *(超级用户可追加 `-g <群号>` 指定任意群聊)*\n\n"
         "⏱️ **定时总结 (管理员及以上)**\n"
-        "  `定时总结 <时间> [数量] [-p <风格>]` - 为本群设置每日定时总结\n"
+        "  `定时总结 <时间> [今日|昨日] [数量] [-p <风格>]`\n"
         "  `定时总结取消` - 取消本群的定时总结任务\n"
         "  *(时间格式: HH:MM 或 HHMM)*\n"
         "  *(超级用户可追加 `-g <群号>` 或 `-all`)*\n\n"
@@ -224,6 +226,14 @@ __plugin_meta__ = PluginMetadata(
                 default_value=True,
                 type=bool,
             ),
+            RegisterConfig(
+                module="summary_group",
+                key="SUMMARY_DAY_BOUNDARY",
+                value="06:00",
+                help="今日/昨日总结的每日分界时间 (HH:MM格式)",
+                default_value="06:00",
+                type=str,
+            ),
         ],
         limits=[
             PluginCdBlock(
@@ -245,7 +255,9 @@ summary_group = on_alconna(
             "message_count",
             int,
             Field(
-                completion=lambda: f"输入消息数量 ({base_config.get('SUMMARY_MIN_LENGTH', 1)}-{base_config.get('SUMMARY_MAX_LENGTH', 1000)})",
+                completion=lambda: (
+                    f"输入消息数量 ({base_config.get('SUMMARY_MIN_LENGTH', 1)}-{base_config.get('SUMMARY_MAX_LENGTH', 1000)})"
+                ),
             ),
         ],
         Option(
@@ -286,6 +298,14 @@ summary_set = on_alconna(
         "定时总结",
         Args["time_str", str, Field(completion="输入定时时间 (HH:MM 或 HHMM)")],
         Args[
+            "time_range_mode?",
+            str,
+            Field(
+                default=None,
+                completion="可选: 今日 或 昨日",
+            ),
+        ],
+        Args[
             "least_message_count?",
             int,
             Field(
@@ -307,7 +327,8 @@ summary_set = on_alconna(
         meta=CommandMeta(
             description="设置定时群聊总结",
             usage=(
-                "定时总结 <时间> [最少消息数量] [-p|--prompt 风格] [-g 群号 | -all]\n"
+                "定时总结 <时间> [今日|昨日] [最少消息数量] "
+                "[-p|--prompt 风格] [-g 群号 | -all]\n"
                 "时间格式: HH:MM 或 HHMM\n"
                 "说明: 设置本群需管理员, -g/-all 仅限超级用户"
             ),
@@ -399,6 +420,56 @@ summary_config_cmd = on_alconna(
     block=True,
 )
 
+summary_today = on_alconna(
+    Alconna(
+        "今日总结",
+        Option(
+            "-p|--prompt",
+            Args["style", str, Field(completion="指定总结风格")],
+        ),
+        Option(
+            "-g",
+            Args[
+                "target_group_id",
+                int,
+                Field(completion="指定群号 (需要超级用户权限)"),
+            ],
+        ),
+        meta=CommandMeta(
+            description="总结今天（分界点至今）的群聊消息",
+            usage="今日总结 [-p 风格] [-g 群号]",
+        ),
+    ),
+    rule=is_allowed_call(),
+    priority=5,
+    block=True,
+)
+
+summary_yesterday = on_alconna(
+    Alconna(
+        "昨日总结",
+        Option(
+            "-p|--prompt",
+            Args["style", str, Field(completion="指定总结风格")],
+        ),
+        Option(
+            "-g",
+            Args[
+                "target_group_id",
+                int,
+                Field(completion="指定群号 (需要超级用户权限)"),
+            ],
+        ),
+        meta=CommandMeta(
+            description="总结昨天（分界点前24h）的群聊消息",
+            usage="昨日总结 [-p 风格] [-g 群号]",
+        ),
+    ),
+    rule=is_allowed_call(),
+    priority=5,
+    block=True,
+)
+
 
 from .handlers.group_settings import (
     handle_global_model_setting,
@@ -412,6 +483,9 @@ from .handlers.scheduler import (
     handle_summary_set as summary_set_handler_impl,
 )
 from .handlers.summary import handle_summary as summary_handler_impl
+from .handlers.summary import (
+    handle_time_range_summary as time_range_summary_handler_impl,
+)
 
 
 @summary_group.handle()
@@ -480,6 +554,25 @@ async def _(
         time_str_match = arp.query("time_str")
         least_count_match = arp.query("least_message_count")
 
+        # 解析 time_range_mode (今日/昨日)
+        time_range_mode_raw = arp.query("time_range_mode")
+        time_range_type = None
+        if time_range_mode_raw:
+            mode_str = str(time_range_mode_raw).strip()
+            if mode_str in ("今日", "today"):
+                time_range_type = "today"
+            elif mode_str in ("昨日", "yesterday"):
+                time_range_type = "yesterday"
+            else:
+                # 可能用户把数量写在了这个位置
+                try:
+                    least_count_match = int(mode_str)
+                except ValueError:
+                    await UniMessage.text(
+                        f"无法识别的模式 '{mode_str}'，请使用 '今日' 或 '昨日'"
+                    ).send(target)
+                    return
+
         style_value = arp.query("p.style")
         if style_value is None:
             style_value = arp.query("prompt.style")
@@ -507,7 +600,14 @@ async def _(
             return
 
         await summary_set_handler_impl(
-            bot, event, result, time_tuple, least_count, style_value, target
+            bot,
+            event,
+            result,
+            time_tuple,
+            least_count,
+            style_value,
+            target,
+            time_range_type,
         )
     except Exception as e:
         logger.error(
@@ -559,3 +659,29 @@ async def _(
     result: CommandResult,
 ):
     await handle_group_specific_config(bot, event, target, result)
+
+
+@summary_today.handle()
+async def _(
+    bot: Bot,
+    event: GroupMessageEvent | PrivateMessageEvent,
+    result: CommandResult,
+    style: Match[str],
+    target: MsgTarget,
+):
+    await time_range_summary_handler_impl(
+        bot, event, result, style, target, time_range_type="today"
+    )
+
+
+@summary_yesterday.handle()
+async def _(
+    bot: Bot,
+    event: GroupMessageEvent | PrivateMessageEvent,
+    result: CommandResult,
+    style: Match[str],
+    target: MsgTarget,
+):
+    await time_range_summary_handler_impl(
+        bot, event, result, style, target, time_range_type="yesterday"
+    )

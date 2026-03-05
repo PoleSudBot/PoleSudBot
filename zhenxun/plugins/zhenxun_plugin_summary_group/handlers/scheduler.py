@@ -74,6 +74,7 @@ async def handle_summary_set(
     least_count: int,
     style: str | None,
     target: MsgTarget,
+    time_range_type: str | None = None,
 ):
     hour, minute = time_tuple
     arp = result.result
@@ -85,6 +86,7 @@ async def handle_summary_set(
     job_kwargs = {
         "least_message_count": least_count,
         "style": style,
+        "time_range_type": time_range_type,
     }
 
     if all_enabled:
@@ -133,9 +135,14 @@ async def handle_summary_set(
     )
 
     if schedule:
+        mode_label = ""
+        if time_range_type == "today":
+            mode_label = " (今日总结模式)"
+        elif time_range_type == "yesterday":
+            mode_label = " (昨日总结模式)"
         response_msg = (
             f"已成功为群 {target_group_id} 设置定时总结任务: \n"
-            f"每天 {hour:02d}:{minute:02d} 发送"
+            f"每天 {hour:02d}:{minute:02d} 发送{mode_label}"
         )
         await UniMessage.text(response_msg).send(target)
     else:

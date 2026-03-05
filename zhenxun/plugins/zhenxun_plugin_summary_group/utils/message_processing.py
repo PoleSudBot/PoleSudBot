@@ -48,12 +48,15 @@ async def get_group_messages(
     count: int,
     use_db: bool = False,
     target_user_ids: set[str] | None = None,
-) -> tuple[list[dict], dict[str, str]]:
-    """获取群聊消息，支持从数据库或API获取，可选用户过滤和消息处理"""
+    time_range_type: str | None = None,
+):
+    """获取群聊消息，支持时间范围过滤和最大消息数量限制。"""
+
+    warning_msg: str | None = None
 
     cache_ttl = base_config.get("MESSAGE_CACHE_TTL_SECONDS", 300)
 
-    if cache_ttl > 0 and not target_user_ids:
+    if cache_ttl > 0 and not target_user_ids and not time_range_type:
         group_id_str = str(group_id)
         cache_key = f"{group_id_str}:{count}"
         current_time = time.time()
@@ -91,6 +94,8 @@ async def get_group_messages(
                     command="DB历史",
                     group_id=group_id,
                 )
+                if time_range_type:
+                    return [], {}, None
                 return [], {}
 
             formatted_messages = []
@@ -180,6 +185,15 @@ async def get_group_messages(
             )
             raise ex from e
 
+    # --- 时间范围过滤 ---
+    if time_range_type and raw_messages:
+        raw_messages = _filter_by_time_range(raw_messages, time_range_type)
+        logger.debug(
+            f"时间范围过滤后剩余 {len(raw_messages)} 条消息 (类型: {time_range_type})",
+            command="get_group_messages",
+            group_id=group_id,
+        )
+
     filtered_messages = raw_messages
     if target_user_ids:
         filtered_messages = [
@@ -191,12 +205,22 @@ async def get_group_messages(
             group_id=group_id,
         )
 
+    # --- 最大消息数量限制检查 ---
+    max_len = int(base_config.get("SUMMARY_MAX_LENGTH", 1000))
+    if len(filtered_messages) > max_len:
+        warning_msg = f"⚠️ 已超出最大总结范围，仅提取了 {max_len} 条记录进行分析"
+        logger.warning(warning_msg, group_id=group_id)
+        filtered_messages = filtered_messages[-max_len:]
+
     if not filtered_messages:
         logger.warning(
-            f"群 {group_id} 未返回任何有效消息{'（指定用户）' if target_user_ids else ''}",
+            f"群 {group_id} 未返回任何有效消息"
+            f"{'（指定用户）' if target_user_ids else ''}",
             command="get_group_messages",
             group_id=group_id,
         )
+        if time_range_type:
+            return [], {}, None
         return [], {}
 
     try:
@@ -204,13 +228,16 @@ async def get_group_messages(
             filtered_messages, bot, group_id
         )
 
-        if cache_ttl > 0 and not target_user_ids:
+        if cache_ttl > 0 and not target_user_ids and not time_range_type:
+            cache_key = f"{group_id_str}:{count}"
             _message_cache[cache_key] = (
                 (processed_data, user_info_cache),
                 time.time(),
             )
             logger.debug(f"消息已存入缓存 (群: {group_id}, 数量: {count})")
 
+        if time_range_type:
+            return processed_data, user_info_cache, warning_msg
         return processed_data, user_info_cache
     except Exception as e:
         logger.error(
@@ -226,6 +253,44 @@ async def get_group_messages(
             cause=e,
         )
         raise ex from e
+
+
+def _filter_by_time_range(
+    messages: list[dict],
+    time_range_type: str,
+) -> list[dict]:
+    """根据时间范围类型过滤消息。
+
+    使用 Asia/Shanghai 时区计算日分界点。
+    """
+    from datetime import datetime, timedelta
+
+    import pytz
+
+    from ..config import summary_config
+
+    tz = pytz.timezone("Asia/Shanghai")
+    now = datetime.now(tz)
+    b_hour, b_minute = summary_config.get_day_boundary()
+
+    today_boundary = now.replace(hour=b_hour, minute=b_minute, second=0, microsecond=0)
+    if now < today_boundary:
+        today_boundary -= timedelta(days=1)
+
+    if time_range_type == "today":
+        start_ts = today_boundary.timestamp()
+        end_ts = now.timestamp()
+    else:  # yesterday
+        end_ts = today_boundary.timestamp()
+        start_ts = (today_boundary - timedelta(days=1)).timestamp()
+
+    logger.debug(
+        f"时间范围过滤: type={time_range_type}, "
+        f"start={datetime.fromtimestamp(start_ts, tz)}, "
+        f"end={datetime.fromtimestamp(end_ts, tz)}",
+    )
+
+    return [msg for msg in messages if start_ts <= msg.get("time", 0) <= end_ts]
 
 
 @Retry.api(
@@ -355,9 +420,27 @@ async def process_message(
                     default_at_name = _truncate_username(f"用户_{qq[-4:]}")
                     at_name = user_info_cache.get(qq, default_at_name)
                     text_segments.append(f"@{at_name}")
+                elif seg_type == "image":
+                    summary = seg_data.get("summary")
+                    if summary:
+                        text_segments.append(f"[图片]{summary}")
+                    else:
+                        text_segments.append("[图片]")
 
             if text_segments:
                 message_content = "".join(text_segments)
+                import re
+
+                def img_replacer(match):
+                    m = re.search(r"summary=(.*?)(?:,[a-z_]+=|\])", match.group(0))
+                    if m and m.group(1):
+                        return f"[图片]{m.group(1)}"
+                    return "[图片]"
+
+                message_content = re.sub(
+                    r"\[image:[^\]]+\]", img_replacer, message_content
+                )
+
                 processed_log.append({"name": sender_name, "content": message_content})
 
         logger.debug(

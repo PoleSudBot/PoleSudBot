@@ -1,16 +1,15 @@
 import datetime
-import traceback
 from pathlib import Path
+import traceback
 
-from bilibili_api import user as bilibili_user_module
-from bilibili_api import live as bilibili_live_module
 from bilibili_api import Credential as BilibiliCredential
-
+from bilibili_api import live as bilibili_live_module
+from bilibili_api import user as bilibili_user_module
 from nonebot_plugin_htmlrender import get_new_page
 
+from zhenxun.configs.path_config import IMAGE_PATH
 from zhenxun.services.log import logger
 from zhenxun.utils.http_utils import AsyncHttpx
-from zhenxun.configs.path_config import IMAGE_PATH
 
 from .config import AVATAR_CACHE_DIR, BANGUMI_COVER_CACHE_DIR, get_credential
 
@@ -79,15 +78,14 @@ async def get_user_card(
 
 async def get_user_dynamics(
     uid: int,
-    offset: int = 0,
-    need_top: bool = False,
+    offset: str = "",
     auth: BilibiliCredential | None = None,
     **kwargs,
 ):
-    """获取指定用户历史动态"""
+    """获取指定用户历史动态（使用新版API）"""
     credential = auth or get_credential()
     user_instance = bilibili_user_module.User(uid=uid, credential=credential)
-    return await user_instance.get_dynamics(offset=offset, need_top=need_top, **kwargs)
+    return await user_instance.get_dynamics_new(offset=offset, **kwargs)
 
 
 async def get_room_info_by_id(

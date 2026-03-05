@@ -9,7 +9,7 @@ from nonebot.drivers import Driver
 from nonebot_plugin_uninfo import Uninfo
 
 from zhenxun import ui
-from zhenxun.configs.config import BotConfig, Config
+from zhenxun.configs.config import Config
 from zhenxun.configs.path_config import THEMES_PATH
 from zhenxun.models.sign_user import SignUser
 from zhenxun.services import avatar_service
@@ -23,9 +23,9 @@ from .config import (
     lik2relation,
 )
 
-assert (
-    len(level2attitude) == len(lik2level) == len(lik2relation)
-), "好感度态度、等级、关系长度不匹配！"
+assert len(level2attitude) == len(lik2level) == len(lik2relation), (
+    "好感度态度、等级、关系长度不匹配！"
+)
 
 AVA_URL = "http://q1.qlogo.cn/g?b=qq&nk={}&s=160"
 
@@ -39,6 +39,10 @@ MORNING_MESSAGE = [
     "醒了吗，今天也要元气满满哦！",
     "早上好呀，今天也要开心哦！",
     "早安，愿你拥有美好的一天！",
+    "晨光微露，又是干劲满满的新一天！",
+    "伸个懒腰，把昨天的烦恼全都忘掉吧~",
+    "早安早安！一定要记得吃早餐哦！",
+    "新的一天开始啦，向着目标继续前进吧！",
 ]
 
 LG_MESSAGE = [
@@ -46,6 +50,21 @@ LG_MESSAGE = [
     "可不要熬夜到太晚呀",
     "请尽早休息吧！",
     "不要熬夜啦！",
+    "夜深啦，快钻进温暖的被窝里去吧~",
+    "身体是革命的本钱，早点睡觉才是乖孩子！",
+    "晚安好梦，明天见呀！",
+    "星星都困得睡着了，你也快闭上眼睛吧。",
+]
+
+NORMAL_MESSAGE = [
+    "希望你今天能遇到开心的事情！",
+    "累了的话，随时欢迎来找我聊聊天哦~",
+    "记得多喝热水，照顾好自己呀！",
+    "无论遇到什么困难，你都能克服的！",
+    "今天的心情也很不错呢，对吧？",
+    "劳逸结合，不要让自己太辛苦了哦。",
+    "有什么烦心事都可以告诉我，我一直在！",
+    "开心点，一切都会好起来的~",
 ]
 
 
@@ -97,6 +116,7 @@ async def get_card(
     gift: str,
     is_double: bool = False,
     is_card_view: bool = False,
+    continuous_sign_count: int = 0,
 ) -> Path:
     """获取好感度卡片
 
@@ -109,6 +129,7 @@ async def get_card(
         gift: 礼物
         is_double: 是否触发双倍.
         is_card_view: 是否展示好感度卡片.
+        continuous_sign_count: 连续签到天数
 
     返回:
         Path: 卡片路径
@@ -134,7 +155,15 @@ async def get_card(
         is_card_view = True
 
     return await _generate_html_card(
-        user, session, nickname, add_impression, gold, gift, is_double, is_card_view
+        user,
+        session,
+        nickname,
+        add_impression,
+        gold,
+        gift,
+        is_double,
+        is_card_view,
+        continuous_sign_count,
     )
 
 
@@ -186,6 +215,7 @@ async def _generate_html_card(
     gift: str,
     is_double: bool = False,
     is_card_view: bool = False,
+    continuous_sign_count: int = 0,
 ) -> Path:
     """使用渲染服务生成签到卡片
 
@@ -198,6 +228,7 @@ async def _generate_html_card(
         gift: 礼物
         is_double: 是否触发双倍.
         is_card_view: 是否为卡片视图.
+        continuous_sign_count: 连续签到天数
 
     返回:
         Path: 卡片路径
@@ -238,12 +269,11 @@ async def _generate_html_card(
 
     hour = now.hour
     if 6 < hour < 10:
-        message = random.choice(MORNING_MESSAGE)
+        bot_message = random.choice(MORNING_MESSAGE)
     elif 0 <= hour < 6:
-        message = random.choice(LG_MESSAGE)
+        bot_message = random.choice(LG_MESSAGE)
     else:
-        message = f"{BotConfig.self_nickname}希望你开心！"
-    bot_message = f"{BotConfig.self_nickname}说: {message}"
+        bot_message = random.choice(NORMAL_MESSAGE)
 
     temperature = random.randint(1, 40)
     weather_icon_name = f"{random.randint(0, 11)}.png"
@@ -262,6 +292,7 @@ async def _generate_html_card(
         "avatar_url": avatar_path.as_uri() if avatar_path else "",
         "sign_count": user.sign_count,
         "font_size": font_size,
+        "continuous_sign_count": continuous_sign_count,
     }
 
     favorability_info = {

@@ -74,6 +74,7 @@ async def messages_summary(
 
     prompt_parts.append(
         "要求：排版需层次清晰，用中文回答，请包含谁说了什么重要内容。\n"
+        "在正式回答前，请务必进行高强度的深度思考流程，并将你的思考内容放在 <think> 和 </think> 标签内。\n"
         "注意使用丰富的markdown格式让内容更美观，注意要在合适的场景使用合适的样式,包括："
         "标题层级(h1-h6),分隔线(hr)、表格(table)、斜体(em)、"
         "任务列表(chekbox)、删除线 (Strikethrough)、"
@@ -107,8 +108,22 @@ async def messages_summary(
         )
 
         async with await get_model_instance(final_model_name_str) as model:
-            response = await model.generate_response(llm_messages)
+            from zhenxun.services.llm import CommonOverrides
+
+            from ..config import summary_config
+
+            config = CommonOverrides.gemini_3_thinking("HIGH")
+
+            response = await model.generate_response(
+                llm_messages, config=config, timeout=summary_config.get_timeout()
+            )
             summary_text = response.text
+
+        import re
+
+        summary_text = re.sub(
+            r"<think>.*?</think>", "", summary_text, flags=re.DOTALL
+        ).strip()
 
         return summary_text
     except LLMException as e:
@@ -150,9 +165,7 @@ async def generate_image(
 
             use_avatars = base_config.get("ENABLE_AVATAR_ENHANCEMENT", False)
 
-            await avatar_enhancer.enhance_summary_with_avatars(
-                summary, user_info_cache
-            )
+            await avatar_enhancer.enhance_summary_with_avatars(summary, user_info_cache)
 
             if not use_avatars:
                 enhanced_html = avatar_enhancer.enhance_html_with_markup(
@@ -228,6 +241,7 @@ async def send_summary(
     target: MsgTarget,
     summary: str,
     user_info_cache: dict[str, str] | None = None,
+    group_id: int | None = None,
 ) -> bool:
     try:
         reply_msg = None
@@ -237,6 +251,10 @@ async def send_summary(
         if output_type == "image":
             try:
                 img_bytes = await generate_image(summary, user_info_cache)
+
+                # 持久化保存图片
+                if img_bytes and group_id:
+                    await _save_summary_image(img_bytes, group_id)
 
                 reply_msg = UniMessage.image(raw=img_bytes)
             except (SummaryException, ValueError) as e:
@@ -249,7 +267,8 @@ async def send_summary(
                     return False
 
                 logger.warning(
-                    f"图片生成失败，已启用文本回退: {e}", command="send_summary"
+                    f"图片生成失败，已启用文本回退: {e}",
+                    command="send_summary",
                 )
 
         if reply_msg is None:
@@ -275,16 +294,52 @@ async def send_summary(
             await reply_msg.send(target, bot)
 
             logger.info(
-                f"总结已发送，类型: {output_type or 'text'}", command="send_summary"
+                f"总结已发送，类型: {output_type or 'text'}",
+                command="send_summary",
             )
             return True
 
-        logger.error("无法发送总结：回复消息为空", command="send_summary")
+        logger.error(
+            "无法发送总结：回复消息为空",
+            command="send_summary",
+        )
         return False
 
     except Exception as e:
-        logger.error(f"发送总结失败: {e}", command="send_summary", e=e)
+        logger.error(
+            f"发送总结失败: {e}",
+            command="send_summary",
+            e=e,
+        )
         return False
+
+
+async def _save_summary_image(img_bytes: bytes, group_id: int) -> None:
+    """持久化保存总结图片到 data/summary_group/"""
+    try:
+        from zhenxun.configs.path_config import DATA_PATH
+
+        save_dir = DATA_PATH / "summary_group"
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        import time as _time
+
+        ts = int(_time.time())
+        filename = f"summary_{group_id}_{ts}.png"
+        filepath = save_dir / filename
+
+        async with aiofiles.open(filepath, "wb") as f:
+            await f.write(img_bytes)
+
+        logger.info(
+            f"总结图片已保存: {filepath}",
+            command="send_summary",
+        )
+    except Exception as e:
+        logger.warning(
+            f"保存总结图片失败: {e}",
+            command="send_summary",
+        )
 
 
 async def read_tpl(path: str) -> str:
