@@ -1,15 +1,21 @@
-import json
-import random
 import datetime
-import time
-import httpx
+import json
 from pathlib import Path
+import random
+import time
 from typing import Optional
 
-from nonebot import on_command, require, get_driver
-from nonebot.adapters.onebot.v11 import Event, MessageSegment, Message, GroupMessageEvent, Bot
-from nonebot.params import CommandArg
+import httpx
+from nonebot import get_driver, on_command, require
+from nonebot.adapters.onebot.v11 import (
+    Bot,
+    Event,
+    GroupMessageEvent,
+    Message,
+    MessageSegment,
+)
 from nonebot.log import logger
+from nonebot.params import CommandArg
 from nonebot.plugin import PluginMetadata
 
 # 确保依赖插件先被 NoneBot 注册（必须在本地模块 import 之前）
@@ -21,25 +27,33 @@ from nonebot_plugin_htmlrender import template_to_pic
 
 # 本地模块（在 require() 之后 import）
 from .config import Config
-from .roast_manager import roast_manager
 from .data_manager import data_manager
+from .roast_manager import roast_manager
 from .texts import (
-    TOMORROW_TEXTS,
-    FOOD_PIG_IDS, HUMAN_PIG_ID,
-    FORCE_ROAST_KEYWORDS, SUPER_FORCE_ROAST_KEYWORD,
-    TODAY_ROAST_HUMAN_BLOCK_TEXTS, TODAY_ROAST_FOOD_BLOCK_TEXTS,
-    TARGET_HUMAN_BLOCK_TEXTS, TARGET_FOOD_BLOCK_TEXTS,
-    BACKFIRE_HUMAN_TEXTS, BACKFIRE_FOOD_TEXTS,
-    BACKFIRE_NO_PIG_TEXTS, BACKFIRE_GENERIC_TEXTS,
+    BACKFIRE_FOOD_TEXTS,
+    BACKFIRE_GENERIC_TEXTS,
+    BACKFIRE_HUMAN_TEXTS,
+    BACKFIRE_NO_PIG_TEXTS,
     ESCAPE_TEXTS,
-    SUPER_FORCE_ROAST_PREFIX_TEXTS, FORCE_ROAST_PREFIX_TEXTS,
+    FOOD_PIG_IDS,
+    FORCE_ROAST_KEYWORDS,
     FORCE_ROAST_LIMIT_TEXTS,
+    FORCE_ROAST_PREFIX_TEXTS,
+    HUMAN_PIG_ID,
     ROAST_BOT_TEXTS,
+    SUPER_FORCE_ROAST_KEYWORD,
+    SUPER_FORCE_ROAST_PREFIX_TEXTS,
+    TARGET_FOOD_BLOCK_TEXTS,
+    TARGET_HUMAN_BLOCK_TEXTS,
+    TODAY_ROAST_FOOD_BLOCK_TEXTS,
+    TODAY_ROAST_HUMAN_BLOCK_TEXTS,
+    TOMORROW_TEXTS,
 )
 
 # --- 引入 PIL ---
 try:
     from PIL import Image as PILImage
+
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
@@ -87,6 +101,7 @@ pighub_last_loaded: float = 0.0
 
 # ================= 资源加载 =================
 
+
 def load_resource_json(path, default):
     if not path.exists():
         return default
@@ -101,6 +116,7 @@ PIG_LIST = load_resource_json(PIGINFO_PATH, [])
 
 # ================= 工具函数 =================
 
+
 def find_image_file(pig_id: str) -> Path | None:
     exts = ["png", "jpg", "jpeg", "webp", "gif"]
     for ext in exts:
@@ -110,7 +126,7 @@ def find_image_file(pig_id: str) -> Path | None:
     return None
 
 
-def get_pig_by_id(pig_id: Optional[str]) -> Optional[dict]:
+def get_pig_by_id(pig_id: str | None) -> dict | None:
     if not pig_id:
         return None
     for p in PIG_LIST:
@@ -119,11 +135,11 @@ def get_pig_by_id(pig_id: Optional[str]) -> Optional[dict]:
     return None
 
 
-def is_food_pig(pig_data: Optional[dict]) -> bool:
+def is_food_pig(pig_data: dict | None) -> bool:
     return bool(pig_data and pig_data.get("id") in FOOD_PIG_IDS)
 
 
-def is_human_pig(pig_data: Optional[dict]) -> bool:
+def is_human_pig(pig_data: dict | None) -> bool:
     return bool(pig_data and pig_data.get("id") == HUMAN_PIG_ID)
 
 
@@ -134,7 +150,7 @@ def is_superuser_user(user_id: str) -> bool:
     return any(s.endswith(f":{user_id}") for s in superusers)
 
 
-def detect_force_roast_mode(raw_text: str, user_id: str) -> Optional[str]:
+def detect_force_roast_mode(raw_text: str, user_id: str) -> str | None:
     normalized = raw_text.replace("/", "").replace(" ", "").replace("　", "")
     has_super_cmd = SUPER_FORCE_ROAST_KEYWORD in normalized
     has_force_cmd = any(k in normalized for k in FORCE_ROAST_KEYWORDS)
@@ -146,7 +162,9 @@ def detect_force_roast_mode(raw_text: str, user_id: str) -> Optional[str]:
     return None
 
 
-def pick_backfire_text(attacker_name: str, target_name: str, attacker_pig: Optional[dict]) -> str:
+def pick_backfire_text(
+    attacker_name: str, target_name: str, attacker_pig: dict | None
+) -> str:
     if not attacker_pig:
         pool = BACKFIRE_NO_PIG_TEXTS
         shape = "未抽形态"
@@ -160,12 +178,18 @@ def pick_backfire_text(attacker_name: str, target_name: str, attacker_pig: Optio
         pool = BACKFIRE_GENERIC_TEXTS
         shape = attacker_pig.get("name", "未知形态")
 
-    return random.choice(pool).format(attacker=attacker_name, target=target_name, shape=shape)
+    return random.choice(pool).format(
+        attacker=attacker_name, target=target_name, shape=shape
+    )
 
 
-def pick_escape_text(attacker_name: str, target_name: str, target_pig: Optional[dict]) -> str:
+def pick_escape_text(
+    attacker_name: str, target_name: str, target_pig: dict | None
+) -> str:
     shape = target_pig.get("name", "未知形态") if target_pig else "未知形态"
-    return random.choice(ESCAPE_TEXTS).format(attacker=attacker_name, target=target_name, shape=shape)
+    return random.choice(ESCAPE_TEXTS).format(
+        attacker=attacker_name, target=target_name, shape=shape
+    )
 
 
 def pick_force_prefix_text(target_name: str, is_super_mode: bool) -> str:
@@ -174,7 +198,9 @@ def pick_force_prefix_text(target_name: str, is_super_mode: bool) -> str:
 
 
 def pick_force_limit_text(operator_name: str, target_name: str) -> str:
-    return random.choice(FORCE_ROAST_LIMIT_TEXTS).format(operator=operator_name, target=target_name)
+    return random.choice(FORCE_ROAST_LIMIT_TEXTS).format(
+        operator=operator_name, target=target_name
+    )
 
 
 async def ensure_pighub_images_loaded() -> bool:
@@ -198,7 +224,11 @@ async def ensure_pighub_images_loaded() -> bool:
         if not isinstance(data, dict) or not isinstance(data.get("images"), list):
             raise ValueError("PigHub 返回结构异常，缺少 images 列表")
 
-        valid = [item for item in data["images"] if isinstance(item, dict) and item.get("thumbnail")]
+        valid = [
+            item
+            for item in data["images"]
+            if isinstance(item, dict) and item.get("thumbnail")
+        ]
         if not valid:
             raise ValueError("PigHub 返回空图集")
 
@@ -209,27 +239,36 @@ async def ensure_pighub_images_loaded() -> bool:
     except Exception as e:
         if pighub_images:
             # 刷新失败但有旧缓存：继续使用，不打挂功能
-            logger.warning(f"PigHub 刷新失败，继续使用旧缓存（{len(pighub_images)} 张）: {e}")
+            logger.warning(
+                f"PigHub 刷新失败，继续使用旧缓存（{len(pighub_images)} 张）: {e}"
+            )
             return True
         logger.warning(f"PigHub 连接失败: {e}")
         return False
 
 
-def build_pighub_image_url(pig_item: dict) -> Optional[str]:
+def build_pighub_image_url(pig_item: dict) -> str | None:
     thumbnail = pig_item.get("thumbnail")
     if not isinstance(thumbnail, str) or not thumbnail:
         return None
     return PIGHUB_IMAGE_BASE_URL + thumbnail.split("/")[-1]
 
+
 # ================= 辅助渲染函数 =================
 
-async def send_rendered_pig(matcher, event, pig_data: dict, extra_text: str = ""):
+
+async def send_rendered_pig(
+    matcher, event, pig_data: dict, extra_text: str = "", is_new: bool = False
+):
     pig_id = pig_data.get("id", "")
     avatar_file = find_image_file(pig_id)
     avatar_uri = avatar_file.as_uri() if avatar_file else ""
     name = pig_data.get("name", "未知小猪")
     desc = pig_data.get("description", "")
     analysis = pig_data.get("analysis", "你今天是只神秘小猪。")
+
+    new_icon_file = IMAGE_DIR / "new.png"
+    new_icon_uri = new_icon_file.as_uri() if new_icon_file.exists() else ""
 
     pic = None
     try:
@@ -241,6 +280,8 @@ async def send_rendered_pig(matcher, event, pig_data: dict, extra_text: str = ""
                 "name": name,
                 "desc": desc,
                 "analysis": analysis,
+                "is_new": is_new,
+                "new_icon_uri": new_icon_uri,
             },
         )
     except Exception as e:
@@ -254,31 +295,35 @@ async def send_rendered_pig(matcher, event, pig_data: dict, extra_text: str = ""
     msg += MessageSegment.image(pic)
     await matcher.finish(msg)
 
+
 # ================= 指令处理区域 =================
 
 # 1. 今日小猪
 cmd_today = on_command("今天是什么小猪", aliases={"今日小猪"}, block=True)
+
 
 @cmd_today.handle()
 async def _(event: Event):
     user_id = str(event.user_id)
     pig_id = data_manager.get_today_pig(user_id)
     pig = get_pig_by_id(pig_id)
+    is_new = False
 
     if not pig:
         if not PIG_LIST:
             await cmd_today.finish("猪圈塌房了（数据缺失）")
             return
         pig = random.choice(PIG_LIST)
-        await data_manager.set_today_pig(user_id, pig["id"])
+        is_new = await data_manager.set_today_pig(user_id, pig["id"])
         if random.randint(1, 20) == 1:
             await data_manager.clean_old_history()
 
-    await send_rendered_pig(cmd_today, event, pig)
+    await send_rendered_pig(cmd_today, event, pig, is_new=is_new)
 
 
 # 2. 随机小猪
 cmd_roll = on_command("随机小猪", block=True)
+
 
 @cmd_roll.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
@@ -300,7 +345,9 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
         return
 
     if count == 1:
-        await cmd_roll.finish(MessageSegment.reply(event.message_id) + MessageSegment.image(image_url))
+        await cmd_roll.finish(
+            MessageSegment.reply(event.message_id) + MessageSegment.image(image_url)
+        )
         return
 
     # 私聊不支持合并转发，降级为单张
@@ -321,14 +368,17 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
         url = build_pighub_image_url(pig)
         if not url:
             continue
-        messages.append({
-            "type": "node",
-            "data": {
-                "name": "随机小猪Bot",
-                "uin": event.self_id,
-                "content": Message(pig.get("title", "随机小猪")) + MessageSegment.image(url),
-            },
-        })
+        messages.append(
+            {
+                "type": "node",
+                "data": {
+                    "name": "随机小猪Bot",
+                    "uin": event.self_id,
+                    "content": Message(pig.get("title", "随机小猪"))
+                    + MessageSegment.image(url),
+                },
+            }
+        )
 
     if not messages:
         await cmd_roll.finish("PigHub 图片数据异常，请稍后再试。")
@@ -339,6 +389,7 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
 
 # 2.5 找猪
 cmd_find = on_command("找猪", aliases={"搜猪"}, block=True)
+
 
 @cmd_find.handle()
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
@@ -351,7 +402,9 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
         await cmd_find.finish("请加上关键词，如：/找猪 玩偶")
         return
 
-    found_pigs = [pig for pig in pighub_images if keyword.lower() in pig.get("title", "").lower()]
+    found_pigs = [
+        pig for pig in pighub_images if keyword.lower() in pig.get("title", "").lower()
+    ]
     if not found_pigs:
         await cmd_find.finish(f"没找到叫「{keyword}」的猪。")
         return
@@ -364,14 +417,17 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
             image_url = build_pighub_image_url(pig)
             if not image_url:
                 continue
-            messages.append({
-                "type": "node",
-                "data": {
-                    "name": "搜猪小助手",
-                    "uin": event.self_id,
-                    "content": Message(pig.get("title", "未命名小猪")) + MessageSegment.image(image_url),
-                },
-            })
+            messages.append(
+                {
+                    "type": "node",
+                    "data": {
+                        "name": "搜猪小助手",
+                        "uin": event.self_id,
+                        "content": Message(pig.get("title", "未命名小猪"))
+                        + MessageSegment.image(image_url),
+                    },
+                }
+            )
         if not messages:
             await cmd_find.finish("搜索结果数据异常，请稍后再试。")
             return
@@ -394,13 +450,17 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
 # 3. 明日小猪
 cmd_tmr = on_command("明日小猪", block=True)
 
+
 @cmd_tmr.handle()
 async def _(event: Event):
-    await cmd_tmr.finish(MessageSegment.reply(event.message_id) + random.choice(TOMORROW_TEXTS))
+    await cmd_tmr.finish(
+        MessageSegment.reply(event.message_id) + random.choice(TOMORROW_TEXTS)
+    )
 
 
 # 4. 昨日小猪
 cmd_yest = on_command("昨日小猪", block=True)
+
 
 @cmd_yest.handle()
 async def _(event: Event):
@@ -417,13 +477,16 @@ async def _(event: Event):
 # 5. 今日烤猪
 cmd_roast = on_command("今日烤猪", block=True)
 
+
 @cmd_roast.handle()
 async def _(event: Event):
     user_id = str(event.user_id)
     original_pig = get_pig_by_id(data_manager.get_today_pig(user_id))
 
     if not original_pig:
-        await cmd_roast.finish(MessageSegment.reply(event.message_id) + "你连猪都不是，怎么烤？")
+        await cmd_roast.finish(
+            MessageSegment.reply(event.message_id) + "你连猪都不是，怎么烤？"
+        )
         return
 
     if is_human_pig(original_pig):
@@ -436,7 +499,9 @@ async def _(event: Event):
     if is_food_pig(original_pig):
         await cmd_roast.finish(
             MessageSegment.reply(event.message_id)
-            + random.choice(TODAY_ROAST_FOOD_BLOCK_TEXTS).format(shape=original_pig.get("name", "熟食"))
+            + random.choice(TODAY_ROAST_FOOD_BLOCK_TEXTS).format(
+                shape=original_pig.get("name", "熟食")
+            )
         )
         return
 
@@ -456,6 +521,7 @@ async def _(event: Event):
 # 5.5 烤群友
 cmd_roast_member = on_command("烤群友", block=True)
 
+
 @cmd_roast_member.handle()
 async def _(bot: Bot, event: GroupMessageEvent):
     attacker_id = str(event.user_id)
@@ -464,7 +530,8 @@ async def _(bot: Bot, event: GroupMessageEvent):
 
     if force_mode == "super_denied":
         await cmd_roast_member.finish(
-            MessageSegment.reply(event.message_id) + "口令【强行点火】仅 superuser 可用。"
+            MessageSegment.reply(event.message_id)
+            + "口令【强行点火】仅 superuser 可用。"
         )
         return
 
@@ -485,10 +552,14 @@ async def _(bot: Bot, event: GroupMessageEvent):
     # 尝试获取更准确的 target_name
     if target_id:
         try:
-            member_info = await bot.get_group_member_info(group_id=event.group_id, user_id=int(target_id))
+            member_info = await bot.get_group_member_info(
+                group_id=event.group_id, user_id=int(target_id)
+            )
             target_name = member_info.get("card") or member_info.get("nickname")
         except Exception as e:
-            logger.debug(f"获取群成员信息失败: group={event.group_id} user={target_id} error={e}")
+            logger.debug(
+                f"获取群成员信息失败: group={event.group_id} user={target_id} error={e}"
+            )
 
     if not target_id:
         await cmd_roast_member.finish("请 At 或回复你要烤的群友！")
@@ -503,8 +574,12 @@ async def _(bot: Bot, event: GroupMessageEvent):
         food_id = random.choice(FOOD_PIG_IDS)
         food_pig = get_pig_by_id(food_id)
         food_name = food_pig["name"] if food_pig else "美食"
-        bot_text = random.choice(ROAST_BOT_TEXTS).format(attacker=attacker_name, food=food_name)
-        logger.info(f"[烤群友→Bot] 特殊反噬 | 凶手={attacker_name}({attacker_id}) 变成={food_name}")
+        bot_text = random.choice(ROAST_BOT_TEXTS).format(
+            attacker=attacker_name, food=food_name
+        )
+        logger.info(
+            f"[烤群友→Bot] 特殊反噬 | 凶手={attacker_name}({attacker_id}) 变成={food_name}"
+        )
         await cmd_roast_member.finish(MessageSegment.reply(event.message_id) + bot_text)
         return
 
@@ -512,7 +587,8 @@ async def _(bot: Bot, event: GroupMessageEvent):
     target_pig = get_pig_by_id(data_manager.get_today_pig(target_id))
     if not target_pig:
         await cmd_roast_member.finish(
-            MessageSegment.reply(event.message_id) + f"【{target_name}】今天还没抽猪，没法下嘴！"
+            MessageSegment.reply(event.message_id)
+            + f"【{target_name}】今天还没抽猪，没法下嘴！"
         )
         return
 
@@ -536,13 +612,17 @@ async def _(bot: Bot, event: GroupMessageEvent):
     if force_mode == "normal":
         if not data_manager.check_force_roast_usage(attacker_id):
             reject_text = pick_force_limit_text(attacker_name, target_name)
-            await cmd_roast_member.finish(MessageSegment.reply(event.message_id) + reject_text)
+            await cmd_roast_member.finish(
+                MessageSegment.reply(event.message_id) + reject_text
+            )
             return
         await data_manager.update_force_roast_usage(attacker_id)
     elif force_mode is None:
         is_available, tip_msg = data_manager.check_roast_usage(attacker_id)
         if not is_available:
-            await cmd_roast_member.finish(MessageSegment.reply(event.message_id) + tip_msg)
+            await cmd_roast_member.finish(
+                MessageSegment.reply(event.message_id) + tip_msg
+            )
             return
         await data_manager.update_roast_usage(attacker_id)
     # super 模式：无限制，不消耗后门次数，不走 CD
@@ -556,10 +636,14 @@ async def _(bot: Bot, event: GroupMessageEvent):
             return
 
         text = await roast_manager.get_roast_text(
-            target_pig, food_pig_template,
-            operator_name=attacker_name, target_name=target_name,
+            target_pig,
+            food_pig_template,
+            operator_name=attacker_name,
+            target_name=target_name,
         )
-        prefix_text = pick_force_prefix_text(target_name, is_super_mode=(force_mode == "super"))
+        prefix_text = pick_force_prefix_text(
+            target_name, is_super_mode=(force_mode == "super")
+        )
 
         logger.info(
             f"[烤群友] 后门成功 | 凶手={attacker_name}({attacker_id}) "
@@ -567,7 +651,9 @@ async def _(bot: Bot, event: GroupMessageEvent):
         )
         roasted_data = food_pig_template.copy()
         roasted_data["analysis"] = text
-        await send_rendered_pig(cmd_roast_member, event, roasted_data, extra_text=prefix_text)
+        await send_rendered_pig(
+            cmd_roast_member, event, roasted_data, extra_text=prefix_text
+        )
         return
 
     # --- 普通模式概率判定 ---
@@ -582,8 +668,10 @@ async def _(bot: Bot, event: GroupMessageEvent):
             return
 
         text = await roast_manager.get_roast_text(
-            target_pig, food_pig_template,
-            operator_name=attacker_name, target_name=target_name,
+            target_pig,
+            food_pig_template,
+            operator_name=attacker_name,
+            target_name=target_name,
         )
         logger.info(
             f"[烤群友] 成功 | 凶手={attacker_name}({attacker_id}) "
@@ -599,21 +687,32 @@ async def _(bot: Bot, event: GroupMessageEvent):
         logger.info(
             f"[烤群友] 逃脱 | 凶手={attacker_name}({attacker_id}) 目标={target_name}({target_id})"
         )
-        await cmd_roast_member.finish(MessageSegment.reply(event.message_id) + escape_text)
+        await cmd_roast_member.finish(
+            MessageSegment.reply(event.message_id) + escape_text
+        )
 
     # === 反噬 (10%) ===
     else:
         attacker_pig = get_pig_by_id(data_manager.get_today_pig(attacker_id))
 
-        if attacker_pig and (not is_food_pig(attacker_pig)) and (not is_human_pig(attacker_pig)):
+        if (
+            attacker_pig
+            and (not is_food_pig(attacker_pig))
+            and (not is_human_pig(attacker_pig))
+        ):
             food_id = random.choice(FOOD_PIG_IDS)
             food_pig_template = get_pig_by_id(food_id)
             if not food_pig_template:
-                await cmd_roast_member.finish("食材配置缺失，请联系管理员修复 pig.json。")
+                await cmd_roast_member.finish(
+                    "食材配置缺失，请联系管理员修复 pig.json。"
+                )
                 return
 
             text = await roast_manager.get_roast_text(attacker_pig, food_pig_template)
-            fail_text = f"偷鸡不成蚀把米！【{attacker_name}】抓猪失败，反倒把自己摔进了火坑！\n\n" + text
+            fail_text = (
+                f"偷鸡不成蚀把米！【{attacker_name}】抓猪失败，反倒把自己摔进了火坑！\n\n"
+                + text
+            )
 
             logger.info(
                 f"[烤群友] 反噬 | 凶手={attacker_name}({attacker_id}) "
@@ -628,11 +727,14 @@ async def _(bot: Bot, event: GroupMessageEvent):
                 f"[烤群友] 反噬(文字) | 凶手={attacker_name}({attacker_id}) "
                 f"目标={target_name}({target_id})"
             )
-            await cmd_roast_member.finish(MessageSegment.reply(event.message_id) + fail_text)
+            await cmd_roast_member.finish(
+                MessageSegment.reply(event.message_id) + fail_text
+            )
 
 
 # 6. 我的猪圈
 cmd_sty = on_command("我的猪圈", aliases={"我的小猪"}, block=True)
+
 
 @cmd_sty.handle()
 async def _(event: Event):
@@ -642,11 +744,15 @@ async def _(event: Event):
     user_count = len(collection)
 
     if total_pigs <= 0:
-        await cmd_sty.finish(MessageSegment.reply(event.message_id) + "猪图鉴为空，请先检查资源文件。")
+        await cmd_sty.finish(
+            MessageSegment.reply(event.message_id) + "猪图鉴为空，请先检查资源文件。"
+        )
         return
 
     if user_count == 0:
-        await cmd_sty.finish(MessageSegment.reply(event.message_id) + "你的猪圈空空如也！")
+        await cmd_sty.finish(
+            MessageSegment.reply(event.message_id) + "你的猪圈空空如也！"
+        )
         return
 
     percent = int((user_count / total_pigs) * 100)
@@ -663,6 +769,7 @@ async def _(event: Event):
 
 # 7. 本周小猪
 cmd_week = on_command("本周小猪", block=True)
+
 
 @cmd_week.handle()
 async def _(event: Event):
@@ -682,7 +789,9 @@ async def _(event: Event):
                 images_to_merge.append(img_file)
 
     if not images_to_merge:
-        await cmd_week.finish(MessageSegment.reply(event.message_id) + "你这周还没抽过猪呢！")
+        await cmd_week.finish(
+            MessageSegment.reply(event.message_id) + "你这周还没抽过猪呢！"
+        )
         return
 
     try:
@@ -700,6 +809,7 @@ async def _(event: Event):
                 canvas.paste(img, (x, y), img)
 
         from io import BytesIO
+
         output = BytesIO()
         canvas.save(output, format="PNG")
 

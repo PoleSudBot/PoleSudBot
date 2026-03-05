@@ -170,11 +170,11 @@ async def handle_summary_remove(
             await UniMessage.text("需要超级用户权限才能指定群组。").send(target)
             return
         targeter = scheduler_manager.target(
-            plugin_name="summary_group", group_id=str(target_group_id_match)
+            plugin_name="summary_group", target_identifier=str(target_group_id_match)
         )
     elif isinstance(event, GroupMessageEvent):
         targeter = scheduler_manager.target(
-            plugin_name="summary_group", group_id=str(event.group_id)
+            plugin_name="summary_group", target_identifier=str(event.group_id)
         )
     else:
         await UniMessage.text(
