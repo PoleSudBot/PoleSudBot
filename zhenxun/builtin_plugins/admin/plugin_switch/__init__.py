@@ -74,6 +74,10 @@ __plugin_meta__ = PluginMetadata(
             关闭签到                : 全局关闭签到
             关闭签到 p              : 全局私聊关闭签到
             关闭签到 -g 12345678    : 关闭群组12345678的签到功能(普通管理员无法开启)
+            关闭所有插件私聊        : 全局禁用所有插件的私聊使用(群聊不受影响)
+            关闭所有插件 p          : 同上
+            开启所有插件私聊        : 恢复所有插件的私聊使用
+            开启所有插件 p          : 同上
         """,
         admin_level=base_config.get("CHANGE_GROUP_SWITCH_LEVEL", 2),
         configs=[
@@ -352,6 +356,32 @@ async def _(
                 target=group_id,
             )
         await MessageUtils.build_message(result).finish(reply_to=True)
+
+
+@_status_matcher.assign("private-block")
+async def _(
+    bot: Bot,
+    session: Uninfo,
+    arparma: Arparma,
+):
+    if session.user.id in bot.config.superusers:
+        result = await PluginManager.set_all_plugin_private_block(True)
+        logger.info("超级用户关闭全部功能私聊", arparma.header_result, session=session)
+        await MessageUtils.build_message(result).finish(reply_to=True)
+    await MessageUtils.build_message("权限不足捏...").finish(reply_to=True)
+
+
+@_status_matcher.assign("private-unblock")
+async def _(
+    bot: Bot,
+    session: Uninfo,
+    arparma: Arparma,
+):
+    if session.user.id in bot.config.superusers:
+        result = await PluginManager.set_all_plugin_private_block(False)
+        logger.info("超级用户开启全部功能私聊", arparma.header_result, session=session)
+        await MessageUtils.build_message(result).finish(reply_to=True)
+    await MessageUtils.build_message("权限不足捏...").finish(reply_to=True)
 
 
 @_group_status_matcher.handle()

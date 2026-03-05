@@ -29,6 +29,8 @@ _status_matcher = on_alconna(
                 Args["block_type?", ["all", "a", "private", "p", "group", "g"]],
             ),
         ),
+        Subcommand("private-block"),
+        Subcommand("private-unblock"),
     ),
     rule=admin_check("plugin_switch", "CHANGE_GROUP_SWITCH_LEVEL"),
     priority=5,
@@ -115,6 +117,38 @@ _status_matcher.shortcut(
     prefix=True,
 )
 
+
+# === 全局私聊禁用快捷指令 (必须在通用的 开启/关闭所有插件 之前注册) ===
+
+_status_matcher.shortcut(
+    r"关闭所有(插件|功能)私聊",
+    command="switch",
+    arguments=["private-block"],
+    prefix=True,
+)
+
+_status_matcher.shortcut(
+    r"关闭所有(插件|功能)\s+(?P<bt>p|private)$",
+    command="switch",
+    arguments=["private-block"],
+    prefix=True,
+)
+
+_status_matcher.shortcut(
+    r"开启所有(插件|功能)私聊",
+    command="switch",
+    arguments=["private-unblock"],
+    prefix=True,
+)
+
+_status_matcher.shortcut(
+    r"开启所有(插件|功能)\s+(?P<bt>p|private)$",
+    command="switch",
+    arguments=["private-unblock"],
+    prefix=True,
+)
+
+# === 通用开启/关闭所有插件 ===
 
 _status_matcher.shortcut(
     r"开启所有(插件|功能)",

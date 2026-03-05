@@ -222,6 +222,33 @@ class PluginManager:
         return f"成功将所有功能全局状态修改为: {'开启' if status else '关闭'}"
 
     @classmethod
+    async def set_all_plugin_private_block(cls, block: bool) -> str:
+        """批量设置所有普通插件的私聊禁用状态
+
+        参数:
+            block: True=禁用私聊, False=恢复私聊
+
+        返回:
+            str: 返回信息
+        """
+        if block:
+            # 将所有普通插件设为私聊禁用 (仅影响当前没有被禁用的插件)
+            await PluginInfo.filter(
+                plugin_type=PluginType.NORMAL,
+                block_type__isnull=True,
+            ).update(status=False, block_type=BlockType.PRIVATE)
+        else:
+            # 将所有被私聊禁用的普通插件恢复为正常
+            await PluginInfo.filter(
+                plugin_type=PluginType.NORMAL,
+                block_type=BlockType.PRIVATE,
+            ).update(status=True, block_type=None)
+        await CacheRoot.invalidate_cache(CacheType.PLUGINS)
+        await PluginInfoMemoryCache.refresh()
+        status_text = "禁用" if block else "启用"
+        return f"已全局{status_text}所有插件的私聊使用!"
+
+    @classmethod
     async def is_wake(cls, group_id: str) -> bool:
         """是否醒来
 
