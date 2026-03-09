@@ -44,18 +44,25 @@ result回复："老色批你冲的太快了，欧尼酱先生，请稍后再冲@
      用户昵称↑     昵称系统的昵称↑          艾特用户↑"""
 
 COUNT_TEST = """命令每日次数限制
-即 用户/群聊 每日可调用命令的次数 [数据内存存储，重启将会重置]
-每日调用直到 00:00 刷新
+即 用户/群聊 每日可调用命令的次数
+计数数据持久化存储，重启不会重置；每日 00:00 自动刷新
 key：模块名称
-max_count: 每日调用上限
+max_count: 每日调用上限（全局默认值）
+group_max_count: 分群覆盖上限（可选）
+    格式为字典，key 为群号（字符串），value 为该群的上限
+    值为 -1 时表示该群不限制
+    示例：
+      group_max_count:
+        '12345678': 5     # 该群每人每天5次
+        '87654321': -1    # 该群不限制
+    未配置的群默认使用 max_count 的值
 status：此限制的开关状态
-watch_type：监听对象，以user_id或group_id作为键来限制，'USER'：用户id，'GROUP'：群id
-                                     示例：'USER'：用户上限，'group'：群聊上限
+watch_type：监听对象
+    'USER'：全局统计个人（跨群共享额度）
+    'GROUP'：全群统计总量（不分个人）
+    'UIG'：每人每群独立计数（推荐搭配 group_max_count 使用）
 result：回复的话，可以添加[at]，[uname]，[nickname]来对应艾特，用户群名称，昵称系统昵称
-result 为 "" 或 None 时则不回复
-result示例："[uname]你冲的太快了，[nickname]先生，请稍后再冲[at]"
-result回复："老色批你冲的太快了，欧尼酱先生，请稍后再冲@老色批"
-     用户昵称↑     昵称系统的昵称↑          艾特用户↑"""
+result 为 '' 或 None 时则不回复"""
 
 
 class Manager:
@@ -188,6 +195,10 @@ class Manager:
                     temp_data[v]["watch_type"] = str(watch_type)
                 if type_ == "PluginCountLimit":
                     del temp_data[v]["check_type"]
+                    # group_max_count 为空字典时不写入文件（保持简洁）
+                    gmc = temp_data[v].get("group_max_count")
+                    if not gmc:
+                        temp_data[v].pop("group_max_count", None)
         file = self.block_file
         if type_ == "PluginCdLimit":
             file = self.cd_file
@@ -274,26 +285,32 @@ class Manager:
             tuple[PluginLimit, bool]: PluginLimit，是否创建
         """
         if not db_data:
-            return (
-                PluginLimit(
-                    module=k,
-                    module_path=module2plugin[k].module_path,
-                    limit_type=limit_type,
-                    plugin=module2plugin[k],
-                    cd=getattr(limit, "cd", None),
-                    max_count=getattr(limit, "max_count", None),
-                    status=limit.status,
-                    check_type=limit.check_type,
-                    watch_type=limit.watch_type,
-                    result=limit.result,
-                ),
-                True,
+            new_limit = PluginLimit(
+                module=k,
+                module_path=module2plugin[k].module_path,
+                limit_type=limit_type,
+                plugin=module2plugin[k],
+                cd=getattr(limit, "cd", None),
+                max_count=getattr(limit, "max_count", None),
+                status=limit.status,
+                check_type=limit.check_type,
+                watch_type=limit.watch_type,
+                result=limit.result,
             )
+            # 将分群配置挂载为运行时属性（不入库）
+            if limit_type == PluginLimitType.COUNT and hasattr(
+                limit, "group_max_count"
+            ):
+                new_limit.group_max_count = limit.group_max_count  # type: ignore
+            return new_limit, True
         db_data = self.__replace_data(db_data, limit)
         if limit_type == PluginLimitType.CD:
             db_data.cd = limit.cd  # type: ignore
         if limit_type == PluginLimitType.COUNT:
             db_data.max_count = limit.max_count  # type: ignore
+            # 将分群配置挂载为运行时属性（不入库）
+            if hasattr(limit, "group_max_count"):
+                db_data.group_max_count = limit.group_max_count  # type: ignore
         return db_data, False
 
     def __get_file_data(self, limit_type: PluginLimitType) -> dict:
