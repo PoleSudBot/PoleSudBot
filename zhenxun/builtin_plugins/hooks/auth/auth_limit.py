@@ -92,12 +92,41 @@ class LimitManager:
     block_limit: ClassVar[dict[str, Limit]] = {}
     count_limit: ClassVar[dict[str, Limit]] = {}
 
+    # 分群次数限制配置（直接从 YAML 文件加载，不依赖数据库）
+    _group_max_counts: ClassVar[dict[str, dict[str, int]]] = {}
+
     # 模块限制缓存，避免频繁查询数据库
     module_limit_cache: ClassVar[
         dict[str, tuple[float, list[PluginLimitSnapshot], bool]]
     ] = {}
     module_cache_ttl: ClassVar[float] = 60  # 模块缓存有效期（秒）
     module_cache_error_ttl: ClassVar[float] = 5  # 超时缓存有效期（秒）
+
+    @classmethod
+    def _load_group_max_counts(cls):
+        """直接从 YAML 文件加载分群次数限制配置（不依赖 manager 初始化顺序）"""
+        try:
+            from ruamel.yaml import YAML
+
+            from zhenxun.configs.path_config import DATA_PATH
+
+            _yaml = YAML(pure=True)
+            count_file = DATA_PATH / "configs" / "plugins2count.yaml"
+            if count_file.exists():
+                with open(count_file, encoding="utf8") as f:
+                    temp = _yaml.load(f) or {}
+                if "PluginCountLimit" in temp:
+                    for k, v in temp["PluginCountLimit"].items():
+                        if "." in k:
+                            k = k.split(".")[-1]
+                        gmc = v.get("group_max_count")
+                        if gmc and isinstance(gmc, dict):
+                            # 确保 key 和 value 都是正确类型
+                            cls._group_max_counts[k] = {
+                                str(gk): int(gv) for gk, gv in gmc.items()
+                            }
+        except Exception as e:
+            logger.warning(f"加载分群限制配置失败: {e}", LOGGER_COMMAND)
 
     @classmethod
     async def init_limit(cls):
@@ -117,6 +146,8 @@ class LimitManager:
 
         cls.is_updating = True
         try:
+            # 先从 YAML 加载分群配置
+            cls._load_group_max_counts()
             start_time = time.time()
             await PluginLimitMemoryCache.ensure_loaded()
             limit_list = PluginLimitMemoryCache.get_all_limits()
@@ -159,8 +190,11 @@ class LimitManager:
                 max_count = int(limit.max_count or 0)
                 if max_count <= 0:
                     return
+                # 从类级别缓存中获取分群配置（已从 YAML 直接加载）
+                group_max_count = cls._group_max_counts.get(limit.module, {})
                 cls.count_limit[limit.module] = Limit(
-                    limit=limit, limiter=CountLimiter(max_count)
+                    limit=limit,
+                    limiter=CountLimiter(max_count, limit.module, group_max_count),
                 )
 
     @classmethod
@@ -308,7 +342,12 @@ class LimitManager:
             key_type = channel_id or group_id
         elif group_id and limit.watch_type == LimitWatchType.USER_IN_GROUP:
             key_type = f"{channel_id or group_id}_{user_id}"
-        if is_limit and not limiter.check(key_type):
+        # CountLimiter 是异步的，其他限制器是同步的
+        if isinstance(limiter, CountLimiter):
+            is_pass = await limiter.check(key_type, group_id=group_id)
+        else:
+            is_pass = limiter.check(key_type)
+        if is_limit and not is_pass:
             if limit.result:
                 format_kwargs = {}
                 if isinstance(limiter, FreqLimiter):
@@ -332,7 +371,7 @@ class LimitManager:
             if isinstance(limiter, UserBlockLimiter):
                 limiter.set_true(key_type)
             if isinstance(limiter, CountLimiter):
-                limiter.increase(key_type)
+                await limiter.increase(key_type)
 
 
 async def auth_limit(plugin: PluginInfo, session: Uninfo):

@@ -128,7 +128,9 @@ class PluginCountBlock(BaseBlock):
     """
 
     max_count: int
-    """最大调用次数"""
+    """最大调用次数（全局默认）"""
+    group_max_count: dict[str, int] = Field(default_factory=dict)
+    """分群调用上限覆盖，key 为群号字符串，value 为该群的上限；-1 表示不限制"""
     _type: PluginLimitType = PluginLimitType.COUNT
     """类型"""
 
