@@ -31,7 +31,7 @@ _LIMIT_NOTICE_LIMITER = FreqLimiter(_LIMIT_NOTICE_CD)
 _LIMIT_NOTICE_TASKS: set[asyncio.Task] = set()
 
 
-@PriorityLifecycle.on_startup(priority=5)
+@PriorityLifecycle.on_startup(priority=6)
 async def _():
     """初始化限制"""
     await LimitManager.init_limit()
