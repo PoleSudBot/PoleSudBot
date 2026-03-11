@@ -147,7 +147,8 @@ class CountLimiter:
         self._ensure_init()
 
     def _make_key(self, key: Any) -> str:
-        return f"{self.module_name}:{key}"
+        """生成带日期的存储 key，确保跨天后 Redis 里的旧 key 不会被读到"""
+        return f"{self.module_name}:{self._store_date}:{key}"
 
     def _resolve_max(self, group_id: str | None) -> int:
         """根据群号解析实际生效的 max_count
