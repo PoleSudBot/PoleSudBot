@@ -65,6 +65,9 @@ class BilibiliApiService:
             mid=info["owner"]["mid"],
             name=info["owner"]["name"],
             face=info["owner"]["face"],
+            title="UP主",
+            follower=info["owner"].get("follower", 0),
+            archive_count=info["owner"].get("archive_count", 0),
         )
 
         stat = Stat(
@@ -110,6 +113,20 @@ class BilibiliApiService:
             video_model.short_link_v2 = info["short_link_v2"]
         if "first_frame" in info:
             video_model.first_frame = info["first_frame"]
+            
+        if "staff" in info and isinstance(info["staff"], list):
+            staff_list = []
+            for staff_member in info["staff"]:
+                staff_owner = Owner(
+                    mid=staff_member.get("mid", 0),
+                    name=staff_member.get("name", ""),
+                    face=staff_member.get("face", ""),
+                    title=staff_member.get("title", "UP主"),
+                    follower=staff_member.get("follower", 0),
+                    archive_count=staff_member.get("archive_count", 0),
+                )
+                staff_list.append(staff_owner)
+            video_model.staff = staff_list
 
         return video_model
 
@@ -163,6 +180,58 @@ class BilibiliApiService:
                 raise ResourceNotFoundError(f"视频未找到: {vid}")
 
             logger.debug(f"创建VideoInfo模型: {vid}", "B站解析")
+            
+            # Additional fetch for owner stat
+            try:
+                from bilibili_api import user
+                u = user.User(info['owner']['mid'], credential=get_credential())
+                up_stat = await u.get_relation_info()
+                
+                navnum_url = f"https://api.bilibili.com/x/space/navnum?mid={info['owner']['mid']}"
+                from ..utils.headers import get_bilibili_headers
+                from zhenxun.utils.http_utils import AsyncHttpx
+                cred = get_credential()
+                headers = get_bilibili_headers()
+                cookies = cred.get_cookies() if cred else None
+                try:
+                    navnum_res = await AsyncHttpx.get(navnum_url, headers=headers, cookies=cookies)
+                    navnum_data = navnum_res.json()
+                    video_count = navnum_data.get('data', {}).get('video', 0) if navnum_data.get('code') == 0 else 0
+                except Exception as e:
+                    logger.debug(f"Failed to fetch navnum API for owner: {e}", "B站解析")
+                    video_count = 0
+
+                info['owner']['follower'] = up_stat.get('follower', 0)
+                info['owner']['archive_count'] = video_count
+            except Exception as e:
+                logger.debug(f"Failed to fetch up stat for owner {info['owner']['mid']}: {e}", "B站解析")
+
+            if "staff" in info and isinstance(info["staff"], list):
+                from bilibili_api import user
+                for i in range(len(info["staff"])):
+                    try:
+                        u = user.User(info["staff"][i]['mid'], credential=get_credential())
+                        up_stat = await u.get_relation_info()
+
+                        staff_navnum_url = f"https://api.bilibili.com/x/space/navnum?mid={info['staff'][i]['mid']}"
+                        from ..utils.headers import get_bilibili_headers
+                        from zhenxun.utils.http_utils import AsyncHttpx
+                        cred = get_credential()
+                        headers = get_bilibili_headers()
+                        cookies = cred.get_cookies() if cred else None
+                        try:
+                            staff_navnum_res = await AsyncHttpx.get(staff_navnum_url, headers=headers, cookies=cookies)
+                            staff_navnum_data = staff_navnum_res.json()
+                            staff_video_count = staff_navnum_data.get('data', {}).get('video', 0) if staff_navnum_data.get('code') == 0 else 0
+                        except Exception as e:
+                            logger.debug(f"Failed to fetch navnum API for staff: {e}", "B站解析")
+                            staff_video_count = 0
+
+                        info["staff"][i]['follower'] = up_stat.get('follower', 0)
+                        info["staff"][i]['archive_count'] = staff_video_count
+                    except Exception as e:
+                        logger.debug(f"Failed to fetch up stat for staff {info['staff'][i]['mid']}: {e}", "B站解析")
+
             video_model = BilibiliApiService._map_video_info_to_model(info, parsed_url)
 
             page_index = 0

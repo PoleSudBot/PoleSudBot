@@ -8,9 +8,18 @@
             font-family: 'AlibabaPuHuiTi';
             src: url('data:font/ttf;base64,{{ font_van_base64 }}');
         }
+        {% if custom_font_base64 %}
+        @font-face {
+            font-family: 'CustomVideoFont';
+            src: url('{{ custom_font_base64 }}');
+            font-weight: normal;
+            font-style: normal;
+        }
+        {% endif %}
+
         body {
             margin: 0;
-            font-family: 'AlibabaPuHuiTi', sans-serif;
+            font-family: {% if custom_font_base64 %}'CustomVideoFont', {% endif %}'AlibabaPuHuiTi', sans-serif;
             background: transparent;
         }
         .card-wrapper {

@@ -166,5 +166,13 @@ DOWNLOAD_MAX_RETRIES = 3
 SEND_VIDEO_MAX_RETRIES = 3
 SEND_VIDEO_RETRY_DELAY = 5
 SEND_VIDEO_TIMEOUT = 120
-
 MAX_CONCURRENT_DOWNLOADS = 2
+
+Config.add_plugin_config(
+    "parse_bilibili",
+    "VIDEO_FONT_PATH",
+    "",
+    help="自定义解析图片的字体文件路径 (如: resources/font/pingfangsc-regular.otf)",
+    default_value="",
+    type=str,
+)

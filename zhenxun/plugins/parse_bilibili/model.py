@@ -6,6 +6,9 @@ class Owner(BaseModel):
     mid: int
     name: str
     face: str
+    title: Optional[str] = "UP主"
+    follower: Optional[int] = 0
+    archive_count: Optional[int] = 0
 
 
 class Stat(BaseModel):
@@ -41,6 +44,7 @@ class VideoInfo(BaseModel):
     mission_id: Optional[int] = None
     rights: dict
     owner: Owner
+    staff: list[Owner] | None = None
     stat: Stat
     dynamic: str
     cid: int

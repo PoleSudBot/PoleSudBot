@@ -17,9 +17,9 @@ def sanitize_filename(filename: str, max_length: int = 100) -> str:
 def format_number(num: int) -> str:
     """格式化数字，大数字使用万/亿单位"""
     if num >= 100000000:
-        return f"{num / 100000000:.1f}亿"
+        return f"{num / 100000000:.2f}亿"
     if num >= 10000:
-        return f"{num / 10000:.1f}万"
+        return f"{num / 10000:.2f}万"
     return str(num)
 
 

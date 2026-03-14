@@ -23,11 +23,24 @@
             src: url(data:font/truetype;base64,{{ font_van_base64 }}) format('truetype');
         }
 
+        {% if custom_font_base64 %}
+        @font-face {
+            font-family: "CustomVideoFont";
+            src: url({{ custom_font_base64 }});
+            font-weight: normal;
+            font-style: normal;
+        }
+        {% endif %}
+
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+            {% if custom_font_base64 %}
+            font-family: "CustomVideoFont", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+            {% else %}
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+            {% endif %}
         }
 
         body {
