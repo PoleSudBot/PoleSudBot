@@ -20,7 +20,7 @@ from zhenxun.utils.utils import get_user_avatar
 from .. import base_config
 from ..config import summary_config
 from .core import ErrorCode, SummaryException
-from .message_selector import MessageSelector, SHANGHAI_TZ
+from .message_selector import SHANGHAI_TZ, MessageSelector
 
 
 def _truncate_username(username: str) -> str:
@@ -80,6 +80,157 @@ def _normalize_raw_messages(messages: list[dict[str, Any]]) -> list[dict[str, An
         normalized["sender"] = sender or {"user_id": user_id}
         normalized_messages.append(normalized)
     return normalized_messages
+
+
+def _normalize_raw_message(message: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not message:
+        return None
+    normalized_messages = _normalize_raw_messages([message])
+    return normalized_messages[0] if normalized_messages else None
+
+
+def _collect_reply_ids(messages: list[dict[str, Any]]) -> set[str]:
+    reply_ids: set[str] = set()
+    for message in messages:
+        for segment in message.get("message", []):
+            if not isinstance(segment, dict):
+                continue
+            if segment.get("type") != "reply":
+                continue
+            reply_id = str(segment.get("data", {}).get("id", "")).strip()
+            if reply_id:
+                reply_ids.add(reply_id)
+    return reply_ids
+
+
+async def _fetch_reply_messages(
+    bot: Bot,
+    messages: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    if not messages:
+        return {}
+
+    reply_ids = _collect_reply_ids(messages)
+    if not reply_ids:
+        return {}
+
+    cached_replies: dict[str, dict[str, Any]] = {}
+    for message in messages:
+        message_id = str(message.get("message_id") or message.get("message_seq") or "").strip()
+        if message_id and message_id in reply_ids:
+            cached_replies[message_id] = message
+
+    missing_reply_ids = [reply_id for reply_id in reply_ids if reply_id not in cached_replies]
+    if not missing_reply_ids:
+        return cached_replies
+
+    semaphore = asyncio.Semaphore(min(5, len(missing_reply_ids)))
+
+    async def fetch_reply_message(reply_id: str) -> tuple[str, dict[str, Any] | None]:
+        async with semaphore:
+            try:
+                try:
+                    raw_message = await bot.get_msg(message_id=int(reply_id))
+                except Exception:
+                    raw_message = await bot.call_api("get_msg", message_id=int(reply_id))
+                return reply_id, _normalize_raw_message(raw_message)
+            except Exception as e:
+                logger.warning(f"获取引用消息 {reply_id} 失败: {e}")
+                return reply_id, None
+
+    results = await asyncio.gather(
+        *(fetch_reply_message(reply_id) for reply_id in missing_reply_ids)
+    )
+    for reply_id, reply_message in results:
+        if reply_message:
+            cached_replies[reply_id] = reply_message
+    return cached_replies
+
+
+def _render_reply_segment(
+    reply_id: str,
+    reply_message_map: dict[str, dict[str, Any]],
+    user_info_cache: dict[str, str],
+    depth: int = 0,
+) -> str:
+    fallback = f"[回复消息 {reply_id}] "
+    if depth > 0:
+        return fallback
+
+    reply_message = reply_message_map.get(reply_id)
+    if not reply_message:
+        return fallback
+
+    reply_user_id = str(
+        reply_message.get("user_id")
+        or reply_message.get("sender", {}).get("user_id")
+        or ""
+    )
+    if reply_user_id:
+        reply_user_name = user_info_cache.get(
+            reply_user_id,
+            _truncate_username(f"用户_{reply_user_id[-4:]}"),
+        )
+    else:
+        reply_user_name = "未知用户"
+
+    reply_preview = _render_message_segments(
+        reply_message.get("message", []),
+        user_info_cache,
+        reply_message_map,
+        depth=depth + 1,
+    )
+    preview_text = "".join(reply_preview).strip()
+    if not preview_text:
+        preview_text = str(reply_message.get("raw_message") or "").strip() or "内容缺失"
+    preview_text = re.sub(r"\s+", " ", preview_text)
+    if len(preview_text) > 80:
+        preview_text = f"{preview_text[:77]}..."
+
+    if reply_user_id:
+        return f"[回复 {reply_user_name}({reply_user_id}): {preview_text}] "
+    return f"[回复 {reply_user_name}: {preview_text}] "
+
+
+def _render_message_segments(
+    raw_segments: list[dict[str, Any]],
+    user_info_cache: dict[str, str],
+    reply_message_map: dict[str, dict[str, Any]],
+    depth: int = 0,
+) -> list[str]:
+    rendered_segments: list[str] = []
+    for segment in raw_segments:
+        if not isinstance(segment, dict):
+            continue
+        seg_type = segment.get("type")
+        seg_data = segment.get("data", {})
+        if seg_type == "text" and "text" in seg_data:
+            text = str(seg_data["text"]).strip()
+            if text:
+                rendered_segments.append(text)
+        elif seg_type == "at" and "qq" in seg_data:
+            qq = str(seg_data["qq"])
+            default_at_name = _truncate_username(f"用户_{qq[-4:]}")
+            at_name = user_info_cache.get(qq, default_at_name)
+            rendered_segments.append(f"@{at_name}")
+        elif seg_type == "image":
+            summary = seg_data.get("summary")
+            if summary:
+                rendered_segments.append(f"[图片]{summary}")
+            else:
+                rendered_segments.append("[图片]")
+        elif seg_type == "reply":
+            reply_id = str(seg_data.get("id", "")).strip()
+            if reply_id:
+                rendered_segments.append(
+                    _render_reply_segment(
+                        reply_id,
+                        reply_message_map,
+                        user_info_cache,
+                        depth=depth,
+                    )
+                )
+    return rendered_segments
 
 
 async def _fetch_latest_messages_via_api(
@@ -433,8 +584,9 @@ async def process_message(
         exclude_bot = base_config.get("EXCLUDE_BOT_MESSAGES", False)
         bot_self_id = bot.self_id
 
+        reply_message_map = await _fetch_reply_messages(bot, messages)
         user_ids_to_fetch: set[str] = set()
-        for msg in messages:
+        for msg in messages + list(reply_message_map.values()):
             sender_id = msg.get("user_id")
             if sender_id:
                 user_ids_to_fetch.add(str(sender_id))
@@ -514,32 +666,14 @@ async def process_message(
             sender_name = user_info_cache.get(user_id_str, default_name)
 
             raw_segments = msg.get("message", [])
-            text_segments: list[str] = []
-
-            for segment in raw_segments:
-                if not isinstance(segment, dict):
-                    continue
-                seg_type = segment.get("type")
-                seg_data = segment.get("data", {})
-                if seg_type == "text" and "text" in seg_data:
-                    text = seg_data["text"].strip()
-                    if text:
-                        text_segments.append(text)
-                elif seg_type == "at" and "qq" in seg_data:
-                    qq = str(seg_data["qq"])
-                    default_at_name = _truncate_username(f"用户_{qq[-4:]}")
-                    at_name = user_info_cache.get(qq, default_at_name)
-                    text_segments.append(f"@{at_name}")
-                elif seg_type == "image":
-                    summary = seg_data.get("summary")
-                    if summary:
-                        text_segments.append(f"[图片]{summary}")
-                    else:
-                        text_segments.append("[图片]")
+            text_segments = _render_message_segments(
+                raw_segments,
+                user_info_cache,
+                reply_message_map,
+            )
 
             if text_segments:
-                message_content = "".join(text_segments)
-                import re
+                message_content = "".join(text_segments).strip()
 
                 def img_replacer(match):
                     m = re.search(r"summary=(.*?)(?:,[a-z_]+=|\])", match.group(0))

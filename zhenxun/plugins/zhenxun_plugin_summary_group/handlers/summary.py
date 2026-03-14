@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, PrivateMessageEvent
 from nonebot.permission import SUPERUSER
 from nonebot_plugin_alconna import At, CommandResult, Match, Text
@@ -19,6 +21,9 @@ from ..utils.message_selector import (
     build_selector_from_time_range_type,
     parse_time_expression,
 )
+
+_SUMMARY_COMMAND_PREFIXES = ("总结",)
+_EXPORT_COMMAND_PREFIXES = ("导出聊天记录",)
 
 
 def _collect_summary_filters(
@@ -55,6 +60,7 @@ async def _resolve_target_group_id(
     event: GroupMessageEvent | PrivateMessageEvent,
     result: CommandResult,
     target: MsgTarget,
+    fallback_target_group_id: int | None = None,
 ) -> int | None:
     is_superuser = await SUPERUSER(bot, event)
     originating_group_id = (
@@ -62,13 +68,18 @@ async def _resolve_target_group_id(
     )
     arp = result.result
     target_group_id_match = arp.query("g.target_group_id") if arp else None
+    target_group_id = (
+        int(target_group_id_match)
+        if target_group_id_match is not None
+        else fallback_target_group_id
+    )
 
-    if target_group_id_match and not is_superuser:
+    if target_group_id is not None and not is_superuser:
         await UniMessage.text("需要超级用户权限才能使用 -g 参数指定群聊。").send(target)
         return None
 
-    if target_group_id_match and is_superuser:
-        return int(target_group_id_match)
+    if target_group_id is not None and is_superuser:
+        return target_group_id
     if originating_group_id is not None:
         return originating_group_id
 
@@ -76,6 +87,42 @@ async def _resolve_target_group_id(
         "请在群聊中使用此命令，或使用 -g <群号> 参数指定目标群聊。(仅限超级用户)"
     ).send(target)
     return None
+
+
+def _strip_command_prefix(text: str, command_prefixes: tuple[str, ...]) -> str:
+    stripped = text.strip()
+    for prefix in sorted(command_prefixes, key=len, reverse=True):
+        if stripped.startswith(prefix):
+            return stripped[len(prefix) :].strip()
+    return stripped
+
+
+def _extract_target_group_id_from_text(
+    text: str,
+    command_prefixes: tuple[str, ...],
+) -> int | None:
+    normalized = _strip_command_prefix(text, command_prefixes)
+    match = re.search(r"(?:^|\s)-g\s*(?P<group_id>\d+)(?=\s|$)", normalized)
+    if not match:
+        return None
+    return int(match.group("group_id"))
+
+
+def _extract_style_from_text(
+    text: str,
+    command_prefixes: tuple[str, ...],
+) -> str | None:
+    normalized = _strip_command_prefix(text, command_prefixes)
+    pattern = re.compile(
+        r"(?:^|\s)(?:-p|--prompt)\s*(?P<style>.+?)"
+        r"(?=\s+(?:-g|-t|--time)\b|$)",
+        re.IGNORECASE,
+    )
+    match = pattern.search(normalized)
+    if not match:
+        return None
+    style = match.group("style").strip()
+    return style or None
 
 
 def _join_time_expression(time_expr: Match[list[str]] | Match[str]) -> str | None:
@@ -87,6 +134,80 @@ def _join_time_expression(time_expr: Match[list[str]] | Match[str]) -> str | Non
         return joined or None
     stripped = str(value).strip()
     return stripped or None
+
+
+def _normalize_query_time_expr(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, list | tuple):
+        joined = " ".join(str(part).strip() for part in value if str(part).strip())
+        return joined or None
+    stripped = str(value).strip()
+    return stripped or None
+
+
+def _extract_time_expression_from_text(text: str) -> str | None:
+    # 支持:
+    # 总结 -t 2h
+    # 总结 -t2h
+    # 总结-t 2h
+    # 总结 -t 2026-03-01 09:00~2026-03-03 18:00 -g 123 -p 风格
+    normalized = _strip_command_prefix(
+        text,
+        _SUMMARY_COMMAND_PREFIXES + _EXPORT_COMMAND_PREFIXES,
+    )
+    pattern = re.compile(
+        r"(?:^|\s)(?:-t|--time)\s*(?P<expr>.+?)"
+        r"(?=\s+(?:-g|-p|--prompt)\b|$)",
+        re.IGNORECASE,
+    )
+    match = pattern.search(normalized)
+    if not match:
+        return None
+    expr = match.group("expr").strip()
+    return expr or None
+
+
+def _extract_time_expression(
+    result: CommandResult,
+    time_expr: Match[list[str]] | Match[str],
+    raw_text: str,
+) -> str | None:
+    from_match = _join_time_expression(time_expr)
+    if from_match:
+        return from_match
+
+    arp = result.result
+    if arp:
+        for query_key in ("t.time_expr", "time.time_expr", "time_expr"):
+            queried = _normalize_query_time_expr(arp.query(query_key))
+            if queried:
+                return queried
+
+    return _extract_time_expression_from_text(raw_text)
+
+
+def _extract_target_group_id(
+    result: CommandResult,
+    raw_text: str,
+    command_prefixes: tuple[str, ...],
+) -> int | None:
+    arp = result.result
+    target_group_id_match = arp.query("g.target_group_id") if arp else None
+    if target_group_id_match:
+        return int(target_group_id_match)
+    return _extract_target_group_id_from_text(raw_text, command_prefixes)
+
+
+def _resolve_style_value(
+    style: Match[str],
+    raw_text: str,
+    command_prefixes: tuple[str, ...],
+) -> str | None:
+    if style.available:
+        resolved = str(style.result).strip()
+        return resolved or None
+    return _extract_style_from_text(raw_text, command_prefixes)
 
 
 async def handle_summary(
@@ -103,13 +224,33 @@ async def handle_summary(
     originating_group_id = (
         event.group_id if isinstance(event, GroupMessageEvent) else None
     )
+    raw_text = (
+        getattr(event, "raw_message", "")
+        or (
+            event.get_plaintext()
+            if hasattr(event, "get_plaintext")
+            else ""
+        )
+    )
     selector = None
+    style_value = _resolve_style_value(style, raw_text, _SUMMARY_COMMAND_PREFIXES)
+    requested_target_group_id = _extract_target_group_id(
+        result,
+        raw_text,
+        _SUMMARY_COMMAND_PREFIXES,
+    )
+    target_group_id_to_fetch = await _resolve_target_group_id(
+        bot,
+        event,
+        result,
+        target,
+        fallback_target_group_id=requested_target_group_id,
+    )
 
-    target_group_id_to_fetch = await _resolve_target_group_id(bot, event, result, target)
     if target_group_id_to_fetch is None:
         return
 
-    time_expression = _join_time_expression(time_expr)
+    time_expression = _extract_time_expression(result, time_expr, raw_text)
     if message_count is not None and time_expression:
         await UniMessage.text("不能同时指定消息数量和 -t 时间表达式。").send(target)
         return
@@ -143,8 +284,8 @@ async def handle_summary(
         feedback += f"（时间: {time_expression}）"
     elif message_count is not None:
         feedback += f"（最近 {message_count} 条）"
-    if style.available:
-        feedback += f"（风格: {style.result}）"
+    if style_value:
+        feedback += f"（风格: {style_value}）"
     feedback += f"{'（指定用户）' if target_user_ids else ''}，请稍候..."
     await UniMessage.text(feedback).send(target)
 
@@ -152,7 +293,7 @@ async def handle_summary(
         bot=bot,
         target_group_id=target_group_id_to_fetch,
         selector=selector,
-        style=style.result if style.available else None,
+        style=style_value,
         content_filter=content_value,
         target_user_ids=target_user_ids,
         response_target=target,
@@ -174,7 +315,7 @@ async def handle_summary(
             plugin_name="summary_group",
             bot_id=str(bot.self_id),
             message_count=(message_count or 0),
-            style=style.result if style.available else None,
+            style=style_value,
             target_users=list(target_user_ids),
             content_filter=content_value or time_expression,
         )
@@ -225,11 +366,31 @@ async def handle_export_chat_history(
     time_expr: Match[list[str]] | Match[str],
     target: MsgTarget,
 ):
-    target_group_id_to_fetch = await _resolve_target_group_id(bot, event, result, target)
+    raw_text = (
+        getattr(event, "raw_message", "")
+        or (
+            event.get_plaintext()
+            if hasattr(event, "get_plaintext")
+            else ""
+        )
+    )
+    requested_target_group_id = _extract_target_group_id(
+        result,
+        raw_text,
+        _EXPORT_COMMAND_PREFIXES,
+    )
+    target_group_id_to_fetch = await _resolve_target_group_id(
+        bot,
+        event,
+        result,
+        target,
+        fallback_target_group_id=requested_target_group_id,
+    )
+
     if target_group_id_to_fetch is None:
         return
 
-    time_expression = _join_time_expression(time_expr)
+    time_expression = _extract_time_expression(result, time_expr, raw_text)
     if selector_value and time_expression:
         await UniMessage.text("不能同时指定导出方式和 -t 时间表达式。").send(target)
         return
