@@ -96,6 +96,8 @@ __plugin_meta__ = PluginMetadata(
         "🔍 **核心功能 (所有用户)**\n"
         "  `总结 <数量>` - 对最近消息进行总结\n"
         "  `总结 -t <时间表达式>` - 对指定时间范围的消息进行总结\n"
+        "  `总结 -t 2h -p 锐评` - 按最近 2 小时总结并指定风格\n"
+        "  `总结 -t 7:00~8:00 -g 123456` - 总结指定群在某时间段内的消息\n"
         "  `总结 <数量> @用户` - 总结特定用户的发言\n"
         "  `总结 <数量> <关键词>` - 总结含特定关键词的消息\n"
         "  `总结 <数量> -p <风格>` - 指定本次总结的风格\n"
@@ -120,7 +122,12 @@ __plugin_meta__ = PluginMetadata(
         "  `总结风格 设置 <风格>` - 设置插件的全局默认风格\n"
         "  `总结风格 移除` - 移除插件的全局默认风格\n\n"
         "ℹ️ **说明**\n"
-        f"  • 消息数量范围: {base_config.get('SUMMARY_MIN_LENGTH', 1)}-{base_config.get('SUMMARY_MAX_LENGTH', 1000)}\n"
+        "  • 消息数量范围: "
+        f"{base_config.get('SUMMARY_MIN_LENGTH', 1)}-"
+        f"{base_config.get('SUMMARY_MAX_LENGTH', 1000)}\n"
+        "  • `-t` 支持与 `-g`、`-p` 组合使用，也支持紧凑写法如 `-t2h`\n"
+        "  • 时间表达式示例: `2h` / `30m` / `3d` / `7:00~8:00`\n"
+        "    或 `2026-03-01 09:00~2026-03-03 18:00`\n"
         f"  • 手动总结冷却: {base_config.get('SUMMARY_COOL_DOWN', 60)}秒"
     ),
     type="application",
@@ -291,8 +298,12 @@ summary_group = on_alconna(
             description="生成群聊总结",
             usage=(
                 "总结 <消息数量> [-p|--prompt 风格] [-g 群号] [@用户/内容过滤...]\n"
-                "总结 -t <时间表达式> [-p|--prompt 风格] [-g 群号] [@用户/内容过滤...]\n"
-                "时间表达式支持: 2h / 30m / 3d / 09:00~12:00 / YYYY-MM-DD HH:MM~YYYY-MM-DD HH:MM\n"
+                "总结 -t <时间表达式> [-p|--prompt 风格] [-g 群号] "
+                "[@用户/内容过滤...]\n"
+                "示例: 总结 -t 2h -g 867837567 -p 精神分析专家\n"
+                "示例: 总结 -t7:00~8:00\n"
+                "时间表达式支持: 2h / 30m / 3d / 09:00~12:00 /\n"
+                "YYYY-MM-DD HH:MM~YYYY-MM-DD HH:MM\n"
                 "消息数量范围: "
                 f"{base_config.get('SUMMARY_MIN_LENGTH', 1)} - "
                 f"{base_config.get('SUMMARY_MAX_LENGTH', 1000)}\n"
@@ -336,7 +347,9 @@ export_chat_history = on_alconna(
             usage=(
                 "导出聊天记录 <消息数量|今日|昨日> [-g 群号]\n"
                 "导出聊天记录 -t <时间表达式> [-g 群号]\n"
-                "时间表达式支持: 2h / 30m / 3d / 09:00~12:00 / YYYY-MM-DD HH:MM~YYYY-MM-DD HH:MM"
+                "示例: 导出聊天记录 -t 2h -g 867837567\n"
+                "时间表达式支持: 2h / 30m / 3d / 09:00~12:00 /\n"
+                "YYYY-MM-DD HH:MM~YYYY-MM-DD HH:MM"
             ),
         ),
     ),
@@ -534,9 +547,11 @@ from .handlers.scheduler import (
 from .handlers.scheduler import (
     handle_summary_set as summary_set_handler_impl,
 )
-from .handlers.summary import handle_summary as summary_handler_impl
 from .handlers.summary import (
     handle_export_chat_history as export_chat_history_handler_impl,
+)
+from .handlers.summary import handle_summary as summary_handler_impl
+from .handlers.summary import (
     handle_time_range_summary as time_range_summary_handler_impl,
 )
 
