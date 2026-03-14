@@ -264,6 +264,25 @@ async def _rule(uninfo: Uninfo, message: UniMsg) -> bool:
     return False
 
 
+def _get_short_url_for_model(info_model: Any, original_url: str) -> str:
+    from .model import ArticleInfo, LiveInfo, SeasonInfo, UserInfo, VideoInfo
+
+    if isinstance(info_model, VideoInfo):
+        id_str = info_model.bvid if info_model.bvid else f"av{info_model.aid}"
+        return f"https://b23.tv/{id_str}"
+    elif isinstance(info_model, LiveInfo):
+        return f"https://live.bilibili.com/{info_model.room_id}"
+    elif isinstance(info_model, ArticleInfo):
+        return f"https://b23.tv/cv{info_model.id}"
+    elif isinstance(info_model, SeasonInfo):
+        if hasattr(info_model, "target_ep_id") and info_model.target_ep_id:
+            return f"https://b23.tv/ep{info_model.target_ep_id}"
+        return f"https://b23.tv/ss{getattr(info_model, 'season_id', '') or getattr(info_model, 'media_id', '')}"
+    elif isinstance(info_model, UserInfo):
+        return f"https://space.bilibili.com/{info_model.mid}"
+    return original_url
+
+
 async def _create_rendered_message(
     info_model: Any,
     render_func: Any,
@@ -276,6 +295,8 @@ async def _create_rendered_message(
         or getattr(info_model, "parsed_url", None)
         or getattr(info_model, "url", None)
     )
+    if link_url:
+        link_url = _get_short_url_for_model(info_model, link_url)
 
     if render_enabled:
         type_name = type(info_model).__name__
@@ -286,10 +307,10 @@ async def _create_rendered_message(
         try:
             image_bytes = await render_func(info_model)
             if image_bytes:
-                msgs: list[UniMsg] = [UniMessage([Image(raw=image_bytes)])]
+                segments = [Image(raw=image_bytes)]
                 if link_url:
-                    msgs.append(UniMessage([Text(f"链接: {link_url}")]))
-                return msgs
+                    segments.append(Text(f"\n{link_url}"))
+                return [UniMessage(segments)]
             else:
                 logger.warning(f"{type_name} 渲染函数返回空，尝试原始消息", "B站解析")
                 return await builder_func(info_model)
@@ -320,7 +341,11 @@ async def _build_article_message(
                 break
 
         if image_segment:
-            return [UniMessage([image_segment]), UniMessage([Text(f"链接: {article_info.url}")])]
+            segments = [image_segment]
+            if article_info.url:
+                short_url = _get_short_url_for_model(article_info, article_info.url)
+                segments.append(Text(f"\n{short_url}"))
+            return [UniMessage(segments)]
         else:
             return article_message
     else:

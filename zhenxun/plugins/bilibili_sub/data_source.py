@@ -727,93 +727,128 @@ async def _get_up_status(sub: BiliSub, force_push: bool = False) -> list[Notific
         await sub.save(update_fields=["last_dynamic_timestamp"])
 
     logger.debug(f"开始检查视频更新: UID={sub.uid}")
-    video = None
     if sub.push_video and video_info_data.get("list", {}).get("vlist"):
-        video = video_info_data["list"]["vlist"][0]
-        latest_video_created = video.get("created", 0)
-        video_title = video.get("title", "未知标题")
-        video_bvid = video.get("bvid", "未知BV号")
+        vlist = video_info_data["list"]["vlist"]
 
-        video_time_str = (
-            datetime.fromtimestamp(latest_video_created).strftime("%Y-%m-%d %H:%M:%S")
-            if latest_video_created
-            else "未知时间"
-        )
-        logger.debug(
-            f"获取到最新视频: UID={sub.uid}, 标题={video_title}, 发布时间={video_time_str}"
-        )
+        # 收集所有新视频
+        new_videos = []
+        for video in vlist:
+            video_created = video.get("created", 0)
+            is_new_video = (
+                sub.last_video_timestamp is None
+                or sub.last_video_timestamp < video_created
+            )
+            if force_push or is_new_video:
+                new_videos.append(video)
 
-        is_new_video = (
-            sub.last_video_timestamp is None
-            or sub.last_video_timestamp < latest_video_created
-        )
+        if new_videos:
+            # 将由于API默认最新在前的数据逆序，确保最早发布的新视频先推送
+            new_videos.reverse()
 
-        if force_push or is_new_video:
-            logger.info(f"检测到新视频 (或强制推送): UID={sub.uid}, 标题={video_title}")
-            is_new_video_pushed = True
+            # 使用最高的时间戳（原列表中第一个，即现在的最后一个）更新数据库
+            max_video_timestamp = new_videos[-1].get("created", 0)
 
-            notebook = NotebookData(elements=[])
-            notification_type = NotificationType.VIDEO
+            for video in new_videos:
+                video_created = video.get("created", 0)
+                video_title = video.get("title", "未知标题")
+                video_bvid = video.get("bvid", "未知BV号")
+                video_time_str = (
+                    datetime.fromtimestamp(video_created).strftime("%Y-%m-%d %H:%M:%S")
+                    if video_created
+                    else "未知时间"
+                )
 
-            notebook.head(f"{uname} 投稿了新视频啦！🎉", level=2)
-            notebook.image(video["pic"])
+                logger.info(
+                    f"检测到新视频 (或强制推送): UID={sub.uid}, 标题={video_title}"
+                )
+                is_new_video_pushed = True
 
-            # Extract description with a fallback
-            video_desc = video.get("description", "").strip()
-            if not video_desc:
-                video_desc = "暂无简介"
+                notebook = NotebookData(elements=[])
+                notification_type = NotificationType.VIDEO
 
-            # Replace newlines with HTML breaks for proper rendering
-            video_desc_html = video_desc.replace("\n", "<br>")
+                notebook.head(f"{uname} 投稿了新视频啦！🎉", level=2)
+                notebook.image(video["pic"])
 
-            # Add a divider before the new info
-            notebook.add_divider()
+                # Extract description with a fallback
+                # vlist API truncates to 255 chars, so we try reaching full info
+                video_desc = video.get("description", "").strip()
+                try:
+                    from bilibili_api import video as api_video
 
-            # Inject structured HTML for the minimalist PSB theme
-            custom_html = f"""<div class="bilibili-video-info">
+                    v_instance = api_video.Video(bvid=video_bvid)
+                    v_info = await v_instance.get_info()
+                    full_desc = v_info.get("desc", "").strip()
+                    if full_desc:
+                        video_desc = full_desc
+                except Exception as e:
+                    logger.warning(f"获取完整视频简介失败, 降级使用截断简介: {e}")
+
+                if not video_desc:
+                    video_desc = "暂无简介"
+
+                # Replace newlines with HTML breaks for proper rendering
+                video_desc_html = video_desc.replace("\n", "<br>")
+
+                # Add a divider before the new info
+                notebook.add_divider()
+
+                # Inject structured HTML for the minimalist PSB theme
+                custom_html = f"""<div class="bilibili-video-info">
 <div class="video-title-container">{video_title}</div>
 <div class="video-meta-row">
     <span>发布于：{video_time_str}</span>
+    <span>{video_bvid}</span>
 </div>
 <div class="video-description">{video_desc_html}</div>
 </div>"""
-            notebook.text(custom_html)
+                notebook.text(custom_html)
 
-            if not force_push:
-                logger.debug(
-                    f"更新视频发布时间: UID={sub.uid}, 新时间={latest_video_created}"
+                msg_list_content = []
+                img_bytes = await ui.render(notebook, frameless=True)
+                msg_list_content.append(img_bytes)
+
+                video_url_for_msg = f"https://www.bilibili.com/video/{video_bvid}"
+                msg_list_content.append(f"\n视频链接: {video_url_for_msg}")
+
+                notifications.append(
+                    Notification(
+                        content=msg_list_content,
+                        type=notification_type,
+                    )
                 )
-                sub.last_video_timestamp = latest_video_created
+
+                logger.info(
+                    f"视频推送消息已准备: UID={sub.uid}, 用户名={uname}, 视频BV号={video_bvid}"
+                )
+
+            if not force_push and max_video_timestamp > 0:
+                logger.debug(
+                    f"更新视频发布时间: UID={sub.uid}, 新时间={max_video_timestamp}"
+                )
+                sub.last_video_timestamp = max_video_timestamp
                 await sub.save(update_fields=["last_video_timestamp"])
-            logger.info(
-                f"视频推送消息已准备: UID={sub.uid}, 用户名={uname}, 视频BV号={video_bvid}"
-            )
 
         else:
-            logger.debug(
-                f"未检测到新视频: UID={sub.uid}, 最新视频时间={video_time_str}, 本地记录时间={'无记录' if sub.last_video_timestamp is None else datetime.fromtimestamp(sub.last_video_timestamp).strftime('%Y-%m-%d %H:%M:%S')}"
-            )
+            if vlist:
+                latest_video = vlist[0]
+                latest_created = latest_video.get("created", 0)
+                video_time_str = (
+                    datetime.fromtimestamp(latest_created).strftime("%Y-%m-%d %H:%M:%S")
+                    if latest_created
+                    else "未知时间"
+                )
+                local_time_str = (
+                    datetime.fromtimestamp(sub.last_video_timestamp).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )
+                    if sub.last_video_timestamp
+                    else "无记录"
+                )
+                logger.debug(
+                    f"未检测到新视频: UID={sub.uid}, 最新视频时间={video_time_str}, 本地记录时间={local_time_str}"
+                )
     else:
         logger.info(f"视频列表为空: UID={sub.uid}")
-
-    if notebook:
-        msg_list_content = []
-        img_bytes = await ui.render(notebook, frameless=True)
-        msg_list_content.append(img_bytes)
-
-        if is_new_video_pushed and video:
-            video_url_for_msg = (
-                f"https://www.bilibili.com/video/{video.get('bvid', '')}"
-            )
-            msg_list_content.append(f"\n视频链接: {video_url_for_msg}")
-
-        if notification_type:
-            notifications.append(
-                Notification(
-                    content=msg_list_content,
-                    type=notification_type,
-                )
-            )
 
     duration = time.time() - start_time
     if notifications:
@@ -905,6 +940,7 @@ async def get_user_dynamic(
         # pub_ts 可能在顶层，也可能在 modules.module_author 中
         item_dynamic_id = item.get("id_str", "")
         item_timestamp = item.get("pub_ts", 0)
+        item_type = item.get("type", "")
         if not item_timestamp:
             # 回退到 modules.module_author.pub_ts
             modules = item.get("modules", {})
@@ -915,6 +951,15 @@ async def get_user_dynamic(
 
         if not item_dynamic_id:
             logger.warning(f"动态缺少id_str字段: UID={uid}")
+            continue
+
+        # 过滤视频和直播动态 (防止和视频/直播推送重复)
+        if item_type in ["DYNAMIC_TYPE_AV", "DYNAMIC_TYPE_LIVE_RCMD"]:
+            logger.debug(
+                f"跳过视频/直播推荐动态以防止重复推送: UID={uid}, "
+                f"动态ID={item_dynamic_id}, "
+                f"类型={item_type}"
+            )
             continue
 
         # 跳过已推送过的旧动态

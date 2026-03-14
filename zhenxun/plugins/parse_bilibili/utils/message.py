@@ -49,6 +49,29 @@ try:
         logger.error(f"图标字体文件未找到: {FONT_FILE}")
 except Exception as e:
     logger.error(f"加载或编码 vanfont.ttf 时出错: {e}")
+
+_custom_font_cache = {}
+
+def get_custom_font_base64(path_str: str) -> str:
+    if not path_str:
+        return ""
+    if path_str in _custom_font_cache:
+        return _custom_font_cache[path_str]
+    try:
+        path = Path(path_str).absolute()
+        if path.exists() and path.is_file():
+            with open(path, "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("utf-8")
+                mime_type = "font/truetype" if path.suffix.lower() == ".ttf" else "font/opentype"
+                format_obj = "truetype" if path.suffix.lower() == ".ttf" else "opentype"
+                payload = f"data:{mime_type};base64,{b64}"
+                _custom_font_cache[path_str] = payload
+                logger.info(f"成功加载自定义字体: {path}")
+                return payload
+    except Exception as e:
+        logger.error(f"加载自定义字体时出错: {e}")
+    return ""
+
 template_loader = jinja2.FileSystemLoader(str(TEMPLATE_DIR))
 template_env = jinja2.Environment(loader=template_loader, enable_async=True)
 
@@ -343,15 +366,35 @@ async def render_video_info_to_image(info: VideoInfo) -> Optional[bytes]:
 
         cover_image_src = await ImageHelper.get_image_as_base64(cover_path)
 
-    up_avatar_src = None
-    if info.owner.face:
-        avatar_filename = f"bili_avatar_{info.owner.mid}.jpg"
-        avatar_path = IMAGE_CACHE_DIR / avatar_filename
+    staff_list_for_template = []
+    if info.staff:
+        for index, member in enumerate(info.staff):
+            member_avatar_src = None
+            if member.face:
+                avatar_filename = f"bili_avatar_{member.mid}.jpg"
+                avatar_path = IMAGE_CACHE_DIR / avatar_filename
+                if not (avatar_path.exists() and avatar_path.stat().st_size > 0):
+                    await ImageHelper.download_image(member.face, avatar_path)
+                member_avatar_src = await ImageHelper.get_image_as_base64(avatar_path)
+            
+            staff_list_for_template.append({
+                "avatar_image": member_avatar_src,
+                "name": member.name,
+                "name_color": "#fb7299",
+                "title": member.title,
+                "follower_str": format_number(member.follower or 0),
+                "archive_count": format_number(member.archive_count or 0),
+            })
+    else:
+        up_avatar_src = None
+        if info.owner.face:
+            avatar_filename = f"bili_avatar_{info.owner.mid}.jpg"
+            avatar_path = IMAGE_CACHE_DIR / avatar_filename
 
-        if not (avatar_path.exists() and avatar_path.stat().st_size > 0):
-            await ImageHelper.download_image(info.owner.face, avatar_path)
+            if not (avatar_path.exists() and avatar_path.stat().st_size > 0):
+                await ImageHelper.download_image(info.owner.face, avatar_path)
 
-        up_avatar_src = await ImageHelper.get_image_as_base64(avatar_path)
+            up_avatar_src = await ImageHelper.get_image_as_base64(avatar_path)
 
     comments_list = []
     show_comments = True
@@ -416,10 +459,13 @@ async def render_video_info_to_image(info: VideoInfo) -> Optional[bytes]:
         "video_category": info.tname,
         "video_duration": format_duration(info.duration),
         "up_info": {
-            "avatar_image": up_avatar_src,
+            "avatar_image": up_avatar_src if not info.staff else None,
             "name": info.owner.name,
             "name_color": "#fb7299",
+            "follower_str": format_number(info.owner.follower or 0),
+            "archive_count": format_number(info.owner.archive_count or 0),
         },
+        "staff": staff_list_for_template if staff_list_for_template else None,
         "video_title": info.title,
         "view_count": format_number(info.stat.view),
         "dm_count": format_number(info.stat.danmaku),
@@ -435,6 +481,7 @@ async def render_video_info_to_image(info: VideoInfo) -> Optional[bytes]:
         "online_count": info.online_count,
         "ai_summary": display_summary,
         "font_van_base64": FONT_BASE64_CONTENT,
+        "custom_font_base64": get_custom_font_base64(base_config.get("VIDEO_FONT_PATH", "")),
     }
 
     template_path = TEMPLATE_DIR / "style_blue_video.html"
@@ -490,6 +537,7 @@ async def render_season_info_to_image(info: SeasonInfo) -> Optional[bytes]:
         "coin_count": format_number(stat_to_display.coins),
         "share_count": format_number(stat_to_display.share),
         "font_van_base64": FONT_BASE64_CONTENT,
+        "custom_font_base64": get_custom_font_base64(base_config.get("VIDEO_FONT_PATH", "")),
     }
 
     template_path = TEMPLATE_DIR / "style_blue_season.html"
@@ -519,6 +567,7 @@ async def render_user_info_to_image(info: UserInfo) -> Optional[bytes]:
         "live_status": info.live_room_status,
         "live_title": info.live_room_title,
         "font_van_base64": FONT_BASE64_CONTENT,
+        "custom_font_base64": get_custom_font_base64(base_config.get("VIDEO_FONT_PATH", "")),
     }
 
     template_path = TEMPLATE_DIR / "user_card.html"
@@ -539,6 +588,14 @@ async def render_live_info_to_image(info: LiveInfo) -> Optional[bytes]:
             "%Y-%m-%d %H:%M", time.localtime(info.live_start_time)
         )
 
+    keyframe_src = None
+    if info.keyframe_url:
+        file_name = f"bili_live_keyframe_{info.room_id}.jpg"
+        keyframe_path = IMAGE_CACHE_DIR / file_name
+        if not (keyframe_path.exists() and keyframe_path.stat().st_size > 0):
+            await ImageHelper.download_image(info.keyframe, keyframe_path)
+        keyframe_src = await ImageHelper.get_image_as_base64(keyframe_path)
+
     template_data = {
         "cover": info.cover,
         "face": info.face,
@@ -548,8 +605,9 @@ async def render_live_info_to_image(info: LiveInfo) -> Optional[bytes]:
         "live_status": info.live_status,
         "start_time": start_time_str,
         "description": plain_description,
-        "keyframe": info.keyframe_url,
+        "keyframe": keyframe_src if info.keyframe else None,
         "font_van_base64": FONT_BASE64_CONTENT,
+        "custom_font_base64": get_custom_font_base64(base_config.get("VIDEO_FONT_PATH", "")),
     }
 
     template_path = TEMPLATE_DIR / "live_card.html"
