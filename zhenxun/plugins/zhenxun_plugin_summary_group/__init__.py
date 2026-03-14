@@ -95,9 +95,6 @@ __plugin_meta__ = PluginMetadata(
         "📖 **群聊总结插件**\n\n"
         "🔍 **核心功能 (所有用户)**\n"
         "  `总结 <数量>` - 对最近消息进行总结\n"
-        "  `总结 -t <时间表达式>` - 对指定时间范围的消息进行总结\n"
-        "  `总结 -t 2h -p 锐评` - 按最近 2 小时总结并指定风格\n"
-        "  `总结 -t 7:00~8:00 -g 123456` - 总结指定群在某时间段内的消息\n"
         "  `总结 <数量> @用户` - 总结特定用户的发言\n"
         "  `总结 <数量> <关键词>` - 总结含特定关键词的消息\n"
         "  `总结 <数量> -p <风格>` - 指定本次总结的风格\n"
@@ -122,12 +119,7 @@ __plugin_meta__ = PluginMetadata(
         "  `总结风格 设置 <风格>` - 设置插件的全局默认风格\n"
         "  `总结风格 移除` - 移除插件的全局默认风格\n\n"
         "ℹ️ **说明**\n"
-        "  • 消息数量范围: "
-        f"{base_config.get('SUMMARY_MIN_LENGTH', 1)}-"
-        f"{base_config.get('SUMMARY_MAX_LENGTH', 1000)}\n"
-        "  • `-t` 支持与 `-g`、`-p` 组合使用，也支持紧凑写法如 `-t2h`\n"
-        "  • 时间表达式示例: `2h` / `30m` / `3d` / `7:00~8:00`\n"
-        "    或 `2026-03-01 09:00~2026-03-03 18:00`\n"
+        f"  • 消息数量范围: {base_config.get('SUMMARY_MIN_LENGTH', 1)}-{base_config.get('SUMMARY_MAX_LENGTH', 1000)}\n"
         f"  • 手动总结冷却: {base_config.get('SUMMARY_COOL_DOWN', 60)}秒"
     ),
     type="application",
@@ -135,7 +127,7 @@ __plugin_meta__ = PluginMetadata(
     supported_adapters={"~onebot.v11"},
     extra=PluginExtraData(
         author="webjoin111",
-        version="3.1.0",
+        version="3.0.1",
         menu_type="数据统计",
         configs=[
             RegisterConfig(
@@ -260,10 +252,9 @@ summary_group = on_alconna(
     Alconna(
         "总结",
         Args[
-            "message_count?",
+            "message_count",
             int,
             Field(
-                default=None,
                 completion=lambda: (
                     f"输入消息数量 ({base_config.get('SUMMARY_MIN_LENGTH', 1)}-{base_config.get('SUMMARY_MAX_LENGTH', 1000)})"
                 ),
@@ -279,14 +270,6 @@ summary_group = on_alconna(
                 "target_group_id", int, Field(completion="指定群号 (需要超级用户权限)")
             ],
         ),
-        Option(
-            "-t|--time",
-            Args[
-                "time_expr",
-                MultiVar(str, "+"),
-                Field(completion="时间表达式，如 2h、09:00~12:00"),
-            ],
-        ),
         Args[
             "parts?",
             MultiVar(At | Text),
@@ -298,12 +281,6 @@ summary_group = on_alconna(
             description="生成群聊总结",
             usage=(
                 "总结 <消息数量> [-p|--prompt 风格] [-g 群号] [@用户/内容过滤...]\n"
-                "总结 -t <时间表达式> [-p|--prompt 风格] [-g 群号] "
-                "[@用户/内容过滤...]\n"
-                "示例: 总结 -t 2h -g 867837567 -p 精神分析专家\n"
-                "示例: 总结 -t7:00~8:00\n"
-                "时间表达式支持: 2h / 30m / 3d / 09:00~12:00 /\n"
-                "YYYY-MM-DD HH:MM~YYYY-MM-DD HH:MM\n"
                 "消息数量范围: "
                 f"{base_config.get('SUMMARY_MIN_LENGTH', 1)} - "
                 f"{base_config.get('SUMMARY_MAX_LENGTH', 1000)}\n"
@@ -312,48 +289,6 @@ summary_group = on_alconna(
         ),
     ),
     rule=is_allowed_call(),
-    priority=5,
-    block=True,
-)
-
-export_chat_history = on_alconna(
-    Alconna(
-        "导出聊天记录",
-        Args[
-            "selector?",
-            str,
-            Field(default=None, completion="数量，或 今日/昨日"),
-        ],
-        Option(
-            "-t|--time",
-            Args[
-                "time_expr",
-                MultiVar(str, "+"),
-                Field(completion="时间表达式，如 2h、09:00~12:00"),
-            ],
-        ),
-        Option(
-            "-g",
-            Args[
-                "target_group_id",
-                int,
-                Field(completion="指定群号 (需要超级用户权限)"),
-            ],
-        ),
-        meta=CommandMeta(
-            compact=True,
-            strict=False,
-            description="导出聊天记录到 Markdown 文件",
-            usage=(
-                "导出聊天记录 <消息数量|今日|昨日> [-g 群号]\n"
-                "导出聊天记录 -t <时间表达式> [-g 群号]\n"
-                "示例: 导出聊天记录 -t 2h -g 867837567\n"
-                "时间表达式支持: 2h / 30m / 3d / 09:00~12:00 /\n"
-                "YYYY-MM-DD HH:MM~YYYY-MM-DD HH:MM"
-            ),
-        ),
-    ),
-    permission=SUPERUSER,
     priority=5,
     block=True,
 )
@@ -547,9 +482,6 @@ from .handlers.scheduler import (
 from .handlers.scheduler import (
     handle_summary_set as summary_set_handler_impl,
 )
-from .handlers.summary import (
-    handle_export_chat_history as export_chat_history_handler_impl,
-)
 from .handlers.summary import handle_summary as summary_handler_impl
 from .handlers.summary import (
     handle_time_range_summary as time_range_summary_handler_impl,
@@ -561,14 +493,21 @@ async def _(
     bot: Bot,
     event: GroupMessageEvent | PrivateMessageEvent,
     result: CommandResult,
-    message_count: int | None,
+    message_count: int,
     style: Match[str],
     parts: Match[list[At | Text]],
-    time_expr: Match[list[str]],
     target: MsgTarget,
 ):
     user_id_str = event.get_user_id()
     is_superuser = await SUPERUSER(bot, event)
+
+    try:
+        validate_msg_count_range(message_count)
+        logger.debug(f"消息数量 {message_count} 范围验证通过。")
+    except ValueError as e:
+        logger.warning(f"消息数量验证失败 (Handler): {e}")
+        await UniMessage.text(str(e)).send(target)
+        return
 
     logger.debug(
         f"用户 {user_id_str} 触发总结，权限、冷却和参数验证通过 (或为 Superuser)，开始执行核心逻辑。"
@@ -582,16 +521,9 @@ async def _(
         return
 
     try:
-        if message_count is not None and not time_expr.available:
-            validate_msg_count_range(message_count)
-            logger.debug(f"消息数量 {message_count} 范围验证通过。")
         await summary_handler_impl(
-            bot, event, result, message_count, style, parts, time_expr, target
+            bot, event, result, message_count, style, parts, target
         )
-    except ValueError as e:
-        logger.warning(f"消息数量验证失败 (Handler): {e}")
-        await UniMessage.text(str(e)).send(target)
-        return
     except Exception as e:
         logger.error(
             f"处理总结命令时发生异常: {e}",
@@ -699,25 +631,6 @@ async def _(
     target: MsgTarget,
 ):
     await summary_remove_handler_impl(bot, event, result, target)
-
-
-@export_chat_history.handle()
-async def _(
-    bot: Bot,
-    event: GroupMessageEvent | PrivateMessageEvent,
-    result: CommandResult,
-    selector: str | None,
-    time_expr: Match[list[str]],
-    target: MsgTarget,
-):
-    await export_chat_history_handler_impl(
-        bot,
-        event,
-        result,
-        selector,
-        time_expr,
-        target,
-    )
 
 
 @summary_model_cmd.handle()

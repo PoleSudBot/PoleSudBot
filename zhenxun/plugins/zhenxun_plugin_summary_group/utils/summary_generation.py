@@ -8,7 +8,6 @@ from nonebot_plugin_alconna.uniseg import MsgTarget, UniMessage
 from zhenxun.services.llm import (
     LLMException,
     LLMMessage,
-    get_global_default_model_name,
     get_model_instance,
 )
 from zhenxun.services.log import logger
@@ -35,10 +34,10 @@ async def messages_summary(
     target_user_names: list[str] | None = None,
     style: str | None = None,
     model_name: str | None = None,
-) -> tuple[str, str]:
+) -> str:
     if not messages:
         logger.warning("没有足够的聊天记录可供总结", command="messages_summary")
-        return "没有足够的聊天记录可供总结。", "未知模型"
+        return "没有足够的聊天记录可供总结。"
 
     prompt_parts = []
     group_id = target.id if not target.private else None
@@ -91,7 +90,17 @@ async def messages_summary(
     user_content = "\n".join([f"{msg['name']}: {msg['content']}" for msg in messages])
     llm_messages.append(LLMMessage.user(user_content))
 
-    final_model_name_str = resolve_summary_model_name(group_id, model_name)
+    final_model_name_str = model_name
+    if not final_model_name_str and group_id:
+        final_model_name_str = store.get_group_setting(
+            str(group_id), "default_model_name"
+        )
+        if final_model_name_str:
+            logger.debug(f"群聊 {group_id} 使用特定模型: {final_model_name_str}")
+    if not final_model_name_str:
+        final_model_name_str = base_config.get("SUMMARY_MODEL_NAME")
+        if final_model_name_str:
+            logger.debug(f"使用插件默认模型: {final_model_name_str}")
 
     try:
         logger.info(
@@ -116,7 +125,7 @@ async def messages_summary(
             r"<think>.*?</think>", "", summary_text, flags=re.DOTALL
         ).strip()
 
-        return summary_text, final_model_name_str
+        return summary_text
     except LLMException as e:
         logger.error(
             f"总结生成失败 (LLMException): {e}", command="messages_summary", e=e
@@ -233,7 +242,6 @@ async def send_summary(
     summary: str,
     user_info_cache: dict[str, str] | None = None,
     group_id: int | None = None,
-    model_name: str | None = None,
 ) -> bool:
     try:
         reply_msg = None
@@ -249,12 +257,6 @@ async def send_summary(
                     await _save_summary_image(img_bytes, group_id)
 
                 reply_msg = UniMessage.image(raw=img_bytes)
-                if model_name:
-                    disclaimer = (
-                        f"\n总结内容由【{model_name}】生成，"
-                        "准确度会随上下文增加而降低，仅供参考"
-                    )
-                    reply_msg += UniMessage.text(disclaimer)
             except (SummaryException, ValueError) as e:
                 if not fallback_enabled:
                     logger.error(
@@ -345,25 +347,3 @@ async def read_tpl(path: str) -> str:
 
     async with aiofiles.open(f"{TEMPLATES_PATH}/{path}") as f:
         return await f.read()
-
-
-def resolve_summary_model_name(
-    group_id: int | str | None,
-    model_name: str | None = None,
-) -> str:
-    final_model_name_str = model_name
-    if not final_model_name_str and group_id:
-        final_model_name_str = store.get_group_setting(
-            str(group_id), "default_model_name"
-        )
-        if final_model_name_str:
-            logger.debug(f"群聊 {group_id} 使用特定模型: {final_model_name_str}")
-    if not final_model_name_str:
-        final_model_name_str = base_config.get("SUMMARY_MODEL_NAME")
-        if final_model_name_str:
-            logger.debug(f"使用插件默认模型: {final_model_name_str}")
-    if not final_model_name_str:
-        final_model_name_str = get_global_default_model_name()
-        if final_model_name_str:
-            logger.debug(f"使用 LLM 全局默认模型: {final_model_name_str}")
-    return final_model_name_str or "LLM默认"

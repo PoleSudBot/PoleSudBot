@@ -1,6 +1,4 @@
 import asyncio
-from dataclasses import dataclass
-from datetime import datetime
 import os
 from pathlib import Path
 import re
@@ -9,7 +7,6 @@ from typing import Any
 
 import aiofiles
 from nonebot.adapters.onebot.v11 import Bot
-import pytz
 
 from zhenxun.configs.path_config import TEMP_PATH
 from zhenxun.services.log import logger
@@ -20,7 +17,6 @@ from zhenxun.utils.utils import get_user_avatar
 from .. import base_config
 from ..config import summary_config
 from .core import ErrorCode, SummaryException
-from .message_selector import SHANGHAI_TZ, MessageSelector
 
 
 def _truncate_username(username: str) -> str:
@@ -39,14 +35,6 @@ def _truncate_username(username: str) -> str:
 _message_cache: dict[str, tuple[tuple[list, dict], float]] = {}
 
 
-@dataclass(slots=True)
-class MessageFetchResult:
-    processed_messages: list[dict[str, Any]]
-    user_info_cache: dict[str, str]
-    warning_msg: str | None = None
-    matched_message_count: int = 0
-
-
 try:
     from zhenxun.models.chat_history import ChatHistory
 except ImportError:
@@ -54,348 +42,92 @@ except ImportError:
     logger.warning("无法导入 ChatHistory 模型，数据库历史记录功能不可用。")
 
 
-def _make_cache_key(group_id: int, selector: MessageSelector) -> str | None:
-    if selector.mode != "count" or selector.count is None:
-        return None
-    return f"{group_id}:{selector.count}"
-
-
-def _build_warning_message(total_count: int, max_len: int) -> str:
-    return f"已超过最大 {total_count} 条中的可总结上限，仅截取最新 {max_len} 条进行总结。"
-
-
-def _to_datetime_from_timestamp(timestamp: int | float | None) -> datetime | None:
-    if not timestamp:
-        return None
-    return datetime.fromtimestamp(timestamp, SHANGHAI_TZ)
-
-
-def _normalize_raw_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    normalized_messages: list[dict[str, Any]] = []
-    for message in messages:
-        sender = message.get("sender", {})
-        user_id = message.get("user_id") or sender.get("user_id")
-        normalized = dict(message)
-        normalized["user_id"] = user_id
-        normalized["sender"] = sender or {"user_id": user_id}
-        normalized_messages.append(normalized)
-    return normalized_messages
-
-
-def _normalize_raw_message(message: dict[str, Any] | None) -> dict[str, Any] | None:
-    if not message:
-        return None
-    normalized_messages = _normalize_raw_messages([message])
-    return normalized_messages[0] if normalized_messages else None
-
-
-def _collect_reply_ids(messages: list[dict[str, Any]]) -> set[str]:
-    reply_ids: set[str] = set()
-    for message in messages:
-        for segment in message.get("message", []):
-            if not isinstance(segment, dict):
-                continue
-            if segment.get("type") != "reply":
-                continue
-            reply_id = str(segment.get("data", {}).get("id", "")).strip()
-            if reply_id:
-                reply_ids.add(reply_id)
-    return reply_ids
-
-
-async def _fetch_reply_messages(
-    bot: Bot,
-    messages: list[dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    if not messages:
-        return {}
-
-    reply_ids = _collect_reply_ids(messages)
-    if not reply_ids:
-        return {}
-
-    cached_replies: dict[str, dict[str, Any]] = {}
-    for message in messages:
-        message_id = str(message.get("message_id") or message.get("message_seq") or "").strip()
-        if message_id and message_id in reply_ids:
-            cached_replies[message_id] = message
-
-    missing_reply_ids = [reply_id for reply_id in reply_ids if reply_id not in cached_replies]
-    if not missing_reply_ids:
-        return cached_replies
-
-    semaphore = asyncio.Semaphore(min(5, len(missing_reply_ids)))
-
-    async def fetch_reply_message(reply_id: str) -> tuple[str, dict[str, Any] | None]:
-        async with semaphore:
-            try:
-                try:
-                    raw_message = await bot.get_msg(message_id=int(reply_id))
-                except Exception:
-                    raw_message = await bot.call_api("get_msg", message_id=int(reply_id))
-                return reply_id, _normalize_raw_message(raw_message)
-            except Exception as e:
-                logger.warning(f"获取引用消息 {reply_id} 失败: {e}")
-                return reply_id, None
-
-    results = await asyncio.gather(
-        *(fetch_reply_message(reply_id) for reply_id in missing_reply_ids)
-    )
-    for reply_id, reply_message in results:
-        if reply_message:
-            cached_replies[reply_id] = reply_message
-    return cached_replies
-
-
-def _render_reply_segment(
-    reply_id: str,
-    reply_message_map: dict[str, dict[str, Any]],
-    user_info_cache: dict[str, str],
-    depth: int = 0,
-) -> str:
-    fallback = f"[回复消息 {reply_id}] "
-    if depth > 0:
-        return fallback
-
-    reply_message = reply_message_map.get(reply_id)
-    if not reply_message:
-        return fallback
-
-    reply_user_id = str(
-        reply_message.get("user_id")
-        or reply_message.get("sender", {}).get("user_id")
-        or ""
-    )
-    if reply_user_id:
-        reply_user_name = user_info_cache.get(
-            reply_user_id,
-            _truncate_username(f"用户_{reply_user_id[-4:]}"),
-        )
-    else:
-        reply_user_name = "未知用户"
-
-    reply_preview = _render_message_segments(
-        reply_message.get("message", []),
-        user_info_cache,
-        reply_message_map,
-        depth=depth + 1,
-    )
-    preview_text = "".join(reply_preview).strip()
-    if not preview_text:
-        preview_text = str(reply_message.get("raw_message") or "").strip() or "内容缺失"
-    preview_text = re.sub(r"\s+", " ", preview_text)
-    if len(preview_text) > 80:
-        preview_text = f"{preview_text[:77]}..."
-
-    if reply_user_id:
-        return f"[回复 {reply_user_name}({reply_user_id}): {preview_text}] "
-    return f"[回复 {reply_user_name}: {preview_text}] "
-
-
-def _render_message_segments(
-    raw_segments: list[dict[str, Any]],
-    user_info_cache: dict[str, str],
-    reply_message_map: dict[str, dict[str, Any]],
-    depth: int = 0,
-) -> list[str]:
-    rendered_segments: list[str] = []
-    for segment in raw_segments:
-        if not isinstance(segment, dict):
-            continue
-        seg_type = segment.get("type")
-        seg_data = segment.get("data", {})
-        if seg_type == "text" and "text" in seg_data:
-            text = str(seg_data["text"]).strip()
-            if text:
-                rendered_segments.append(text)
-        elif seg_type == "at" and "qq" in seg_data:
-            qq = str(seg_data["qq"])
-            default_at_name = _truncate_username(f"用户_{qq[-4:]}")
-            at_name = user_info_cache.get(qq, default_at_name)
-            rendered_segments.append(f"@{at_name}")
-        elif seg_type == "image":
-            summary = seg_data.get("summary")
-            if summary:
-                rendered_segments.append(f"[图片]{summary}")
-            else:
-                rendered_segments.append("[图片]")
-        elif seg_type == "reply":
-            reply_id = str(seg_data.get("id", "")).strip()
-            if reply_id:
-                rendered_segments.append(
-                    _render_reply_segment(
-                        reply_id,
-                        reply_message_map,
-                        user_info_cache,
-                        depth=depth,
-                    )
-                )
-    return rendered_segments
-
-
-async def _fetch_latest_messages_via_api(
+async def get_group_messages(
     bot: Bot,
     group_id: int,
     count: int,
-) -> list[dict[str, Any]]:
-    @Retry.simple(
-        stop_max_attempt=summary_config.get_max_retries(),
-        wait_fixed_seconds=summary_config.get_retry_delay(),
-    )
-    async def fetch_with_retry() -> list[dict[str, Any]]:
-        response = await bot.get_group_msg_history(group_id=group_id, count=count)
-        messages = response.get("messages", [])
-        logger.debug(
-            f"从群 {group_id} API 获取了 {len(messages)} 条原始消息",
-            command="API历史",
-            group_id=group_id,
-        )
-        return messages
-
-    return _normalize_raw_messages(await fetch_with_retry())
-
-
-async def _fetch_messages_by_time_via_api(
-    bot: Bot,
-    group_id: int,
-    selector: MessageSelector,
-) -> list[dict[str, Any]]:
-    if selector.start_timestamp is None or selector.end_timestamp is None:
-        return []
-
-    batch_size = min(int(base_config.get("SUMMARY_MAX_LENGTH", 1000)), 100)
-    if batch_size <= 0:
-        batch_size = 100
-
-    seen_message_ids: set[str] = set()
-    collected_messages: list[dict[str, Any]] = []
-    cursor_seq: int | None = None
-    max_pages = 50
-    start_ts = selector.start_timestamp
-
-    for _ in range(max_pages):
-        request_kwargs: dict[str, Any] = {"group_id": group_id, "count": batch_size}
-        if cursor_seq is not None:
-            request_kwargs["message_seq"] = cursor_seq
-
-        try:
-            response = await bot.call_api("get_group_msg_history", **request_kwargs)
-        except Exception:
-            if cursor_seq is not None:
-                break
-            response = await bot.get_group_msg_history(**request_kwargs)
-
-        page_messages = _normalize_raw_messages(response.get("messages", []))
-        if not page_messages:
-            break
-
-        page_messages.sort(
-            key=lambda message: (
-                int(message.get("time", 0)),
-                int(message.get("message_id", 0) or 0),
-            )
-        )
-
-        new_messages: list[dict[str, Any]] = []
-        for message in page_messages:
-            message_key = str(
-                message.get("message_id")
-                or message.get("message_seq")
-                or f"{message.get('user_id')}:{message.get('time')}"
-            )
-            if message_key in seen_message_ids:
-                continue
-            seen_message_ids.add(message_key)
-            new_messages.append(message)
-
-        if not new_messages:
-            break
-
-        collected_messages.extend(new_messages)
-        earliest_message = new_messages[0]
-        earliest_time = int(earliest_message.get("time", 0))
-        next_cursor = earliest_message.get("message_seq")
-
-        if earliest_time <= start_ts:
-            break
-        if next_cursor is None:
-            break
-
-        next_cursor_int = int(next_cursor)
-        if cursor_seq is not None and next_cursor_int == cursor_seq:
-            break
-        cursor_seq = next_cursor_int
-
-    collected_messages.sort(
-        key=lambda message: (
-            int(message.get("time", 0)),
-            int(message.get("message_id", 0) or 0),
-        )
-    )
-    return [
-        message
-        for message in collected_messages
-        if start_ts <= int(message.get("time", 0)) <= selector.end_timestamp
-    ]
-
-
-async def _fetch_messages_via_db(
-    group_id: int,
-    selector: MessageSelector,
-) -> list[dict[str, Any]]:
-    group_id_str = str(group_id)
-    query = ChatHistory.filter(group_id=group_id_str).order_by("-create_time")
-
-    if selector.mode == "count" and selector.count is not None:
-        query = query.limit(selector.count)
-    elif selector.start_time and selector.end_time:
-        start_time = selector.start_time.astimezone(pytz.UTC).replace(tzinfo=None)
-        end_time = selector.end_time.astimezone(pytz.UTC).replace(tzinfo=None)
-        query = query.filter(create_time__range=(start_time, end_time))
-
-    db_messages = await query.all()
-    if not db_messages:
-        return []
-
-    formatted_messages: list[dict[str, Any]] = []
-    for message in reversed(db_messages):
-        user_id = int(message.user_id) if message.user_id.isdigit() else 0
-        formatted_messages.append(
-            {
-                "message_id": message.id,
-                "user_id": user_id,
-                "time": int(message.create_time.replace(tzinfo=pytz.UTC).timestamp()),
-                "message_type": "group",
-                "message": [
-                    {
-                        "type": "text",
-                        "data": {"text": message.plain_text or ""},
-                    }
-                ],
-                "raw_message": message.plain_text or "",
-                "sender": {"user_id": user_id},
-            }
-        )
-    logger.warning(
-        "使用数据库历史记录时，图片、@ 等非文本信息可能无法正确处理。",
-        command="DB历史",
-    )
-    return formatted_messages
-
-
-async def _fetch_raw_messages(
-    bot: Bot,
-    group_id: int,
-    selector: MessageSelector,
     use_db: bool = False,
-) -> list[dict[str, Any]]:
+    target_user_ids: set[str] | None = None,
+    time_range_type: str | None = None,
+):
+    """获取群聊消息，支持时间范围过滤和最大消息数量限制。"""
+
+    warning_msg: str | None = None
+
+    cache_ttl = base_config.get("MESSAGE_CACHE_TTL_SECONDS", 300)
+
+    if cache_ttl > 0 and not target_user_ids and not time_range_type:
+        group_id_str = str(group_id)
+        cache_key = f"{group_id_str}:{count}"
+        current_time = time.time()
+
+        if cache_key in _message_cache:
+            cached_data, timestamp = _message_cache[cache_key]
+            if current_time - timestamp < cache_ttl:
+                logger.debug(
+                    f"命中消息缓存 (群: {group_id}, 数量: {count})，"
+                    f"剩余有效期: {cache_ttl - (current_time - timestamp):.1f}s"
+                )
+                import copy
+
+                return copy.deepcopy(cached_data)
+
+    group_id_str = str(group_id)
+
+    raw_messages = []
+
     if use_db and ChatHistory:
         logger.debug(
-            f"尝试从数据库获取群 {group_id} 的聊天记录，模式: {selector.mode}",
-            command="DB历史",
+            f"尝试从数据库获取群 {group_id} 的最近 {count} 条聊天记录", command="DB历史"
         )
         try:
-            return await _fetch_messages_via_db(group_id, selector)
+            db_messages = (
+                await ChatHistory.filter(group_id=group_id_str)
+                .order_by("-create_time")
+                .limit(count)
+                .all()
+            )
+
+            if not db_messages:
+                logger.warning(
+                    f"数据库中未找到群 {group_id} 的聊天记录",
+                    command="DB历史",
+                    group_id=group_id,
+                )
+                if time_range_type:
+                    return [], {}, None
+                return [], {}
+
+            formatted_messages = []
+            for msg in reversed(db_messages):
+                formatted_messages.append(
+                    {
+                        "message_id": msg.id,
+                        "user_id": int(msg.user_id) if msg.user_id.isdigit() else 0,
+                        "time": int(msg.create_time.timestamp()),
+                        "message_type": "group",
+                        "message": [
+                            {
+                                "type": "text",
+                                "data": {"text": msg.plain_text or ""},
+                            }
+                        ],
+                        "raw_message": msg.plain_text or "",
+                        "sender": {
+                            "user_id": int(msg.user_id) if msg.user_id.isdigit() else 0
+                        },
+                    }
+                )
+            logger.debug(
+                f"从数据库成功获取并格式化 {len(formatted_messages)} 条消息 (使用 plain_text)",
+                command="DB历史",
+                group_id=group_id,
+            )
+            logger.warning(
+                "使用数据库历史记录时，图片、@ 等非文本信息可能无法正确处理。",
+                command="DB历史",
+            )
+            raw_messages = formatted_messages
         except Exception as e:
             logger.error(
                 f"从数据库获取群 {group_id} 历史记录失败: {e}",
@@ -403,93 +135,82 @@ async def _fetch_raw_messages(
                 group_id=group_id,
                 e=e,
             )
-            raise SummaryException(
+            ex = SummaryException(
                 message=f"数据库历史记录获取失败: {e!s}",
                 code=ErrorCode.DB_QUERY_ERROR,
-                details={
-                    "error": str(e),
-                    "group_id": group_id,
-                    "selector_mode": selector.mode,
-                },
+                details={"error": str(e), "group_id": group_id, "count": count},
                 cause=e,
-            ) from e
+            )
+            raise ex from e
+    else:
+        if use_db and not ChatHistory:
+            logger.warning(
+                "配置了使用数据库历史但 ChatHistory 模型导入失败，回退到 API 获取。"
+            )
 
-    if use_db and not ChatHistory:
-        logger.warning("配置了使用数据库历史但 ChatHistory 模型导入失败，回退到 API 获取。")
-
-    logger.debug(
-        f"通过 API 获取群 {group_id} 的聊天记录，模式: {selector.mode}",
-        command="API历史",
-    )
-    try:
-        if selector.mode == "count" and selector.count is not None:
-            return await _fetch_latest_messages_via_api(bot, group_id, selector.count)
-        return await _fetch_messages_by_time_via_api(bot, group_id, selector)
-    except SummaryException:
-        raise
-    except Exception as e:
-        logger.error(
-            f"通过 API 获取群 {group_id} 的原始消息历史失败: {e}",
-            command="API历史",
-            group_id=group_id,
-            e=e,
+        logger.debug(
+            f"通过 API 获取群 {group_id} 的最近 {count} 条聊天记录", command="API历史"
         )
-        raise SummaryException(
-            message=f"API 消息历史获取失败: {e!s}",
-            code=ErrorCode.MESSAGE_FETCH_FAILED,
-            details={
-                "error": str(e),
-                "group_id": group_id,
-                "selector_mode": selector.mode,
-            },
-            cause=e,
-        ) from e
+        try:
 
-
-async def get_group_messages(
-    bot: Bot,
-    group_id: int,
-    selector: MessageSelector,
-    use_db: bool = False,
-    target_user_ids: set[str] | None = None,
-    enforce_summary_limit: bool = False,
-) -> MessageFetchResult:
-    cache_ttl = int(base_config.get("MESSAGE_CACHE_TTL_SECONDS", 300))
-    cache_key = _make_cache_key(group_id, selector)
-
-    if cache_ttl > 0 and cache_key and not target_user_ids:
-        cached = _message_cache.get(cache_key)
-        if cached:
-            cached_data, timestamp = cached
-            if time.time() - timestamp < cache_ttl:
+            @Retry.simple(
+                stop_max_attempt=summary_config.get_max_retries(),
+                wait_fixed_seconds=summary_config.get_retry_delay(),
+            )
+            async def fetch_with_retry():
+                response = await bot.get_group_msg_history(
+                    group_id=group_id, count=count
+                )
+                raw_messages = response.get("messages", [])
                 logger.debug(
-                    f"命中消息缓存 (群: {group_id}, key: {cache_key})",
-                    command="get_group_messages",
+                    f"从群 {group_id} API 获取了 {len(raw_messages)} 条原始消息",
+                    command="API历史",
                     group_id=group_id,
                 )
-                import copy
+                return raw_messages
 
-                processed_messages, user_info_cache = copy.deepcopy(cached_data)
-                return MessageFetchResult(
-                    processed_messages=processed_messages,
-                    user_info_cache=user_info_cache,
-                    matched_message_count=len(processed_messages),
-                )
+            raw_messages = await fetch_with_retry()
+        except Exception as e:
+            logger.error(
+                f"通过 API 获取群 {group_id} 的原始消息历史失败 (所有重试后): {e}",
+                command="API历史",
+                group_id=group_id,
+                e=e,
+            )
+            ex = SummaryException(
+                message=f"API 消息历史获取失败: {e!s}",
+                code=ErrorCode.MESSAGE_FETCH_FAILED,
+                details={"error": str(e), "group_id": group_id, "count": count},
+                cause=e,
+            )
+            raise ex from e
 
-    raw_messages = await _fetch_raw_messages(bot, group_id, selector, use_db=use_db)
+    # --- 时间范围过滤 ---
+    if time_range_type and raw_messages:
+        raw_messages = _filter_by_time_range(raw_messages, time_range_type)
+        logger.debug(
+            f"时间范围过滤后剩余 {len(raw_messages)} 条消息 (类型: {time_range_type})",
+            command="get_group_messages",
+            group_id=group_id,
+        )
 
     filtered_messages = raw_messages
     if target_user_ids:
         filtered_messages = [
-            message
-            for message in raw_messages
-            if str(message.get("user_id")) in target_user_ids
+            msg for msg in raw_messages if str(msg.get("user_id")) in target_user_ids
         ]
         logger.debug(
             f"过滤后剩余 {len(filtered_messages)} 条消息 (来自用户: {target_user_ids})",
             command="get_group_messages",
             group_id=group_id,
         )
+
+    # --- 最大消息数量限制检查 ---
+    max_len = int(base_config.get("SUMMARY_MAX_LENGTH", 1000))
+    if len(filtered_messages) > max_len:
+        warning_msg = f"⚠️ 已超出最大总结范围，仅提取了 {max_len} 条记录进行分析"
+        logger.warning(warning_msg, group_id=group_id)
+        filtered_messages = filtered_messages[-max_len:]
 
     if not filtered_messages:
         logger.warning(
@@ -498,41 +219,26 @@ async def get_group_messages(
             command="get_group_messages",
             group_id=group_id,
         )
-        return MessageFetchResult(processed_messages=[], user_info_cache={})
+        if time_range_type:
+            return [], {}, None
+        return [], {}
 
     try:
         processed_data, user_info_cache = await process_message(
-            filtered_messages,
-            bot,
-            group_id,
+            filtered_messages, bot, group_id
         )
 
-        if not processed_data:
-            return MessageFetchResult(processed_messages=[], user_info_cache={})
-
-        warning_msg: str | None = None
-        matched_message_count = len(processed_data)
-
-        if enforce_summary_limit:
-            max_len = int(base_config.get("SUMMARY_MAX_LENGTH", 1000))
-            if matched_message_count > max_len:
-                warning_msg = _build_warning_message(matched_message_count, max_len)
-                logger.warning(warning_msg, group_id=group_id)
-                processed_data = processed_data[-max_len:]
-
-        if cache_ttl > 0 and cache_key and not target_user_ids:
+        if cache_ttl > 0 and not target_user_ids and not time_range_type:
+            cache_key = f"{group_id_str}:{count}"
             _message_cache[cache_key] = (
                 (processed_data, user_info_cache),
                 time.time(),
             )
-            logger.debug(f"消息已存入缓存 (群: {group_id}, key: {cache_key})")
+            logger.debug(f"消息已存入缓存 (群: {group_id}, 数量: {count})")
 
-        return MessageFetchResult(
-            processed_messages=processed_data,
-            user_info_cache=user_info_cache,
-            warning_msg=warning_msg,
-            matched_message_count=matched_message_count,
-        )
+        if time_range_type:
+            return processed_data, user_info_cache, warning_msg
+        return processed_data, user_info_cache
     except Exception as e:
         logger.error(
             f"处理群 {group_id} 消息失败: {e}",
@@ -540,16 +246,51 @@ async def get_group_messages(
             group_id=group_id,
             e=e,
         )
-        raise SummaryException(
+        ex = SummaryException(
             message=f"消息处理失败: {e!s}",
             code=ErrorCode.MESSAGE_PROCESS_FAILED,
-            details={
-                "error": str(e),
-                "group_id": group_id,
-                "selector_mode": selector.mode,
-            },
+            details={"error": str(e), "group_id": group_id, "count": count},
             cause=e,
-        ) from e
+        )
+        raise ex from e
+
+
+def _filter_by_time_range(
+    messages: list[dict],
+    time_range_type: str,
+) -> list[dict]:
+    """根据时间范围类型过滤消息。
+
+    使用 Asia/Shanghai 时区计算日分界点。
+    """
+    from datetime import datetime, timedelta
+
+    import pytz
+
+    from ..config import summary_config
+
+    tz = pytz.timezone("Asia/Shanghai")
+    now = datetime.now(tz)
+    b_hour, b_minute = summary_config.get_day_boundary()
+
+    today_boundary = now.replace(hour=b_hour, minute=b_minute, second=0, microsecond=0)
+    if now < today_boundary:
+        today_boundary -= timedelta(days=1)
+
+    if time_range_type == "today":
+        start_ts = today_boundary.timestamp()
+        end_ts = now.timestamp()
+    else:  # yesterday
+        end_ts = today_boundary.timestamp()
+        start_ts = (today_boundary - timedelta(days=1)).timestamp()
+
+    logger.debug(
+        f"时间范围过滤: type={time_range_type}, "
+        f"start={datetime.fromtimestamp(start_ts, tz)}, "
+        f"end={datetime.fromtimestamp(end_ts, tz)}",
+    )
+
+    return [msg for msg in messages if start_ts <= msg.get("time", 0) <= end_ts]
 
 
 @Retry.api(
@@ -568,10 +309,8 @@ async def _fetch_user_info_with_retry(bot: Bot, user_id_str: str, group_id_str: 
 
 
 async def process_message(
-    messages: list,
-    bot: Bot,
-    group_id: int,
-) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    messages: list, bot: Bot, group_id: int
+) -> tuple[list[dict[str, str]], dict[str, str]]:
     logger.debug(
         f"开始处理群 {group_id} 的 {len(messages)} 条原始消息",
         command="消息处理",
@@ -584,9 +323,8 @@ async def process_message(
         exclude_bot = base_config.get("EXCLUDE_BOT_MESSAGES", False)
         bot_self_id = bot.self_id
 
-        reply_message_map = await _fetch_reply_messages(bot, messages)
         user_ids_to_fetch: set[str] = set()
-        for msg in messages + list(reply_message_map.values()):
+        for msg in messages:
             sender_id = msg.get("user_id")
             if sender_id:
                 user_ids_to_fetch.add(str(sender_id))
@@ -652,7 +390,7 @@ async def process_message(
                 group_id=group_id,
             )
 
-        processed_log: list[dict[str, Any]] = []
+        processed_log: list[dict[str, str]] = []
         for msg in messages:
             user_id = msg.get("user_id")
             if not user_id:
@@ -666,14 +404,32 @@ async def process_message(
             sender_name = user_info_cache.get(user_id_str, default_name)
 
             raw_segments = msg.get("message", [])
-            text_segments = _render_message_segments(
-                raw_segments,
-                user_info_cache,
-                reply_message_map,
-            )
+            text_segments: list[str] = []
+
+            for segment in raw_segments:
+                if not isinstance(segment, dict):
+                    continue
+                seg_type = segment.get("type")
+                seg_data = segment.get("data", {})
+                if seg_type == "text" and "text" in seg_data:
+                    text = seg_data["text"].strip()
+                    if text:
+                        text_segments.append(text)
+                elif seg_type == "at" and "qq" in seg_data:
+                    qq = str(seg_data["qq"])
+                    default_at_name = _truncate_username(f"用户_{qq[-4:]}")
+                    at_name = user_info_cache.get(qq, default_at_name)
+                    text_segments.append(f"@{at_name}")
+                elif seg_type == "image":
+                    summary = seg_data.get("summary")
+                    if summary:
+                        text_segments.append(f"[图片]{summary}")
+                    else:
+                        text_segments.append("[图片]")
 
             if text_segments:
-                message_content = "".join(text_segments).strip()
+                message_content = "".join(text_segments)
+                import re
 
                 def img_replacer(match):
                     m = re.search(r"summary=(.*?)(?:,[a-z_]+=|\])", match.group(0))
@@ -685,22 +441,7 @@ async def process_message(
                     r"\[image:[^\]]+\]", img_replacer, message_content
                 )
 
-                timestamp = int(msg.get("time", 0) or 0)
-                formatted_time = ""
-                if timestamp:
-                    formatted_time = _to_datetime_from_timestamp(timestamp).strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
-
-                processed_log.append(
-                    {
-                        "user_id": user_id_str,
-                        "name": sender_name,
-                        "content": message_content,
-                        "timestamp": timestamp,
-                        "formatted_time": formatted_time,
-                    }
-                )
+                processed_log.append({"name": sender_name, "content": message_content})
 
         logger.debug(
             f"消息处理完成，生成 {len(processed_log)} 条处理记录 (已应用Bot排除设置: {exclude_bot})",
