@@ -172,3 +172,7 @@ cache/
 # 再次强调忽略该目录下的 pycache (双重保险，防止白名单覆盖了全局忽略)
 zhenxun/plugins/**/__pycache__/
 zhenxun/builtin_plugins/**/__pycache__/
+
+# Local tooling and transient auth artifacts
+.codex/
+multincm-qrcode.png

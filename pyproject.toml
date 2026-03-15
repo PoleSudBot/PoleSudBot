@@ -166,7 +166,7 @@ ignore = [
 
 [tool.ruff.lint.isort]
 force-sort-within-sections = true
-known-first-party = ["zhenxun", "tests/*"]
+known-first-party = ["zhenxun"]
 extra-standard-library = ["typing_extensions"]
 
 [tool.ruff.lint.flake8-pytest-style]
@@ -181,7 +181,6 @@ pythonVersion = "3.10"
 pythonPlatform = "All"
 defineConstant = { PYDANTIC_V2 = true }
 executionEnvironments = [
-    { root = "./tests", extraPaths = ["./"] },
     { root = "./" },
 ]
 typeCheckingMode = "standard"
