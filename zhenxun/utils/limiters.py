@@ -1,6 +1,8 @@
 import asyncio
 from collections import defaultdict, deque
+import logging
 from pathlib import Path
+import sys
 import time
 from typing import Any, ClassVar
 
@@ -46,6 +48,7 @@ class CountLimiter:
     _FILE_SAVE_INTERVAL: float = 3.0  # JSON 文件写盘最短间隔（秒）
     _CACHE_TYPE: ClassVar[str] = "PLUGIN_COUNT_LIMIT"
     _cache_registered: ClassVar[bool] = False
+    _fallback_logger: ClassVar[logging.Logger] = logging.getLogger(__name__)
 
     # ── 初始化与持久化 ──
 
@@ -123,15 +126,77 @@ class CountLimiter:
                 pass
 
     @classmethod
-    def _check_day(cls):
-        """跨天自动清零"""
+    def _today_str(cls) -> str:
         import datetime
 
-        today = datetime.datetime.now().strftime("%Y%m%d")
+        return datetime.datetime.now().strftime("%Y%m%d")
+
+    @classmethod
+    def _check_day(cls):
+        """跨天自动清零"""
+        today = cls._today_str()
         if today != cls._store_date:
             cls._store_date = today
             cls._mem_store.clear()
             cls._save_to_file(force=True)
+
+    @classmethod
+    def _log_cache_warning(
+        cls,
+        action: str,
+        module_name: str,
+        store_key: str,
+        exc: Exception | None = None,
+    ) -> None:
+        message = (
+            f"每日次数限制缓存{action}失败，已回退本地计数: "
+            f"module={module_name}, key={store_key}"
+        )
+        try:
+            log_module = sys.modules.get("zhenxun.services.log")
+            logger = getattr(log_module, "logger", None)
+            if logger is None:
+                raise RuntimeError("project logger unavailable")
+
+            logger.warning(message, "CountLimiter", e=exc)
+        except Exception:
+            if exc:
+                cls._fallback_logger.warning("%s (%s)", message, exc)
+            else:
+                cls._fallback_logger.warning(message)
+
+    @classmethod
+    def _restore_mem_store(cls, store_key: str, value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            restored = int(value)
+        except (TypeError, ValueError):
+            cls._log_cache_warning(
+                "读取返回了无效值",
+                module_name=store_key.split(":", 1)[0],
+                store_key=store_key,
+            )
+            return None
+        cls._mem_store[store_key] = restored
+        return restored
+
+    async def _get_current_count(self, store_key: str) -> int:
+        if store_key in self._mem_store:
+            return self._mem_store[store_key]
+        if self._cache_available():
+            try:
+                from zhenxun.services.cache import CacheRoot
+
+                restored = self._restore_mem_store(
+                    store_key,
+                    await CacheRoot.get(self._CACHE_TYPE, store_key, default=None),
+                )
+                if restored is not None:
+                    return restored
+            except Exception as exc:
+                self._log_cache_warning("读取", self.module_name, store_key, exc=exc)
+        return 0
 
     # ── 实例方法 ──
 
@@ -167,47 +232,30 @@ class CountLimiter:
         if effective_max < 0:
             return True  # -1 = 不限制
         store_key = self._make_key(key)
-        # 优先从 CacheManager 读取（Redis 持久化数据源）
-        if self._cache_available():
-            try:
-                from zhenxun.services.cache import CacheRoot
-
-                val = await CacheRoot.get(self._CACHE_TYPE, store_key, default=None)
-                if val is not None:
-                    self._mem_store[store_key] = int(val)
-                    return int(val) < effective_max
-            except Exception:
-                pass
-        # 回退到内存
-        return self._mem_store.get(store_key, 0) < effective_max
+        return await self._get_current_count(store_key) < effective_max
 
     async def get_num(self, key: Any) -> int:
         self._check_day()
         store_key = self._make_key(key)
-        if self._cache_available():
-            try:
-                from zhenxun.services.cache import CacheRoot
-
-                val = await CacheRoot.get(self._CACHE_TYPE, store_key, default=None)
-                if val is not None:
-                    return int(val)
-            except Exception:
-                pass
-        return self._mem_store.get(store_key, 0)
+        return await self._get_current_count(store_key)
 
     async def increase(self, key: Any, num: int = 1):
         self._check_day()
         store_key = self._make_key(key)
-        new_val = self._mem_store.get(store_key, 0) + num
+        new_val = await self._get_current_count(store_key) + num
         self._mem_store[store_key] = new_val
         # 写入 CacheManager（→ Redis）
         if self._cache_available():
             try:
                 from zhenxun.services.cache import CacheRoot
 
-                await CacheRoot.set(self._CACHE_TYPE, store_key, new_val, expire=172800)
-            except Exception:
-                pass
+                is_set = await CacheRoot.set(
+                    self._CACHE_TYPE, store_key, new_val, expire=172800
+                )
+                if not is_set:
+                    self._log_cache_warning("写入", self.module_name, store_key)
+            except Exception as exc:
+                self._log_cache_warning("写入", self.module_name, store_key, exc=exc)
         # 同时写入 JSON 文件（降级保障）
         self._save_to_file()
 
@@ -219,9 +267,11 @@ class CountLimiter:
             try:
                 from zhenxun.services.cache import CacheRoot
 
-                await CacheRoot.delete(self._CACHE_TYPE, store_key)
-            except Exception:
-                pass
+                is_deleted = await CacheRoot.delete(self._CACHE_TYPE, store_key)
+                if not is_deleted:
+                    self._log_cache_warning("删除", self.module_name, store_key)
+            except Exception as exc:
+                self._log_cache_warning("删除", self.module_name, store_key, exc=exc)
         self._save_to_file()
 
 
