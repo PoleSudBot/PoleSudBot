@@ -1010,16 +1010,16 @@ async def get_user_dynamic(
         # 获取动态截图
         logger.debug(f"开始获取动态截图: UID={uid}, 动态ID={item_dynamic_id}")
         try:
-            image = await get_dynamic_screenshot(int(item_dynamic_id))
-            if image:
+            screenshot_result = await get_dynamic_screenshot(int(item_dynamic_id))
+            if screenshot_result.image:
                 logger.debug(
                     f"成功获取动态截图: UID={uid}, "
                     f"动态ID={item_dynamic_id}, "
-                    f"图片大小={len(image)}字节"
+                    f"图片大小={len(screenshot_result.image)}字节"
                 )
                 new_dynamics.append(
                     DynamicItem(
-                        image=image,
+                        image=screenshot_result.image,
                         upload_time=item_timestamp,
                         dynamic_id=int(item_dynamic_id),
                         url=(f"https://t.bilibili.com/{item_dynamic_id}"),
@@ -1027,7 +1027,20 @@ async def get_user_dynamic(
                     )
                 )
             else:
-                logger.warning(f"动态截图获取失败: UID={uid}, 动态ID={item_dynamic_id}")
+                detail = (
+                    f", 详情={screenshot_result.failure_detail}"
+                    if screenshot_result.failure_detail
+                    else ""
+                )
+                logger.warning(
+                    f"动态截图获取失败: UID={uid}, "
+                    f"动态ID={item_dynamic_id}, "
+                    f"原因={screenshot_result.failure_type or '未知页面结构'}, "
+                    f"重试次数={screenshot_result.attempt_count}, "
+                    f"页面标题={screenshot_result.page_title or 'N/A'}, "
+                    f"页面地址={screenshot_result.page_url or 'N/A'}"
+                    f"{detail}"
+                )
         except Exception as e:
             logger.error(
                 f"获取动态截图异常: UID={uid}, "

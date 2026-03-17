@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime
 from pathlib import Path
 import time
-from typing import List, cast
+from typing import cast
 
 import nonebot
 from nonebot.drivers import Driver
@@ -155,6 +155,38 @@ __plugin_meta__ = PluginMetadata(
                 help="是否推送动态中的图片",
                 default_value=False,
                 type=bool,
+            ),
+            RegisterConfig(
+                module="bilibili_sub",
+                key="DYNAMIC_SCREENSHOT_RETRIES",
+                value=3,
+                help="动态截图失败后的单次重试次数",
+                default_value=3,
+                type=int,
+            ),
+            RegisterConfig(
+                module="bilibili_sub",
+                key="DYNAMIC_SCREENSHOT_RETRY_DELAY_SECONDS",
+                value=2,
+                help="动态截图失败后的基础重试间隔（秒）",
+                default_value=2,
+                type=int,
+            ),
+            RegisterConfig(
+                module="bilibili_sub",
+                key="DYNAMIC_SCREENSHOT_TIMEOUT_SECONDS",
+                value=20,
+                help="动态截图等待页面与选择器的超时时间（秒）",
+                default_value=20,
+                type=int,
+            ),
+            RegisterConfig(
+                module="bilibili_sub",
+                key="DYNAMIC_SCREENSHOT_CONCURRENCY",
+                value=1,
+                help="动态截图并发数限制",
+                default_value=1,
+                type=int,
             ),
             RegisterConfig(
                 module="BiliBili",
