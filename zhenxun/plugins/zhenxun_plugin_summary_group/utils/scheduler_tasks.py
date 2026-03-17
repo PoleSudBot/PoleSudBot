@@ -7,6 +7,7 @@ from zhenxun.services.scheduler import ScheduleContext, scheduler_manager
 
 from .. import base_config
 from .core import SummaryException
+from .scope import build_count_scope, build_preset_scope
 from .summary_generation import messages_summary, send_summary
 
 
@@ -68,20 +69,21 @@ async def scheduled_summary_task(
             )
             return
 
+        scope = (
+            build_preset_scope(time_range_type)
+            if time_range_type
+            else build_count_scope(least_message_count)
+        )
+
         result = await get_group_messages(
             bot,
             int(group_id),
-            least_message_count,
+            scope,
             use_db=base_config.get("USE_DB_HISTORY", False),
-            time_range_type=time_range_type,
         )
-
-        # 解析返回值（时间范围模式返回 3-tuple）
-        warning_msg = None
-        if len(result) == 3:
-            processed_messages, user_info_cache, warning_msg = result
-        else:
-            processed_messages, user_info_cache = result
+        processed_messages = result.messages
+        user_info_cache = result.user_info_cache
+        warning_msg = result.warning_message
 
         if not processed_messages:
             logger.info(
@@ -109,7 +111,7 @@ async def scheduled_summary_task(
 
             await UniMessage.text(warning_msg).send(msg_target, bot)
 
-        summary = await messages_summary(
+        summary_result = await messages_summary(
             target=msg_target,
             messages=processed_messages,
             style=style,
@@ -119,9 +121,10 @@ async def scheduled_summary_task(
         await send_summary(
             bot,
             msg_target,
-            summary,
+            summary_result.summary_text,
             user_info_cache,
             group_id=int(group_id),
+            model_name=summary_result.resolved_model_name,
         )
 
     except (SummaryException, LLMException) as e:
