@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from pathlib import Path
 
 import aiofiles
@@ -8,13 +9,16 @@ from nonebot_plugin_alconna.uniseg import MsgTarget, UniMessage
 from zhenxun.services.llm import (
     LLMException,
     LLMMessage,
+    get_global_default_model_name,
     get_model_instance,
+    list_available_models,
 )
 from zhenxun.services.log import logger
 
 from .. import base_config
 from ..store import store
 from .core import ErrorCode, SummaryException
+from .message_processing import serialize_messages_for_summary
 
 md_to_pic, html_to_pic = None, None
 if base_config.get("summary_output_type") == "image":
@@ -27,17 +31,57 @@ if base_config.get("summary_output_type") == "image":
         logger.warning(f"加载 htmlrender 失败，图片模式不可用: {e}")
 
 
+@dataclass(frozen=True)
+class SummaryGenerationResult:
+    summary_text: str
+    resolved_model_name: str | None
+
+
+def resolve_summary_model_name(
+    group_id: str | None,
+    model_name: str | None = None,
+) -> str | None:
+    if model_name:
+        return model_name
+
+    if group_id:
+        group_model_name = store.get_group_setting(str(group_id), "default_model_name")
+        if group_model_name:
+            logger.debug(f"群聊 {group_id} 使用特定模型: {group_model_name}")
+            return group_model_name
+
+    plugin_default_model = base_config.get("SUMMARY_MODEL_NAME")
+    if plugin_default_model:
+        logger.debug(f"使用插件默认模型: {plugin_default_model}")
+        return plugin_default_model
+
+    global_default_model = get_global_default_model_name()
+    if global_default_model:
+        logger.debug(f"使用LLM全局默认模型: {global_default_model}")
+        return global_default_model
+
+    available_models = list_available_models()
+    if available_models:
+        fallback_model = available_models[0]["full_name"]
+        logger.warning(f"未显式配置总结模型，回退到首个可用模型: {fallback_model}")
+        return fallback_model
+    return None
+
+
 async def messages_summary(
     target: MsgTarget,
-    messages: list[dict[str, str]],
+    messages: list,
     content: str | None = None,
     target_user_names: list[str] | None = None,
     style: str | None = None,
     model_name: str | None = None,
-) -> str:
+) -> SummaryGenerationResult:
     if not messages:
         logger.warning("没有足够的聊天记录可供总结", command="messages_summary")
-        return "没有足够的聊天记录可供总结。"
+        return SummaryGenerationResult(
+            summary_text="没有足够的聊天记录可供总结。",
+            resolved_model_name=model_name,
+        )
 
     prompt_parts = []
     group_id = target.id if not target.private else None
@@ -65,7 +109,8 @@ async def messages_summary(
         prompt_parts.append(task_desc)
         if len(target_user_names) > 1:
             prompt_parts.append(
-                f"请注意：这里有 {len(target_user_names)} 个不同的用户，必须分别对每个用户的发言进行单独总结。"
+                f"请注意：这里有 {len(target_user_names)} 个不同的用户，"
+                "必须分别对每个用户的发言进行单独总结。"
             )
     elif content:
         prompt_parts.append(f"任务：请详细总结以下对话中仅与'{content}'相关的内容。")
@@ -74,7 +119,8 @@ async def messages_summary(
 
     prompt_parts.append(
         "要求：排版需层次清晰，用中文回答，请包含谁说了什么重要内容。\n"
-        "在正式回答前，请务必进行高强度的深度思考流程，并将你的思考内容放在 <think> 和 </think> 标签内。\n"
+        "在正式回答前，请务必进行高强度的深度思考流程，"
+        "并将你的思考内容放在 <think> 和 </think> 标签内。\n"
         "注意使用丰富的markdown格式让内容更美观，注意要在合适的场景使用合适的样式,包括："
         "标题层级(h1-h6),分隔线(hr)、表格(table)、斜体(em)、"
         "任务列表(chekbox)、删除线 (Strikethrough)、"
@@ -87,20 +133,13 @@ async def messages_summary(
 
     llm_messages.append(LLMMessage.system(final_prompt))
 
-    user_content = "\n".join([f"{msg['name']}: {msg['content']}" for msg in messages])
+    user_content = serialize_messages_for_summary(messages)
     llm_messages.append(LLMMessage.user(user_content))
 
-    final_model_name_str = model_name
-    if not final_model_name_str and group_id:
-        final_model_name_str = store.get_group_setting(
-            str(group_id), "default_model_name"
-        )
-        if final_model_name_str:
-            logger.debug(f"群聊 {group_id} 使用特定模型: {final_model_name_str}")
-    if not final_model_name_str:
-        final_model_name_str = base_config.get("SUMMARY_MODEL_NAME")
-        if final_model_name_str:
-            logger.debug(f"使用插件默认模型: {final_model_name_str}")
+    final_model_name_str = resolve_summary_model_name(
+        str(group_id) if group_id else None,
+        model_name=model_name,
+    )
 
     try:
         logger.info(
@@ -125,7 +164,10 @@ async def messages_summary(
             r"<think>.*?</think>", "", summary_text, flags=re.DOTALL
         ).strip()
 
-        return summary_text
+        return SummaryGenerationResult(
+            summary_text=summary_text,
+            resolved_model_name=final_model_name_str,
+        )
     except LLMException as e:
         logger.error(
             f"总结生成失败 (LLMException): {e}", command="messages_summary", e=e
@@ -242,6 +284,7 @@ async def send_summary(
     summary: str,
     user_info_cache: dict[str, str] | None = None,
     group_id: int | None = None,
+    model_name: str | None = None,
 ) -> bool:
     try:
         reply_msg = None
@@ -257,6 +300,12 @@ async def send_summary(
                     await _save_summary_image(img_bytes, group_id)
 
                 reply_msg = UniMessage.image(raw=img_bytes)
+                if model_name:
+                    reply_msg += (
+                        "\n"
+                        f"本次总结由【{model_name}】生成，"
+                        "准确度会随上下文增加而降低，仅供参考"
+                    )
             except (SummaryException, ValueError) as e:
                 if not fallback_enabled:
                     logger.error(

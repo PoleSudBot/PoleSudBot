@@ -44,7 +44,8 @@ def validate_msg_count_range(count: int) -> int:
 
     if min_len_val is None or max_len_val is None:
         logger.error(
-            "配置缺失: SUMMARY_MIN_LENGTH 或 SUMMARY_MAX_LENGTH 未在配置中找到或为 null。"
+            "配置缺失: SUMMARY_MIN_LENGTH 或 "
+            "SUMMARY_MAX_LENGTH 未在配置中找到或为 null。"
         )
         raise ValueError("配置错误: 缺少最小/最大消息长度设置。")
 
@@ -95,9 +96,12 @@ __plugin_meta__ = PluginMetadata(
         "📖 **群聊总结插件**\n\n"
         "🔍 **核心功能 (所有用户)**\n"
         "  `总结 <数量>` - 对最近消息进行总结\n"
+        "  `总结 今日/昨日` - 总结自然时间范围内的消息\n"
+        "  `总结 2h / 1h30m / 2d` - 总结最近一段时间内的消息\n"
+        "  `总结 7:00~8:00` / `总结 2026-03-15 7:00~8:00` - 总结指定时间段消息\n"
         "  `总结 <数量> @用户` - 总结特定用户的发言\n"
         "  `总结 <数量> <关键词>` - 总结含特定关键词的消息\n"
-        "  `总结 <数量> -p <风格>` - 指定本次总结的风格\n"
+        "  `总结 <范围> -p <风格>` - 指定本次总结的风格\n"
         "  `今日总结` - 总结今天（分界点至今）的消息\n"
         "  `昨日总结` - 总结昨天（分界点前24h）的消息\n"
         "  *(超级用户可追加 `-g <群号>` 指定任意群聊)*\n\n"
@@ -119,7 +123,9 @@ __plugin_meta__ = PluginMetadata(
         "  `总结风格 设置 <风格>` - 设置插件的全局默认风格\n"
         "  `总结风格 移除` - 移除插件的全局默认风格\n\n"
         "ℹ️ **说明**\n"
-        f"  • 消息数量范围: {base_config.get('SUMMARY_MIN_LENGTH', 1)}-{base_config.get('SUMMARY_MAX_LENGTH', 1000)}\n"
+        "  • 消息数量范围: "
+        f"{base_config.get('SUMMARY_MIN_LENGTH', 1)}-"
+        f"{base_config.get('SUMMARY_MAX_LENGTH', 1000)}\n"
         f"  • 手动总结冷却: {base_config.get('SUMMARY_COOL_DOWN', 60)}秒"
     ),
     type="application",
@@ -252,11 +258,11 @@ summary_group = on_alconna(
     Alconna(
         "总结",
         Args[
-            "message_count",
-            int,
+            "scope_input",
+            str,
             Field(
                 completion=lambda: (
-                    f"输入消息数量 ({base_config.get('SUMMARY_MIN_LENGTH', 1)}-{base_config.get('SUMMARY_MAX_LENGTH', 1000)})"
+                    "输入消息数量或时间范围，如 1000 / 今日 / 2h / 7:00~8:00"
                 ),
             ),
         ],
@@ -280,15 +286,54 @@ summary_group = on_alconna(
             strict=False,
             description="生成群聊总结",
             usage=(
-                "总结 <消息数量> [-p|--prompt 风格] [-g 群号] [@用户/内容过滤...]\n"
+                "总结 <范围> [-p|--prompt 风格] [-g 群号] [@用户/内容过滤...]\n"
+                "范围支持: 数量、今日/昨日、2h、1h30m、2d、"
+                "7:00~8:00、2026-03-15 7:00~8:00\n"
                 "消息数量范围: "
                 f"{base_config.get('SUMMARY_MIN_LENGTH', 1)} - "
                 f"{base_config.get('SUMMARY_MAX_LENGTH', 1000)}\n"
-                "说明: -g 仅限超级用户"
+                "说明: 时间范围总结不支持 @用户/内容过滤，-g 仅限超级用户"
             ),
         ),
     ),
     rule=is_allowed_call(),
+    priority=5,
+    block=True,
+)
+
+export_records = on_alconna(
+    Alconna(
+        "导出记录",
+        Args[
+            "scope_input",
+            str,
+            Field(
+                completion="输入消息数量或时间范围，如 1000 / 今日 / 2h / 7:00~8:00",
+            ),
+        ],
+        Option(
+            "-g",
+            Args[
+                "target_group_id",
+                int,
+                Field(completion="指定群号 (需要超级用户权限)"),
+            ],
+        ),
+        Args[
+            "parts?",
+            MultiVar(At | Text),
+            Field(default=[], completion="日期+时间段时可额外输入第二段时间文本"),
+        ],
+        meta=CommandMeta(
+            compact=True,
+            strict=False,
+            description="导出群聊聊天记录到本地文本文件",
+            usage="导出记录 <范围> [-g 群号]",
+        ),
+    ),
+    aliases={"导出聊天记录"},
+    rule=is_allowed_call(),
+    permission=SUPERUSER,
     priority=5,
     block=True,
 )
@@ -482,7 +527,12 @@ from .handlers.scheduler import (
 from .handlers.scheduler import (
     handle_summary_set as summary_set_handler_impl,
 )
-from .handlers.summary import handle_summary as summary_handler_impl
+from .handlers.summary import (
+    handle_export_records as export_records_handler_impl,
+)
+from .handlers.summary import (
+    handle_summary as summary_handler_impl,
+)
 from .handlers.summary import (
     handle_time_range_summary as time_range_summary_handler_impl,
 )
@@ -493,36 +543,14 @@ async def _(
     bot: Bot,
     event: GroupMessageEvent | PrivateMessageEvent,
     result: CommandResult,
-    message_count: int,
+    scope_input: str,
     style: Match[str],
     parts: Match[list[At | Text]],
     target: MsgTarget,
 ):
-    user_id_str = event.get_user_id()
-    is_superuser = await SUPERUSER(bot, event)
-
-    try:
-        validate_msg_count_range(message_count)
-        logger.debug(f"消息数量 {message_count} 范围验证通过。")
-    except ValueError as e:
-        logger.warning(f"消息数量验证失败 (Handler): {e}")
-        await UniMessage.text(str(e)).send(target)
-        return
-
-    logger.debug(
-        f"用户 {user_id_str} 触发总结，权限、冷却和参数验证通过 (或为 Superuser)，开始执行核心逻辑。"
-    )
-
-    arp = result.result
-    target_group_id_match = arp.query("g.target_group_id") if arp else None
-    if target_group_id_match and not is_superuser:
-        await UniMessage.text("需要超级用户权限才能使用 -g 参数指定群聊。").send(target)
-        logger.warning(f"用户 {user_id_str} (非超级用户) 尝试使用 -g 参数")
-        return
-
     try:
         await summary_handler_impl(
-            bot, event, result, message_count, style, parts, target
+            bot, event, result, scope_input, style, parts, target
         )
     except Exception as e:
         logger.error(
@@ -535,6 +563,38 @@ async def _(
             await UniMessage.text(f"处理命令时出错: {e!s}").send(target)
         except Exception:
             logger.error("发送错误消息失败", command="总结")
+
+
+@export_records.handle()
+async def _(
+    bot: Bot,
+    event: GroupMessageEvent | PrivateMessageEvent,
+    result: CommandResult,
+    scope_input: str,
+    parts: Match[list[At | Text]],
+    target: MsgTarget,
+):
+    try:
+        await export_records_handler_impl(
+            bot,
+            event,
+            result,
+            scope_input,
+            parts,
+            target,
+        )
+    except Exception as e:
+        logger.error(
+            f"处理导出记录命令时发生异常: {e}",
+            command="导出记录",
+            session=event.get_user_id(),
+            group_id=getattr(event, "group_id", None),
+            e=e,
+        )
+        try:
+            await UniMessage.text(f"处理命令时出错: {e!s}").send(target)
+        except Exception:
+            logger.error("发送错误消息失败", command="导出记录")
 
 
 @summary_set.handle()
