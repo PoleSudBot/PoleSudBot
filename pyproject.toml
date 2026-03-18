@@ -36,7 +36,7 @@ dependencies = [
     "retrying>=1.3.4,<2.0.0",
     "aiofiles>=24.1.0",
     "nonebot-plugin-htmlrender==0.7.0a3",
-    "pypinyin>=0.55.0,",
+    "pypinyin>=0.55.0",
     "beautifulsoup4>=4.12.3,<5.0.0",
     "lxml>=5.1.0,<6.0.0",
     "psutil>=5.9.8,<6.0.0",

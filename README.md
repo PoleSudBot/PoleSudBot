@@ -18,12 +18,6 @@ uv run bot.py
 
 `prod-setup` 会按 [plugins.txt](./plugins.txt) 拉取当前使用的插件源码，并依据现有 `uv.lock` / `pyproject.toml` 同步依赖环境。
 
-如果你需要调整插件列表、重新写入本地插件依赖，或用于开发环境初始化，可以改用：
-
-```bash
-python nbm.py init --install
-```
-
 ## 简单配置
 
 1. 当前仓库通过 `.env` 选择开发环境，主要配置文件为 `.env.dev`。
@@ -63,4 +57,3 @@ python nbm.py init --install
 
 - 当前插件列表由 `plugins.txt` 管理。
 - 常规部署推荐使用 `python nbm.py prod-setup`。
-- 需要调整插件依赖或重新初始化开发环境时，可使用 `python nbm.py init --install`。
