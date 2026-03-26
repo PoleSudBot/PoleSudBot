@@ -33,6 +33,7 @@ async def _get_browser_instance() -> Any:
 
 
 async def _shutdown_browser_instance() -> None:
+    _clear_patched_browser_check_cache()
     for attr_name in (
         "shutdown_htmlrender",
         "shutdown_browser",
@@ -48,6 +49,7 @@ async def _shutdown_browser_instance() -> None:
                     setattr(htmlrender_browser, "_browser", None)
                 with contextlib.suppress(Exception):
                     setattr(htmlrender_browser, "_playwright", None)
+                _clear_patched_browser_check_cache()
             return
 
     browser_obj = getattr(htmlrender_browser, "_browser", None)
@@ -66,6 +68,7 @@ async def _shutdown_browser_instance() -> None:
         setattr(htmlrender_browser, "_browser", None)
     with contextlib.suppress(Exception):
         setattr(htmlrender_browser, "_playwright", None)
+    _clear_patched_browser_check_cache()
 
     if callable(close_func) or callable(stop_func):
         return
@@ -73,6 +76,29 @@ async def _shutdown_browser_instance() -> None:
     logger.debug(
         "未找到 htmlrender 浏览器关闭函数，跳过 shutdown。",
         "PlaywrightEngine",
+    )
+
+
+def _clear_patched_browser_check_cache() -> None:
+    state = getattr(htmlrender_browser, "_zhenxun_check_once_state", None)
+    if isinstance(state, dict):
+        state["checked"] = False
+        state["result"] = None
+
+
+def _is_browser_closed_error(exc: Exception) -> bool:
+    if exc.__class__.__name__ == "TargetClosedError":
+        return True
+
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "target page, context or browser has been closed",
+            "target closed",
+            "browser has been closed",
+            "connection closed",
+        )
     )
 
 
@@ -112,11 +138,9 @@ def _patch_playwright_env_check_once() -> None:
         return True
 
     def _get_current_browser_candidate() -> Any:
-        current = state["result"]
-        if _is_browser_usable(current):
-            return current
         fallback = getattr(htmlrender_browser, "_browser", None)
         if _is_browser_usable(fallback):
+            state["result"] = fallback
             return fallback
         return None
 
@@ -149,6 +173,7 @@ def _patch_playwright_env_check_once() -> None:
             return result
 
     setattr(htmlrender_browser, check_attr_name, _check_once)
+    setattr(htmlrender_browser, "_zhenxun_check_once_state", state)
     setattr(htmlrender_browser, "_zhenxun_check_once_patched", True)
 
 
@@ -725,14 +750,34 @@ class PlaywrightEngine(BaseScreenshotEngine):
         html: str,
         template_path: str,
         render_options: dict[str, Any],
+        retry_on_browser_reset: bool = True,
     ) -> bytes:
-        if self._should_use_context_pool(render_options):
-            return await self._render_with_context_pool(
+        try:
+            if self._should_use_context_pool(render_options):
+                return await self._render_with_context_pool(
+                    html, template_path, render_options
+                )
+            return await self._render_with_oneoff_page(
                 html, template_path, render_options
             )
-        return await self._render_with_oneoff_page(html, template_path, render_options)
+        except Exception as e:
+            if not retry_on_browser_reset or not _is_browser_closed_error(e):
+                raise
 
-    async def _recycle_browser(self, reason: str) -> None:
+            logger.warning(
+                "截图引擎检测到浏览器实例已关闭，正在重建后重试一次。",
+                "PlaywrightEngine",
+                e=e,
+            )
+            await self._recycle_browser("recover", prewarm_retry=False)
+            return await self._render_html(
+                html,
+                template_path,
+                render_options,
+                retry_on_browser_reset=False,
+            )
+
+    async def _recycle_browser(self, reason: str, *, prewarm_retry: bool = True) -> None:
         async with self._recycle_lock:
             try:
                 await self._dispose_context_pool()
@@ -740,7 +785,9 @@ class PlaywrightEngine(BaseScreenshotEngine):
                 current_rss = self._get_total_rss()
                 if current_rss is not None:
                     self._update_rss_baseline_nolock(current_rss)
-                await self._prewarm_browser_and_pool()
+                await self._prewarm_browser_and_pool(
+                    retry_on_browser_reset=prewarm_retry
+                )
                 logger.debug(
                     f"截图引擎触发回收({reason})，已重建浏览器实例。",
                     "PlaywrightEngine",
@@ -748,7 +795,9 @@ class PlaywrightEngine(BaseScreenshotEngine):
             except Exception as e:
                 logger.warning("浏览器实例重建失败。", "PlaywrightEngine", e=e)
 
-    async def _prewarm_browser_and_pool(self) -> None:
+    async def _prewarm_browser_and_pool(
+        self, *, retry_on_browser_reset: bool = True
+    ) -> None:
         if self._closing:
             return
         try:
@@ -780,10 +829,18 @@ class PlaywrightEngine(BaseScreenshotEngine):
                 )
                 await page.close()
             except Exception as e:
-                logger.warning("截图引擎上下文预热失败。", "PlaywrightEngine", e=e)
                 if context is not None:
                     with contextlib.suppress(Exception):
                         await context.close()
+                if retry_on_browser_reset and _is_browser_closed_error(e):
+                    logger.warning(
+                        "截图引擎上下文预热命中已关闭浏览器，正在重建后重试一次。",
+                        "PlaywrightEngine",
+                        e=e,
+                    )
+                    await self._recycle_browser("prewarm", prewarm_retry=False)
+                    return
+                logger.warning("截图引擎上下文预热失败。", "PlaywrightEngine", e=e)
                 return
 
             async with self._state_lock:
