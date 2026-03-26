@@ -319,6 +319,7 @@ class RepoFileManager:
         """
         try:
             repo_info = GithubUtils.parse_github_url(repo_url)
+            repo_info.branch = branch
             if await repo_info.update_repo_commit():
                 logger.info(f"获取最新提交: {repo_info.branch}", LOG_COMMAND)
             else:
