@@ -98,6 +98,9 @@ def _is_browser_closed_error(exc: Exception) -> bool:
             "target closed",
             "browser has been closed",
             "connection closed",
+            "handler is closed",
+            "writeunixtransport closed=true",
+            "unable to perform operation on <writeunixtransport closed=true",
         )
     )
 
