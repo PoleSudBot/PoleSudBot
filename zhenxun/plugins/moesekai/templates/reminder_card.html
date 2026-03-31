@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    :root {
+      --primary: {{ data.theme_config.primary }};
+      --primary-dark: {{ data.theme_config.primary_dark }};
+      --text-dark: {{ data.theme_config.text_dark }};
+      --text-muted: {{ data.theme_config.text_muted }};
+      --text-light: {{ data.theme_config.text_light }};
+      --bg-main: {{ data.theme_config.bg_main }};
+      --bg-card: {{ data.theme_config.bg_card }};
+      --border-light: {{ data.theme_config.border_light }};
+      --shadow-soft: 0 12px 32px -4px rgba(0, 0, 0, 0.04), 0 4px 12px -2px rgba(0, 0, 0, 0.02);
+      --font-main: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background: var(--bg-main);
+      font-family: var(--font-main);
+      color: var(--text-dark);
+      padding: 32px;
+      -webkit-font-smoothing: antialiased;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 10vh;
+    }
+
+    .card {
+      width: 760px;
+      background: var(--bg-card);
+      border-radius: 20px;
+      overflow: hidden;
+      box-shadow: var(--shadow-soft);
+      border: 1px solid var(--border-light);
+    }
+
+    .banner {
+      width: 100%;
+      height: 220px;
+      object-fit: cover;
+      display: block;
+      background: #f8f9fa;
+    }
+
+    .content {
+      padding: 32px 40px;
+      position: relative;
+    }
+
+    .accent-bar {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 6px;
+      height: 100%;
+      background: var(--primary);
+      opacity: 0.8;
+    }
+
+    .header {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 24px;
+    }
+
+    .tag-container {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 4px;
+    }
+
+    .tag {
+      padding: 4px 12px;
+      background: var(--border-light);
+      color: var(--text-muted);
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+
+    .tag-accent {
+      background: var(--primary);
+      color: var(--text-light);
+    }
+
+    .title {
+      font-size: 28px;
+      font-weight: 700;
+      line-height: 1.3;
+      color: var(--text-dark);
+      letter-spacing: -0.01em;
+    }
+
+    .subtitle {
+      font-size: 16px;
+      line-height: 1.5;
+      color: var(--text-muted);
+    }
+
+    .divider {
+      height: 1px;
+      background: var(--border-light);
+      margin: 24px 0;
+      width: 100%;
+    }
+
+    .list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .item {
+      font-size: 16px;
+      line-height: 1.6;
+      color: var(--text-dark);
+      position: relative;
+      padding-left: 18px;
+    }
+
+    .item::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 10px;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--primary);
+      opacity: 0.6;
+    }
+
+    .item strong {
+      font-weight: 600;
+      color: var(--primary-dark);
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    {% if data.banner_data_uri %}
+      <img class="banner" src="{{ data.banner_data_uri }}" alt="banner" />
+    {% endif %}
+
+    <div class="content">
+      <div class="accent-bar"></div>
+
+      <div class="header">
+        <div class="tag-container">
+          <span class="tag tag-accent">{{ data.accent or 'MoeSekai' }}</span>
+          <span class="tag">Notification</span>
+        </div>
+        <h1 class="title">{{ data.title }}</h1>
+        {% if data.subtitle %}
+          <div class="subtitle">{{ data.subtitle }}</div>
+        {% endif %}
+      </div>
+
+      {% if data.lines %}
+        <div class="divider"></div>
+        <ul class="list">
+          {% for line in data.lines %}
+            <li class="item">{{ line | safe }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </div>
+  </div>
+</body>
+</html>

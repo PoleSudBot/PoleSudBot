@@ -130,3 +130,135 @@ def test_parse_admin_query_binding_qq_with_at():
     assert parsed.action == "admin_query_binding"
     assert parsed.admin_target_type == "qq"
     assert parsed.admin_value == "654321"
+
+
+def test_parse_story_command():
+    parsed = parse_command(FakeEvent("活动剧情 199"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "story"
+    assert parsed.event_id == 199
+    assert parsed.force_refresh is False
+
+
+def test_parse_story_force_refresh_suffix():
+    parsed = parse_command(FakeEvent("活动剧情 199 强制刷新"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "story"
+    assert parsed.event_id == 199
+    assert parsed.force_refresh is True
+
+
+def test_parse_story_force_refresh_prefix():
+    parsed = parse_command(FakeEvent("活动剧情 强制刷新 199"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "story"
+    assert parsed.event_id == 199
+    assert parsed.force_refresh is True
+
+
+def test_parse_story_rejects_duplicate_force_refresh():
+    parsed = parse_command(FakeEvent("活动剧情 强制刷新 199 强制刷新"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "story"
+    assert parsed.error == "用法: 活动剧情 <活动ID> [强制刷新]"
+
+
+def test_parse_random_manga_command():
+    parsed = parse_command(FakeEvent("随机四格"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "random_manga"
+
+
+def test_parse_specific_manga_command():
+    parsed = parse_command(FakeEvent("四格 351"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "manga_by_id"
+    assert parsed.manga_id == 351
+
+
+def test_parse_specific_manga_requires_single_numeric_arg():
+    assert parse_command(FakeEvent("四格")) is None  # type: ignore[arg-type]
+    assert parse_command(FakeEvent("四格 miku")) is None  # type: ignore[arg-type]
+    assert parse_command(FakeEvent("四格 12 34")) is None  # type: ignore[arg-type]
+
+
+def test_parse_character_command_is_archived():
+    assert parse_command(FakeEvent("查角色 初音未来")) is None  # type: ignore[arg-type]
+
+
+def test_parse_multiplier_command():
+    parsed = parse_command(FakeEvent("倍率计算 150 130 120 115 100"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "multiplier"
+    assert parsed.multiplier_values == [150, 130, 120, 115, 100]
+
+
+def test_parse_multiplier_requires_five_numeric_args():
+    parsed = parse_command(FakeEvent("倍率计算 150 130 120"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "multiplier"
+    assert parsed.error == "用法: 倍率计算 <a> <b> <c> <d> <e>"
+
+    parsed = parse_command(FakeEvent("倍率计算 150 130 120 115 abc"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "multiplier"
+    assert parsed.error == "用法: 倍率计算 <a> <b> <c> <d> <e>"
+
+
+def test_parse_live_toggle_with_server():
+    parsed = parse_command(FakeEvent("live提醒 开启 jp"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "live_toggle"
+    assert parsed.admin_subaction == "enable"
+    assert parsed.server == "jp"
+
+
+def test_parse_live_subscribe_with_prefix_server():
+    parsed = parse_command(FakeEvent("jp订阅live提醒"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "live_subscribe"
+    assert parsed.admin_subaction == "subscribe"
+    assert parsed.server == "jp"
+
+
+def test_parse_new_card_toggle_supports_new_and_legacy_name():
+    parsed = parse_command(FakeEvent("新卡上线提醒 开启 jp"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "new_card_toggle"
+    assert parsed.admin_subaction == "enable"
+    assert parsed.server == "jp"
+
+    legacy = parse_command(FakeEvent("新卡提醒 状态 jp"))  # type: ignore[arg-type]
+    assert legacy is not None
+    assert legacy.action == "new_card_toggle"
+    assert legacy.admin_subaction == "status"
+    assert legacy.server == "jp"
+
+
+def test_parse_alias_add_global():
+    parsed = parse_command(FakeEvent("角色别名 添加 全局 初音未来 miku"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "alias"
+    assert parsed.admin_target_type == "character"
+    assert parsed.admin_subaction == "add"
+    assert parsed.global_scope is True
+    assert parsed.query_text == "初音未来"
+    assert parsed.alias == "miku"
+
+
+def test_parse_character_alias_defaults_to_query():
+    parsed = parse_command(FakeEvent("角色别名 初音未来"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "alias"
+    assert parsed.admin_target_type == "character"
+    assert parsed.admin_subaction == "query"
+    assert parsed.query_text == "初音未来"
+
+
+def test_parse_music_alias_defaults_to_query():
+    parsed = parse_command(FakeEvent("歌曲别名 Tell Your World"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "alias"
+    assert parsed.admin_target_type == "music"
+    assert parsed.admin_subaction == "query"
+    assert parsed.query_text == "tell your world"

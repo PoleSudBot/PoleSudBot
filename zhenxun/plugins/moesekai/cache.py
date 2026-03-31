@@ -8,9 +8,7 @@ from aiocache.base import BaseCache
 from aiocache.serializers import JsonSerializer
 from aiocache.backends.redis import RedisCache
 
-from zhenxun.services.cache import cache_config
-from zhenxun.services.log import logger
-
+from .adapters.runtime import get_cache_runtime_config, logger
 from .config import get_settings
 from .constants import MODULE_NAME
 
@@ -40,6 +38,7 @@ class MoeSekaiCache:
         if mode == CacheMode.NONE:
             return mode, None
         if mode == CacheMode.REDIS:
+            cache_config = get_cache_runtime_config()
             if cache_config.redis_host and cache_config.redis_port:
                 return (
                     mode,

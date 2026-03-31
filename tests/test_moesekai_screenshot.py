@@ -8,11 +8,59 @@ import pytest
 nonebot.init()
 
 from zhenxun.plugins.moesekai.config import MoeSekaiSettings
-from zhenxun.plugins.moesekai.screenshot import screenshot_service
+from zhenxun.plugins.moesekai.screenshot import _redact_url_secrets, screenshot_service
 
 
 def test_default_profile_viewport_width_is_625():
     assert MoeSekaiSettings().profile_viewport_width == 625
+
+
+def test_build_profile_url_omits_empty_token():
+    url = screenshot_service._build_profile_url(
+        "https://example.com/profile/{server}/{game_id}?mode=screenshot&token={token}",
+        server="jp",
+        game_id="1234567890123",
+        token="",
+    )
+    assert url == "https://example.com/profile/jp/1234567890123?mode=screenshot"
+
+
+def test_build_profile_url_appends_token_when_template_has_no_token_param():
+    url = screenshot_service._build_profile_url(
+        "https://example.com/profile/{server}/{game_id}?mode=screenshot",
+        server="jp",
+        game_id="1234567890123",
+        token="test-token",
+    )
+    assert (
+        url
+        == "https://example.com/profile/jp/1234567890123?mode=screenshot&token=test-token"
+    )
+
+
+def test_redact_url_secrets_masks_token_query_param():
+    assert (
+        _redact_url_secrets(
+            "https://example.com/profile/jp/123?mode=screenshot&token=secret-token"
+        )
+        == "https://example.com/profile/jp/123?mode=screenshot&token=%2A%2A%2A"
+    )
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        ("https://rk.exmeaning.com", "https://rk.exmeaning.com"),
+        ("https://rk.exmeaning.com/", "https://rk.exmeaning.com"),
+        ("rk.exmeaning.com", "https://rk.exmeaning.com"),
+        ("https://rk.exmeaning.com/public", "https://rk.exmeaning.com/public"),
+    ],
+)
+def test_ranking_api_base_normalizes_only_current_host_shape(
+    configured: str,
+    expected: str,
+):
+    assert MoeSekaiSettings(ranking_api_base=configured).ranking_api_base == expected
 
 
 @pytest.mark.asyncio
@@ -112,6 +160,61 @@ async def test_capture_deck_uses_crop_config(
         live_type="multi",
     )
     assert result == b"deck"
+
+
+@pytest.mark.asyncio
+async def test_capture_story_waits_for_content_ready(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.screenshot.get_settings",
+        lambda: MoeSekaiSettings(deck_viewport_width=650, story_top_crop=100),
+    )
+
+    async def fake_capture(job):
+        assert job.viewport["width"] == 650
+        assert job.top_crop_css_pixels == 100
+        assert job.full_page is True
+        assert "活动概要" in (job.wait_function or "")
+        assert "章节列表" in (job.wait_function or "")
+        assert "正在加载" in (job.wait_function or "")
+        assert "img.complete" in (job.wait_function or "")
+        assert job.scroll_if_function is not None
+        return b"story"
+
+    monkeypatch.setattr(screenshot_service, "capture", fake_capture)
+    result = await screenshot_service.capture_story(199)
+    assert result == b"story"
+
+
+@pytest.mark.asyncio
+async def test_capture_character_waits_for_related_cards_ready(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.screenshot.get_settings",
+        lambda: MoeSekaiSettings(deck_viewport_width=650, character_top_crop=100),
+    )
+
+    async def fake_capture(job):
+        assert job.viewport["width"] == 650
+        assert job.top_crop_css_pixels == 100
+        assert job.full_page is True
+        assert "正在加载角色信息" in (job.wait_function or "")
+        assert "Character Trim" in (job.wait_function or "")
+        assert "基本信息" in (job.wait_function or "")
+        assert "个人档案" in (job.wait_function or "")
+        assert "相关卡牌" in (job.wait_function or "")
+        assert "\\/cards\\/" in (job.wait_function or "")
+        assert job.scroll_through_page is True
+        assert "svg image" in (job.before_capture_script or "")
+        assert "Promise.allSettled" in (job.before_capture_script or "")
+        assert job.extra_wait_seconds == 3.0
+        return b"character"
+
+    monkeypatch.setattr(screenshot_service, "capture", fake_capture)
+    result = await screenshot_service.capture_character(21)
+    assert result == b"character"
 
 
 def test_filter_urls_prefers_last_successful_site():

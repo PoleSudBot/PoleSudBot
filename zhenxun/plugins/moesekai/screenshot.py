@@ -7,13 +7,11 @@ from dataclasses import dataclass, field
 from io import BytesIO
 from math import ceil, floor
 from typing import Any, Literal
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from nonebot_plugin_htmlrender.browser import get_browser
 from PIL import Image
 
-from zhenxun.services.log import logger
-
+from .adapters.runtime import logger
 from .config import get_settings
 from .constants import MODULE_NAME, server_path_prefix
 
@@ -29,6 +27,25 @@ def _build_viewport(width: int) -> dict[str, int]:
     return {"width": width, "height": _DEFAULT_VIEWPORT_HEIGHT}
 
 
+def _redact_url_secrets(url: str) -> str:
+    split = urlsplit(url)
+    query = []
+    for key, value in parse_qsl(split.query, keep_blank_values=True):
+        if key == "token" and value:
+            query.append((key, "***"))
+        else:
+            query.append((key, value))
+    return urlunsplit(
+        (
+            split.scheme,
+            split.netloc,
+            split.path,
+            urlencode(query),
+            split.fragment,
+        )
+    )
+
+
 class ScreenshotError(RuntimeError):
     def __init__(self, kind: str, errors: list[str]):
         self.kind = kind
@@ -36,8 +53,7 @@ class ScreenshotError(RuntimeError):
         super().__init__(errors[-1] if errors else f"{kind} 截图失败")
 
     def to_user_message(self) -> str:
-        detail = self.errors[-1] if self.errors else "未知错误"
-        return f"{self.kind}截图失败：{detail}"
+        return f"{self.kind}截图失败，请稍后重试"
 
 
 @dataclass
@@ -144,6 +160,8 @@ async (ms) => {
         user_agent: str | None,
         device_scale_factor: float,
     ):
+        from nonebot_plugin_htmlrender.browser import get_browser
+
         browser = await get_browser()
         context = await browser.new_context(
             viewport=viewport,
@@ -336,8 +354,9 @@ async () => {
                     self._last_success_site[job.kind] = site_key
                     return image
                 except Exception as exc:
+                    safe_url = _redact_url_secrets(url)
                     detail = (
-                        f"第{attempt}次 {url} "
+                        f"第{attempt}次 {safe_url} "
                         f"{type(exc).__name__}: {exc}"
                     )
                     logger.warning(
@@ -356,7 +375,8 @@ async () => {
     async def capture_profile(self, server: str, game_id: str) -> bytes:
         settings = get_settings()
         urls = [
-            template.format(
+            self._build_profile_url(
+                template,
                 server=server,
                 game_id=game_id,
                 token=settings.profile_token,
@@ -430,6 +450,36 @@ async () => {
             timeout_seconds=settings.screenshot_timeout_seconds,
         )
         return await self.capture(job)
+
+    @staticmethod
+    def _build_profile_url(
+        template: str,
+        *,
+        server: str,
+        game_id: str,
+        token: str,
+    ) -> str:
+        formatted = template.format(server=server, game_id=game_id, token=token)
+        split = urlsplit(formatted)
+        query = []
+        has_token = False
+        for key, value in parse_qsl(split.query, keep_blank_values=True):
+            if key == "token":
+                has_token = True
+                if value == "":
+                    continue
+            query.append((key, value))
+        if token and not has_token:
+            query.append(("token", token))
+        return urlunsplit(
+            (
+                split.scheme,
+                split.netloc,
+                split.path,
+                urlencode(query),
+                split.fragment,
+            )
+        )
 
     async def capture_ranking(
         self,
@@ -650,6 +700,243 @@ async () => {
             stability_wait_ms=42,
             extra_wait_seconds=0,
             timeout_seconds=settings.deck_wait_timeout_seconds,
+        )
+        return await self.capture(job)
+
+    async def capture_story(self, event_id: int) -> bytes:
+        settings = get_settings()
+        urls = [
+            f"{base.rstrip('/')}/story/event/{event_id}/?mode=screenshot"
+            for base in settings.site_bases
+        ]
+        job = ScreenshotJob(
+            kind="活动剧情",
+            urls=urls,
+            viewport=_build_viewport(settings.deck_viewport_width),
+            device_scale_factor=self._quality_scale_factor(settings.screenshot_quality),
+            full_page=True,
+            capture_mode="full_page",
+            user_agent=_MOBILE_USER_AGENT,
+            wait_until="domcontentloaded",
+            wait_selector="main",
+            prepare_script="""
+() => {
+  const nav = document.querySelector('body > main > nav');
+  if (nav instanceof HTMLElement) {
+    nav.style.display = 'none';
+  }
+  if (!document.head || document.getElementById('__moesekai_capture_style__')) {
+    return;
+  }
+  const style = document.createElement('style');
+  style.id = '__moesekai_capture_style__';
+  style.textContent = `
+    *, *::before, *::after {
+      animation-duration: 0s !important;
+      animation-delay: 0s !important;
+      transition-duration: 0s !important;
+      transition-delay: 0s !important;
+      scroll-behavior: auto !important;
+    }
+  `;
+  document.head.appendChild(style);
+}
+            """.strip(),
+            wait_function="""
+() => {
+  const bodyText = document.body?.innerText || '';
+  if (bodyText.includes('正在加载') || bodyText.includes('加载中')) {
+    return false;
+  }
+  const root = document.querySelector('main > div:nth-of-type(2)');
+  if (!(root instanceof HTMLElement)) {
+    return false;
+  }
+  const content = Array.from(root.children).find((element) => element.tagName !== 'ASIDE');
+  if (!(content instanceof HTMLElement)) {
+    return false;
+  }
+  if (content.getBoundingClientRect().height < 480) {
+    return false;
+  }
+  const headings = Array.from(content.querySelectorAll('h1, h2, h3'))
+    .map((element) => (element.textContent || '').trim());
+  if (!headings.some((text) => text.includes('活动概要'))) {
+    return false;
+  }
+  if (!headings.some((text) => text.includes('章节列表'))) {
+    return false;
+  }
+  const episodeCards = Array.from(content.querySelectorAll('a[href]')).filter((element) => {
+    const href = element.getAttribute('href') || '';
+    return /\\/story\\/event\\/\\d+\\/\\d+\\/?$/.test(href);
+  });
+  if (!episodeCards.length) {
+    return false;
+  }
+  const images = Array.from(content.querySelectorAll('img'));
+  return images.every((img) => img.complete && img.naturalWidth > 0);
+}
+            """.strip(),
+            scroll_if_function="""
+() => {
+  const root = document.querySelector('main > div:nth-of-type(2)');
+  if (!(root instanceof HTMLElement)) {
+    return false;
+  }
+  const content = Array.from(root.children).find((element) => element.tagName !== 'ASIDE');
+  if (!(content instanceof HTMLElement)) {
+    return false;
+  }
+  return Array.from(content.querySelectorAll('img')).some(
+    (img) => !img.complete || img.naturalWidth <= 0
+  );
+}
+            """.strip(),
+            top_crop_css_pixels=settings.story_top_crop,
+            stability_wait_ms=30,
+            extra_wait_seconds=0,
+            timeout_seconds=settings.screenshot_timeout_seconds,
+        )
+        return await self.capture(job)
+
+    async def capture_character(self, character_id: int) -> bytes:
+        settings = get_settings()
+        urls = [
+            f"{base.rstrip('/')}/character/{character_id}/?mode=screenshot"
+            for base in settings.site_bases
+        ]
+        job = ScreenshotJob(
+            kind="查角色",
+            urls=urls,
+            viewport=_build_viewport(settings.deck_viewport_width),
+            device_scale_factor=self._quality_scale_factor(settings.screenshot_quality),
+            full_page=True,
+            capture_mode="full_page",
+            user_agent=_MOBILE_USER_AGENT,
+            wait_until="domcontentloaded",
+            wait_selector="main",
+            prepare_script="""
+() => {
+  const nav = document.querySelector('body > main > nav');
+  if (nav instanceof HTMLElement) {
+    nav.style.display = 'none';
+  }
+  if (!document.head || document.getElementById('__moesekai_capture_style__')) {
+    return;
+  }
+  const style = document.createElement('style');
+  style.id = '__moesekai_capture_style__';
+  style.textContent = `
+    *, *::before, *::after {
+      animation-duration: 0s !important;
+      animation-delay: 0s !important;
+      transition-duration: 0s !important;
+      transition-delay: 0s !important;
+      scroll-behavior: auto !important;
+    }
+  `;
+  document.head.appendChild(style);
+}
+            """.strip(),
+            wait_function="""
+() => {
+  const bodyText = document.body?.innerText || '';
+  if (bodyText.includes('正在加载角色信息')) {
+    return false;
+  }
+  const root = document.querySelector('main > div:nth-of-type(2)');
+  if (!(root instanceof HTMLElement)) {
+    return false;
+  }
+  const content = Array.from(root.children).find((element) => element.tagName !== 'ASIDE');
+  if (!(content instanceof HTMLElement)) {
+    return false;
+  }
+  if (content.getBoundingClientRect().height < 320) {
+    return false;
+  }
+  const headings = Array.from(content.querySelectorAll('h1, h2, h3'))
+    .map((element) => (element.textContent || '').trim());
+  if (!headings.some((text) => text.includes('基本信息'))) {
+    return false;
+  }
+  if (!headings.some((text) => text.includes('个人档案'))) {
+    return false;
+  }
+  if (!headings.some((text) => text.includes('相关卡牌'))) {
+    return false;
+  }
+  const heroImage = Array.from(content.querySelectorAll('img')).find((img) =>
+    (img.getAttribute('alt') || '').includes('Character Trim')
+  );
+  if (!heroImage || !heroImage.complete || heroImage.naturalWidth <= 0) {
+    return false;
+  }
+  const cardLinks = Array.from(content.querySelectorAll('a[href]')).filter((element) => {
+    const href = element.getAttribute('href') || '';
+    return /\\/cards\\/\\d+\\/?$/.test(href);
+  });
+  if (!cardLinks.length) {
+    return false;
+  }
+  return cardLinks.some((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.width >= 24 && rect.height >= 24;
+  });
+}
+            """.strip(),
+            before_capture_script="""
+async () => {
+  const cardImageUrls = Array.from(
+    document.querySelectorAll('a[href*="/cards/"] svg image')
+  )
+    .map((image) =>
+      image.getAttribute('href') ||
+      image.getAttributeNS('http://www.w3.org/1999/xlink', 'href') ||
+      ''
+    )
+    .filter((url) => !!url);
+  const uniqueUrls = Array.from(new Set(cardImageUrls));
+  await Promise.allSettled(
+    uniqueUrls.map(
+      (url) =>
+        new Promise((resolve) => {
+          const preloader = new Image();
+          let settled = false;
+          const finish = () => {
+            if (settled) {
+              return;
+            }
+            settled = true;
+            resolve(null);
+          };
+          const timer = window.setTimeout(() => {
+            finish();
+          }, 1800);
+          preloader.onload = () => {
+            window.clearTimeout(timer);
+            finish();
+          };
+          preloader.onerror = () => {
+            window.clearTimeout(timer);
+            finish();
+          };
+          preloader.src = url;
+          if (preloader.complete) {
+            window.clearTimeout(timer);
+            finish();
+          }
+        })
+    )
+  );
+}
+            """.strip(),
+            scroll_through_page=True,
+            top_crop_css_pixels=settings.character_top_crop,
+            stability_wait_ms=45,
+            extra_wait_seconds=3.0,
+            timeout_seconds=settings.screenshot_timeout_seconds,
         )
         return await self.capture(job)
 

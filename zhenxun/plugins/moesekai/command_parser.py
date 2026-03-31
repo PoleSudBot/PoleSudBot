@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 import shlex
 
@@ -28,7 +28,15 @@ class ParsedCommand:
     admin_subaction: str | None = None
     admin_target_type: str | None = None
     admin_value: str | None = None
+    query_text: str | None = None
+    alias: str | None = None
     all_servers: bool = False
+    global_scope: bool = False
+    card_ids: list[int] = field(default_factory=list)
+    live_id: int | None = None
+    manga_id: int | None = None
+    multiplier_values: list[int] = field(default_factory=list)
+    force_refresh: bool = False
     error: str | None = None
 
 
@@ -98,6 +106,208 @@ def _parse_optional_event_command(
     if len(parts) != 1 or not parts[0].isdigit():
         return ParsedCommand(action, text, server=server, error=error_message)
     return ParsedCommand(action, text, server=server, event_id=int(parts[0]))
+
+
+def _parse_toggle_command(text: str, names: tuple[str, ...], *, action: str) -> ParsedCommand | None:
+    matched = _match_command(text, names)
+    if not matched:
+        return None
+    prefix, rest = matched
+    parts = rest.split()
+    if not parts:
+        return ParsedCommand(action, text, error=f"用法: {names[0]} <开启|关闭|状态> [区服]")
+    action_map = {"开启": "enable", "关闭": "disable", "状态": "status"}
+    if parts[0] not in action_map:
+        return ParsedCommand(action, text, error=f"用法: {names[0]} <开启|关闭|状态> [区服]")
+    server, extra = _consume_server(prefix, " ".join(parts[1:]))
+    if extra:
+        return ParsedCommand(action, text, server=server, error=f"用法: {names[0]} <开启|关闭|状态> [区服]")
+    return ParsedCommand(action, text, server=server, admin_subaction=action_map[parts[0]])
+
+
+def _parse_live_subscription(text: str) -> ParsedCommand | None:
+    matched = _match_command(text, ("订阅live提醒",))
+    if matched:
+        prefix, rest = matched
+        server, extra = _consume_server(prefix, rest)
+        if extra:
+            return ParsedCommand("live_subscribe", text, server=server, error="用法: 订阅live提醒 [区服]")
+        return ParsedCommand("live_subscribe", text, server=server, admin_subaction="subscribe")
+    matched = _match_command(text, ("取消订阅live提醒",))
+    if matched:
+        prefix, rest = matched
+        server, extra = _consume_server(prefix, rest)
+        if extra:
+            return ParsedCommand("live_subscribe", text, server=server, error="用法: 取消订阅live提醒 [区服]")
+        return ParsedCommand("live_subscribe", text, server=server, admin_subaction="unsubscribe")
+    return None
+
+
+def _parse_story(text: str) -> ParsedCommand | None:
+    matched = re.fullmatch(r"活动剧情(?:\s+(?P<rest>.*))?", text)
+    if not matched:
+        return None
+    rest = (matched.group("rest") or "").strip()
+    if not rest:
+        return ParsedCommand("story", text, error="用法: 活动剧情 <活动ID> [强制刷新]")
+    parts = rest.split()
+    force_refresh_indexes = [
+        index for index, part in enumerate(parts) if part == "强制刷新"
+    ]
+    if len(force_refresh_indexes) > 1:
+        return ParsedCommand(
+            "story",
+            text,
+            error="用法: 活动剧情 <活动ID> [强制刷新]",
+        )
+    force_refresh = bool(force_refresh_indexes)
+    if force_refresh:
+        parts.pop(force_refresh_indexes[0])
+    if len(parts) != 1 or not parts[0].isdigit():
+        return ParsedCommand(
+            "story",
+            text,
+            error="用法: 活动剧情 <活动ID> [强制刷新]",
+        )
+    return ParsedCommand(
+        "story",
+        text,
+        event_id=int(parts[0]),
+        force_refresh=force_refresh,
+    )
+
+
+def _parse_manga_by_id(text: str) -> ParsedCommand | None:
+    matched = re.fullmatch(r"四格\s+(?P<manga_id>\d+)", text)
+    if not matched:
+        return None
+    return ParsedCommand("manga_by_id", text, manga_id=int(matched.group("manga_id")))
+
+
+def _parse_multiplier(text: str) -> ParsedCommand | None:
+    matched = re.fullmatch(r"倍率(?:\s+(?P<rest>.*))?", text)
+    if not matched:
+        return None
+    rest = (matched.group("rest") or "").strip()
+    if not rest:
+        return ParsedCommand(
+            "multiplier",
+            text,
+            error="用法: 倍率 <a> <b> <c> <d> <e>",
+        )
+    parts = rest.split()
+    if len(parts) != 5 or any(not part.isdigit() for part in parts):
+        return ParsedCommand(
+            "multiplier",
+            text,
+            error="用法: 倍率 <a> <b> <c> <d> <e>",
+        )
+    return ParsedCommand(
+        "multiplier",
+        text,
+        multiplier_values=[int(part) for part in parts],
+    )
+
+
+def _parse_character(text: str) -> ParsedCommand | None:
+    matched = re.fullmatch(r"查角色(?:\s+(?P<query>.*))?", text)
+    if not matched:
+        return None
+    query = (matched.group("query") or "").strip()
+    if not query:
+        return ParsedCommand("character", text, error="用法: 查角色 <角色ID|名称|别名>")
+    parts = query.split()
+    force_refresh_indexes = [
+        index for index, part in enumerate(parts) if part == "强制刷新"
+    ]
+    if len(force_refresh_indexes) > 1:
+        return ParsedCommand(
+            "character",
+            text,
+            error="用法: 查角色 <角色ID|名称|别名> [强制刷新]",
+        )
+    force_refresh = bool(force_refresh_indexes)
+    if force_refresh:
+        parts.pop(force_refresh_indexes[0])
+    if not parts:
+        return ParsedCommand(
+            "character",
+            text,
+            error="用法: 查角色 <角色ID|名称|别名> [强制刷新]",
+        )
+    return ParsedCommand(
+        "character",
+        text,
+        query_text=" ".join(parts),
+        force_refresh=force_refresh,
+    )
+
+
+def _parse_alias(text: str) -> ParsedCommand | None:
+    for name, target_type in (("角色别名", "character"), ("歌曲别名", "music")):
+        matched = re.fullmatch(rf"{re.escape(name)}(?:\s+(?P<rest>.*))?", text)
+        if not matched:
+            continue
+        rest = (matched.group("rest") or "").strip()
+        if not rest:
+            return ParsedCommand(
+                "alias",
+                text,
+                error=f"用法: {name} <关键词> 或 {name} <查询|添加|删除> ...",
+            )
+        try:
+            tokens = shlex.split(rest)
+        except ValueError as exc:
+            return ParsedCommand("alias", text, error=f"参数解析失败: {exc}")
+        action_map = {"查询": "query", "添加": "add", "删除": "remove"}
+        if tokens[0] not in action_map:
+            return ParsedCommand(
+                "alias",
+                text,
+                admin_target_type=target_type,
+                admin_subaction="query",
+                query_text=rest,
+            )
+        operation = action_map[tokens[0]]
+        remaining = tokens[1:]
+        global_scope = False
+        if remaining and remaining[0] in {"全局", "global"}:
+            global_scope = True
+            remaining = remaining[1:]
+        if operation == "query":
+            if not remaining:
+                return ParsedCommand("alias", text, error=f"用法: {name} 查询 <关键词>")
+            return ParsedCommand(
+                "alias",
+                text,
+                admin_target_type=target_type,
+                admin_subaction=operation,
+                query_text=" ".join(remaining),
+                global_scope=global_scope,
+            )
+        if operation == "add":
+            if len(remaining) < 2:
+                return ParsedCommand("alias", text, error=f"用法: {name} 添加 [全局] <目标> <别名>")
+            return ParsedCommand(
+                "alias",
+                text,
+                admin_target_type=target_type,
+                admin_subaction=operation,
+                query_text=remaining[0],
+                alias=" ".join(remaining[1:]),
+                global_scope=global_scope,
+            )
+        if not remaining:
+            return ParsedCommand("alias", text, error=f"用法: {name} 删除 [全局] <别名>")
+        return ParsedCommand(
+            "alias",
+            text,
+            admin_target_type=target_type,
+            admin_subaction=operation,
+            alias=" ".join(remaining),
+            global_scope=global_scope,
+        )
+    return None
 
 
 def _parse_activity_deck(
@@ -334,6 +544,38 @@ def _parse_admin(text: str, at_targets: list[str]) -> ParsedCommand | None:
             return ParsedCommand("update", text, all_servers=True)
         return ParsedCommand("update", text, error="用法: pjsk update [区服|all]")
 
+    test_matched = re.fullmatch(
+        rf"(?:(?P<prefix>cn|jp|tw)\s*)?pjsk\s+test\s+(?P<kind>live提醒|新卡上线提醒|新卡提醒)(?:\s+(?P<rest>.*))?",
+        text,
+    )
+    if test_matched:
+        prefix = test_matched.group("prefix")
+        kind = test_matched.group("kind")
+        server, rest = _consume_server(prefix, (test_matched.group("rest") or "").strip())
+        tokens = rest.split() if rest else []
+        if kind == "live提醒":
+            if len(tokens) > 1 or (tokens and not tokens[0].isdigit()):
+                return ParsedCommand("test_live", text, server=server, error="用法: pjsk test live提醒 [区服] [live_id]")
+            return ParsedCommand(
+                "test_live",
+                text,
+                server=server,
+                live_id=int(tokens[0]) if tokens else None,
+            )
+        if any(not token.isdigit() for token in tokens):
+            return ParsedCommand(
+                "test_new_card",
+                text,
+                server=server,
+                error="用法: pjsk test 新卡上线提醒 [区服] [card_id...]",
+            )
+        return ParsedCommand(
+            "test_new_card",
+            text,
+            server=server,
+            card_ids=[int(token) for token in tokens],
+        )
+
     if not text.startswith("pjsk"):
         return None
     tokens = text.split()
@@ -476,6 +718,28 @@ def parse_command(event: MessageEvent) -> ParsedCommand | None:
         return ParsedCommand("visibility", text, admin_value="allow")
     if text == "不给看":
         return ParsedCommand("visibility", text, admin_value="deny")
+
+    if text == "随机四格":
+        return ParsedCommand("random_manga", text)
+
+    if manga := _parse_manga_by_id(text):
+        return manga
+    if story := _parse_story(text):
+        return story
+    if multiplier := _parse_multiplier(text):
+        return multiplier
+    if alias := _parse_alias(text):
+        return alias
+    if live_toggle := _parse_toggle_command(text, ("live提醒",), action="live_toggle"):
+        return live_toggle
+    if new_card_toggle := _parse_toggle_command(
+        text,
+        ("新卡上线提醒", "新卡提醒"),
+        action="new_card_toggle",
+    ):
+        return new_card_toggle
+    if subscription := _parse_live_subscription(text):
+        return subscription
 
     prediction = _parse_optional_event_command(
         text,
