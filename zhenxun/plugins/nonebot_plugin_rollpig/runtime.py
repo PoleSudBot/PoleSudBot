@@ -2,10 +2,15 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from nonebot import get_plugin_config
 from nonebot.log import logger
 
-from .config import Config
+from zhenxun.services.group_settings_service import group_settings_service
+
+from .config import (
+    GroupSettings,
+    MODULE_NAME,
+    get_roast_cooldown_hours,
+)
 
 
 # ================================ 外部群开关适配 ================================ #
@@ -18,16 +23,15 @@ _daily_summary_checker: Optional[Callable[[str], bool]] = None
 
 def resolve_roast_cooldown_seconds() -> int:
     """解析普通烤群友 CD（秒），支持通过配置覆盖。"""
-    plugin_config = get_plugin_config(Config)
-    raw_hours = getattr(plugin_config, "rollpig_roast_cooldown_hours", 8.0)
+    raw_hours = get_roast_cooldown_hours()
     try:
         hours = float(raw_hours)
     except (TypeError, ValueError):
-        logger.warning(f"rollpig_roast_cooldown_hours 配置非法: {raw_hours}，已回退到 8 小时")
+        logger.warning(f"ROAST_COOLDOWN_HOURS 配置非法: {raw_hours}，已回退到 8 小时")
         hours = 8.0
 
     if hours <= 0:
-        logger.warning(f"rollpig_roast_cooldown_hours 必须 > 0，当前值: {hours}，已回退到 8 小时")
+        logger.warning(f"ROAST_COOLDOWN_HOURS 必须 > 0，当前值: {hours}，已回退到 8 小时")
         hours = 8.0
 
     return max(1, int(hours * 3600))
@@ -76,3 +80,23 @@ def is_group_rollpig_enabled(group_id: str) -> bool:
 def is_daily_summary_enabled(group_id: str) -> bool:
     """判断当前群是否启用日报推送；未接入外部控制系统时默认返回 True。"""
     return _check_optional_group_switch(_daily_summary_checker, group_id, switch_name="日报开关")
+
+
+async def is_daily_summary_push_enabled(group_id: str) -> bool:
+    """判断当前群是否发送猪圈日报。"""
+    normalized_group_id = str(group_id or "").strip()
+    if not normalized_group_id:
+        return False
+
+    if not is_group_rollpig_enabled(normalized_group_id):
+        return False
+
+    if not is_daily_summary_enabled(normalized_group_id):
+        return False
+
+    settings = await group_settings_service.get_all_for_plugin(
+        normalized_group_id,
+        MODULE_NAME,
+        parse_model=GroupSettings,
+    )
+    return settings.daily_summary_enabled

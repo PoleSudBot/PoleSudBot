@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-from nonebot import get_plugin_config
-
-from ..config import Config
+from ..config import get_storage_backend
 from .base import RollpigStore
 
 
 def build_store() -> RollpigStore:
-    config = get_plugin_config(Config)
-    backend = (config.rollpig_storage_backend or "local").strip().lower()
+    backend = get_storage_backend()
     if backend == "cloud":
         from .cloud import CloudStore
 

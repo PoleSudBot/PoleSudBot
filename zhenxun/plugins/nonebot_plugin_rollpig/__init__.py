@@ -2,6 +2,8 @@ import json
 import random
 import datetime
 import time
+import asyncio
+from dataclasses import dataclass
 from functools import wraps
 import httpx
 from pathlib import Path
@@ -11,7 +13,11 @@ from nonebot import on_command, require, get_driver, get_bot
 from nonebot.adapters.onebot.v11 import Event, MessageSegment, Message, GroupMessageEvent, Bot
 from nonebot.params import CommandArg
 from nonebot.log import logger
+from nonebot.permission import SUPERUSER
 from nonebot.plugin import PluginMetadata
+
+from zhenxun.services.group_settings_service import group_settings_service
+from zhenxun.utils.platform import PlatformUtils
 
 # 确保依赖插件先被 NoneBot 注册（必须在本地模块 import 之前）
 # data_manager.py 在模块加载时会调用 store.get_plugin_data_file()
@@ -21,9 +27,13 @@ require("nonebot_plugin_localstore")
 from nonebot_plugin_htmlrender import template_to_pic
 
 # 本地模块（在 require() 之后 import）
-from .config import Config
+from .config import Config, GroupSettings, MODULE_NAME, get_proxy
 from .roast_manager import roast_manager
-from .runtime import is_daily_summary_enabled, is_group_rollpig_enabled, resolve_roast_cooldown_seconds
+from .runtime import (
+    is_daily_summary_push_enabled,
+    is_group_rollpig_enabled,
+    resolve_roast_cooldown_seconds,
+)
 from .store import store
 from .store.cloud import CloudStoreError
 from .store.models import RoastEvent
@@ -40,7 +50,6 @@ from .texts import (
     SUPER_FORCE_ROAST_PREFIX_TEXTS, FORCE_ROAST_PREFIX_TEXTS,
     FORCE_ROAST_LIMIT_TEXTS,
     ROAST_BOT_TEXTS,
-    AUTO_ROLL_ROAST_TEXTS,
     DAILY_SUMMARY_EMPTY_TEXTS, DAILY_SUMMARY_HEADER, DAILY_SUMMARY_FOOTER,
     PROTECTION_BLOCK_TEXTS, PROTECTION_BREAK_TEXTS,
     RANDOM_ROAST_INTRO_TEXTS,
@@ -71,9 +80,11 @@ __plugin_meta__ = PluginMetadata(
     烤群友 - 把群友做成烤猪（目标需已抽猪且非人类/熟食）
     烤群友 + 打点后厨/偷换烤架/贿赂主厨/加急生火(兼容加急生活) - 每日一次强制成功（目标仍需已抽猪且非人类/熟食）
     烤群友 + 强行点火 - superuser 专属，无限强制成功（目标仍需已抽猪且非人类/熟食）
+    开启猪圈日报 / 关闭猪圈日报 - 开关当前群的猪圈日报推送
     
     📊 统计指令：
     我的猪圈 - 查看解锁进度
+    猪王争霸榜 / 猪猪榜 - 查看当前群图鉴排行
     本周小猪 - 生成本周猪猪总结长图
     """,
     type="application",
@@ -83,6 +94,81 @@ __plugin_meta__ = PluginMetadata(
     extra={
         "author": "Felis2026",
         "version": "0.5.0",
+        "configs": [
+            {
+                "module": MODULE_NAME,
+                "key": "AI_ENABLED",
+                "value": False,
+                "default_value": False,
+                "help": "是否启用 AI 烤猪文案生成",
+                "type": bool,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "LLM_MODEL_NAME",
+                "value": None,
+                "default_value": None,
+                "help": "烤猪文案使用的 LLM 模型名；留空时使用真寻全局默认模型",
+                "type": str,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "ROAST_COOLDOWN_HOURS",
+                "value": 8.0,
+                "default_value": 8.0,
+                "help": "普通烤群友冷却时间（小时）",
+                "type": float,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "STORAGE_BACKEND",
+                "value": "local",
+                "default_value": "local",
+                "help": "存储后端，可选 local / cloud",
+                "type": str,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "CLOUD_API_URL",
+                "value": None,
+                "default_value": None,
+                "help": "cloud 存储服务地址",
+                "type": str,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "CLOUD_TOKEN",
+                "value": None,
+                "default_value": None,
+                "help": "cloud 存储服务鉴权 token",
+                "type": str,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "CLOUD_TIMEOUT",
+                "value": 3.0,
+                "default_value": 3.0,
+                "help": "cloud 存储请求超时时间（秒）",
+                "type": float,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "CLOUD_STRICT_MODE",
+                "value": True,
+                "default_value": True,
+                "help": "cloud 存储是否启用严格模式",
+                "type": bool,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "PROXY",
+                "value": None,
+                "default_value": None,
+                "help": "rollpig 外部请求代理地址",
+                "type": str,
+            },
+        ],
+        "group_config_model": GroupSettings,
     },
 )
 
@@ -111,6 +197,14 @@ def load_resource_json(path, default):
 
 
 PIG_LIST = load_resource_json(PIGINFO_PATH, [])
+RANKING_CONCURRENCY_LIMIT = 8
+
+
+@dataclass(slots=True)
+class PigKingEntry:
+    user_id: str
+    display_name: str
+    collection_count: int
 
 # ================= 工具函数 =================
 
@@ -199,6 +293,99 @@ def get_event_user_name(event: Event) -> str:
     if sender:
         return getattr(sender, "card", "") or getattr(sender, "nickname", "") or str(getattr(event, "user_id", ""))
     return str(getattr(event, "user_id", ""))
+
+
+def normalize_user_sort_key(user_id: str) -> tuple[int, int | str]:
+    return (0, int(user_id)) if str(user_id).isdigit() else (1, str(user_id))
+
+
+def sanitize_display_name(name: str, user_id: str) -> str:
+    cleaned = (name or "").replace("\n", " ").strip()
+    return cleaned or user_id
+
+
+async def is_group_admin_or_superuser(bot: Bot, event: GroupMessageEvent) -> bool:
+    if await SUPERUSER(bot, event):
+        return True
+    return getattr(event.sender, "role", "") in {"admin", "owner"}
+
+
+async def build_group_pig_rankings(bot: Bot, group_id: str) -> list[PigKingEntry]:
+    members = await PlatformUtils.get_group_member_list(bot, group_id)
+    if not members:
+        return []
+
+    unique_members: dict[str, str] = {}
+    for member in members:
+        member_id = str(member.user_id or "").strip()
+        if not member_id:
+            continue
+        unique_members[member_id] = sanitize_display_name(
+            member.card or member.name or "",
+            member_id,
+        )
+
+    if not unique_members:
+        return []
+
+    semaphore = asyncio.Semaphore(min(RANKING_CONCURRENCY_LIMIT, len(unique_members)))
+
+    async def _fetch_collection(member_id: str, display_name: str) -> PigKingEntry | None:
+        async with semaphore:
+            collection = await store.get_user_collection(member_id)
+        collection_count = len(collection)
+        if collection_count <= 0:
+            return None
+        return PigKingEntry(
+            user_id=member_id,
+            display_name=display_name,
+            collection_count=collection_count,
+        )
+
+    results = await asyncio.gather(
+        *[
+            _fetch_collection(member_id, display_name)
+            for member_id, display_name in unique_members.items()
+        ],
+        return_exceptions=True,
+    )
+
+    rankings: list[PigKingEntry] = []
+    for result in results:
+        if isinstance(result, Exception):
+            logger.warning(f"rollpig 群排行统计失败: {result}")
+            continue
+        if result:
+            rankings.append(result)
+
+    rankings.sort(
+        key=lambda entry: (-entry.collection_count, normalize_user_sort_key(entry.user_id))
+    )
+    return rankings
+
+
+def get_group_rank_position(rankings: list[PigKingEntry], user_id: str) -> int | None:
+    for index, entry in enumerate(rankings, start=1):
+        if entry.user_id == user_id:
+            return index
+    return None
+
+
+def build_pig_king_board_text(
+    rankings: list[PigKingEntry],
+    trigger_user_id: str,
+) -> str:
+    if not rankings:
+        return "本群还没人收集到猪图鉴"
+
+    lines = ["【猪王争霸榜】"]
+    for index, entry in enumerate(rankings[:5], start=1):
+        lines.append(f"{index}. {entry.display_name} - {entry.collection_count} 只")
+
+    rank = get_group_rank_position(rankings, trigger_user_id)
+    lines.append("━━━━━━━━━━━━━━")
+    lines.append(f"你的名次：第 {rank} 位" if rank else "你的名次：未上榜")
+    return "\n".join(lines)
 
 
 async def get_group_roll_candidates(bot: Bot, group_id: int, exclude_ids: set[str]) -> list[str]:
@@ -292,7 +479,7 @@ async def ensure_pighub_images_loaded() -> bool:
         return True
 
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10, proxy=get_proxy()) as client:
             resp = await client.get("https://pighub.top/api/all-images")
             resp.raise_for_status()
             data = resp.json()
@@ -550,20 +737,13 @@ async def _(event: Event):
     attacker_name = get_event_user_name(event)
     original_pig = get_pig_by_id(await store.get_daily_roll(user_id))
 
-    auto_roll_hint = ""
     if not original_pig:
-        if not PIG_LIST:
-            await cmd_roast.finish(MessageSegment.reply(event.message_id) + "猪圈埋房了（数据缺失）")
-            return
-        proposed_pig = random.choice(PIG_LIST)
-        resolved_pig_id, _ = await store.get_or_create_daily_roll(
-            user_id,
-            proposed_pig["id"],
-            group_id=group_id,
+        await cmd_roast.finish(
+            MessageSegment.reply(event.message_id) + "你今天还没抽猪，先抽猪再来烤吧。"
         )
-        original_pig = get_pig_by_id(resolved_pig_id) or proposed_pig
-        auto_roll_hint = random.choice(AUTO_ROLL_ROAST_TEXTS).format(name=original_pig["name"]) + "\n"
-    elif group_id:
+        return
+
+    if group_id:
         await store.mark_group_roll_seen(user_id, original_pig["id"], group_id)
 
     if is_human_pig(original_pig):
@@ -602,7 +782,7 @@ async def _(event: Event):
                 group_id=group_id,
             )
         )
-    await send_rendered_pig(cmd_roast, event, roasted_pig_data, extra_text=auto_roll_hint)
+    await send_rendered_pig(cmd_roast, event, roasted_pig_data)
 
 
 # 5.5 烤群友
@@ -1050,13 +1230,60 @@ async def _(bot: Bot, event: GroupMessageEvent):
             await cmd_random_roast.finish(MessageSegment.reply(event.message_id) + intro + fail_text)
 
 
+# 5.7 猪圈日报开关
+cmd_summary_on = on_command("开启猪圈日报", block=True)
+cmd_summary_off = on_command("关闭猪圈日报", block=True)
+
+
+@cmd_summary_on.handle()
+@guard_group_enabled(cmd_summary_on)
+async def _(bot: Bot, event: Event):
+    if not isinstance(event, GroupMessageEvent):
+        await cmd_summary_on.finish("请在群聊中使用这个指令。")
+        return
+    if not await is_group_admin_or_superuser(bot, event):
+        await cmd_summary_on.finish(
+            MessageSegment.reply(event.message_id) + "只有群管理员或超级用户才能修改猪圈日报开关。"
+        )
+        return
+
+    await group_settings_service.set_key_value(
+        str(event.group_id),
+        MODULE_NAME,
+        "daily_summary_enabled",
+        True,
+    )
+    await cmd_summary_on.finish(MessageSegment.reply(event.message_id) + "已开启本群猪圈日报。")
+
+
+@cmd_summary_off.handle()
+@guard_group_enabled(cmd_summary_off)
+async def _(bot: Bot, event: Event):
+    if not isinstance(event, GroupMessageEvent):
+        await cmd_summary_off.finish("请在群聊中使用这个指令。")
+        return
+    if not await is_group_admin_or_superuser(bot, event):
+        await cmd_summary_off.finish(
+            MessageSegment.reply(event.message_id) + "只有群管理员或超级用户才能修改猪圈日报开关。"
+        )
+        return
+
+    await group_settings_service.set_key_value(
+        str(event.group_id),
+        MODULE_NAME,
+        "daily_summary_enabled",
+        False,
+    )
+    await cmd_summary_off.finish(MessageSegment.reply(event.message_id) + "已关闭本群猪圈日报。")
+
+
 # 6. 我的猪圈
 cmd_sty = on_command("我的猪圈", aliases={"我的小猪"}, block=True)
 
 @cmd_sty.handle()
 @guard_group_enabled(cmd_sty)
 @guard_store_errors(cmd_sty)
-async def _(event: Event):
+async def _(bot: Bot, event: Event):
     user_id = str(event.user_id)
     collection = await store.get_user_collection(user_id)
     total_pigs = len(PIG_LIST)
@@ -1071,15 +1298,40 @@ async def _(event: Event):
         return
 
     percent = int((user_count / total_pigs) * 100)
+    ranking_line = ""
+    if isinstance(event, GroupMessageEvent):
+        rankings = await build_group_pig_rankings(bot, str(event.group_id))
+        rank = get_group_rank_position(rankings, user_id)
+        if rank:
+            ranking_line = f"🐷 猪王争霸榜：当前群第 {rank} 位\n"
+
     msg = (
         f"【我的猪圈统计】\n"
         f"👑 猪圈主人：{event.sender.card or event.sender.nickname}\n"
         f"📦 已收集：{user_count} / {total_pigs} 只\n"
         f"📈 收藏率：{percent}%\n"
+        f"{ranking_line}"
         f"━━━━━━━━━━━━━━\n"
         f"继续加油，争取成为猪王！"
     )
     await cmd_sty.finish(MessageSegment.reply(event.message_id) + msg)
+
+
+# 6.5 猪王争霸榜
+cmd_pig_king = on_command("猪王争霸榜", aliases={"猪猪榜"}, block=True)
+
+
+@cmd_pig_king.handle()
+@guard_group_enabled(cmd_pig_king)
+@guard_store_errors(cmd_pig_king)
+async def _(bot: Bot, event: Event):
+    if not isinstance(event, GroupMessageEvent):
+        await cmd_pig_king.finish("请在群聊中查看猪王争霸榜。")
+        return
+
+    rankings = await build_group_pig_rankings(bot, str(event.group_id))
+    text = build_pig_king_board_text(rankings, str(event.user_id))
+    await cmd_pig_king.finish(MessageSegment.reply(event.message_id) + text)
 
 
 # 7. 本周小猪
@@ -1197,7 +1449,6 @@ def build_daily_summary_text(summary: dict) -> str:
 @scheduler.scheduled_job("cron", hour=23, minute=45, id="rollpig_daily_summary")
 async def daily_summary_job():
     """每晚 23:45~23:55 推送当日猪圈日报（随机延迟 0~10 分钟防风控）。"""
-    import asyncio
     delay = random.randint(0, 600)  # 0~10 分钟随机延迟
     logger.info(f"[每日总结] 定时触发，随机延迟 {delay} 秒后推送")
     await asyncio.sleep(delay)
@@ -1242,8 +1493,9 @@ async def daily_summary_job():
         # “日报推送”是独立于 rollpig 主功能的第二层开关：
         # 群内玩法可以开启，但日报消息可以单独关闭。
         summary_push_groups = [
-            group_id for group_id in enabled_active_groups
-            if is_daily_summary_enabled(group_id)
+            group_id
+            for group_id in enabled_active_groups
+            if await is_daily_summary_push_enabled(group_id)
         ]
         if not summary_push_groups:
             logger.info("[每日总结] 已完成保护名单刷新，但没有群开启日报推送")

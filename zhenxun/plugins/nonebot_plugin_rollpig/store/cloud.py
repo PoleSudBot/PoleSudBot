@@ -4,10 +4,15 @@ import datetime
 from typing import Optional
 
 import httpx
-from nonebot import get_plugin_config
 from nonebot.log import logger
 
-from ..config import Config
+from ..config import (
+    get_cloud_api_url,
+    get_cloud_strict_mode,
+    get_cloud_timeout,
+    get_cloud_token,
+    get_proxy,
+)
 from .base import RollpigStore
 from .models import CooldownConsumeResult, RoastEvent
 
@@ -18,17 +23,19 @@ class CloudStoreError(RuntimeError):
 
 class CloudStore(RollpigStore):
     def __init__(self):
-        config = get_plugin_config(Config)
-        if not config.rollpig_cloud_api_url:
-            raise ValueError("启用 cloud 存储时必须配置 rollpig_cloud_api_url")
-        if not config.rollpig_cloud_token:
-            raise ValueError("启用 cloud 存储时必须配置 rollpig_cloud_token")
+        cloud_api_url = get_cloud_api_url()
+        cloud_token = get_cloud_token()
+        if not cloud_api_url:
+            raise ValueError("启用 cloud 存储时必须配置 nonebot_plugin_rollpig.CLOUD_API_URL")
+        if not cloud_token:
+            raise ValueError("启用 cloud 存储时必须配置 nonebot_plugin_rollpig.CLOUD_TOKEN")
 
-        self.base_url = config.rollpig_cloud_api_url.rstrip("/")
-        self.timeout = max(0.5, float(config.rollpig_cloud_timeout or 3.0))
-        self.strict_mode = bool(config.rollpig_cloud_strict_mode)
+        self.base_url = cloud_api_url.rstrip("/")
+        self.timeout = max(0.5, float(get_cloud_timeout() or 3.0))
+        self.strict_mode = bool(get_cloud_strict_mode())
+        self.proxy = get_proxy()
         self.headers = {
-            "Authorization": f"Bearer {config.rollpig_cloud_token}",
+            "Authorization": f"Bearer {cloud_token}",
             "Content-Type": "application/json",
         }
 
@@ -45,7 +52,7 @@ class CloudStore(RollpigStore):
         normalized_params = {key: value for key, value in (params or {}).items() if value is not None}
         normalized_json = {key: value for key, value in (json_body or {}).items() if value is not None}
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(timeout=self.timeout, proxy=self.proxy) as client:
                 response = await client.request(
                     method,
                     url,
