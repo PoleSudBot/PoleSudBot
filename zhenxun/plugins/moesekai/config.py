@@ -81,6 +81,7 @@ def _dataset_paths(prefix: str = "") -> dict[str, str]:
 
 DEFAULT_MASTER_SOURCE_FAMILIES: dict[str, dict[str, Any]] = {
     "8823": {
+        "auto_probe": True,
         "version_path": "versions.json",
         "version_field": "data_version",
         "datasets": _dataset_paths(),
@@ -91,6 +92,7 @@ DEFAULT_MASTER_SOURCE_FAMILIES: dict[str, dict[str, Any]] = {
         },
     },
     "haruki": {
+        "auto_probe": True,
         "version_path": "versions/current_version.json",
         "version_field": "dataVersion",
         "datasets": _dataset_paths("master/"),
@@ -101,6 +103,7 @@ DEFAULT_MASTER_SOURCE_FAMILIES: dict[str, dict[str, Any]] = {
         },
     },
     "sekai-viewer": {
+        "auto_probe": False,
         "version_path": "versions.json",
         "version_field": "dataVersion",
         "datasets": _dataset_paths(),
@@ -141,6 +144,7 @@ class MasterSourceConfig(BaseModel):
     name: str
     region: Literal["cn", "jp", "tw"]
     family: str = "custom"
+    auto_probe: bool = True
     owner: str = ""
     repo: str = ""
     branch: str = "main"
@@ -162,6 +166,17 @@ class MasterSourceConfig(BaseModel):
         if payload.get("events_path") and not payload.get("datasets"):
             payload["datasets"] = _infer_datasets_from_events_path(payload["events_path"])
         payload.setdefault("family", "custom")
+        family = str(payload.get("family") or "").strip() or "custom"
+        inferred_family = family
+        if inferred_family == "custom":
+            inferred_name = str(payload.get("name") or "").strip().rsplit("-", 1)[0]
+            if inferred_name in DEFAULT_MASTER_SOURCE_FAMILIES:
+                inferred_family = inferred_name
+        if "auto_probe" not in payload or payload.get("auto_probe") is None:
+            payload["auto_probe"] = DEFAULT_MASTER_SOURCE_FAMILIES.get(
+                inferred_family,
+                {},
+            ).get("auto_probe", True)
         payload.setdefault("base_url", "")
         payload.setdefault("datasets", {})
         return payload
@@ -232,6 +247,7 @@ def build_default_master_sources(
                 MasterSourceConfig(
                     name=f"{family_name}-{region}",
                     family=family_name,
+                    auto_probe=bool(family.get("auto_probe", True)),
                     region=region,
                     owner=owner,
                     repo=repo,
@@ -640,7 +656,7 @@ REGISTER_CONFIGS = [
         key="MOESEKAI_MASTER_CHECK_INTERVAL_SECONDS",
         value=REGISTER_DEFAULTS.master_check_interval_seconds,
         default_value=REGISTER_DEFAULTS.master_check_interval_seconds,
-        help="主数据完整轮询周期秒数，会按 source family 自动错峰探测",
+        help="主数据完整探测周期秒数，自动更新仅轮询启用 auto_probe 的数据源",
         type=int,
     ),
     RegisterConfig(
@@ -648,7 +664,7 @@ REGISTER_CONFIGS = [
         key="MOESEKAI_MASTER_CHECK_MODE",
         value=REGISTER_DEFAULTS.master_check_mode,
         default_value=REGISTER_DEFAULTS.master_check_mode,
-        help="主数据检测模式：revision / version / hybrid",
+        help="兼容旧配置的保留项；自动更新现已统一按 version 判定",
         type=str,
     ),
     RegisterConfig(

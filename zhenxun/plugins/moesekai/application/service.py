@@ -1521,6 +1521,8 @@ class MoeSekaiApplication:
         for result in results:
             if not result.updated or not result.download_success or result.error:
                 continue
+            if result.previous_version == result.current_version:
+                continue
             messages.append(
                 "\n".join(
                     [

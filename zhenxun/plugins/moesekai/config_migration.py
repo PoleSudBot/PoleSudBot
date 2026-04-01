@@ -93,6 +93,7 @@ def _source_signature(source: MasterSourceConfig) -> tuple[Any, ...]:
     return (
         source.name,
         source.region,
+        source.auto_probe,
         source.version_url,
         source.version_field,
         dataset_urls,
@@ -140,6 +141,7 @@ def _is_default_source_list(sources: list[MasterSourceConfig]) -> bool:
         and left.owner == right.owner
         and left.repo == right.repo
         and left.branch == right.branch
+        and left.auto_probe == right.auto_probe
         and left.version_path == right.version_path
         and left.datasets == right.datasets
         for left, right in zip(normalized, default_sources, strict=False)

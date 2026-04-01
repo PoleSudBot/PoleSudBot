@@ -21,7 +21,8 @@ from ..constants import (
 )
 from ..storage.state import JsonStateStore
 
-_PROBE_STATE_DEFAULT = {"cursor": 0, "sources": {}}
+_PROBE_STATE_DEFAULT = {"sources": {}}
+_VERSIONLESS_FALLBACK_NOTE = "所有版本接口均失败，已回退到可下载源"
 
 
 @dataclass
@@ -50,6 +51,7 @@ class RegionUpdateResult:
     updated: bool = False
     download_success: bool = False
     error: str | None = None
+    selection_note: str | None = None
     changed_datasets: list[str] = field(default_factory=list)
     source_versions: list[SourceRevisionInfo] = field(default_factory=list)
     added_records: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
@@ -85,12 +87,14 @@ class RegionUpdateResult:
         version_line = (
             f"版本: {self.previous_version or '-'} -> {self.current_version or '-'}"
         )
-        base = (
-            f"{server_label(self.server)} {changed}\n"
-            f"来源: {source_name}\n"
-            f"{revision_line}\n"
-            f"{version_line}"
-        )
+        lines = [
+            f"{server_label(self.server)} {changed}",
+            f"来源: {source_name}",
+        ]
+        if self.selection_note:
+            lines.append(f"说明: {self.selection_note}")
+        lines.extend([revision_line, version_line])
+        base = "\n".join(lines)
         if self.source_versions:
             return f"{base}\n\n{self._source_versions_message()}"
         return base
@@ -102,6 +106,7 @@ class MasterDataProvider:
     _state_store = JsonStateStore(STATE_DIR / "master_state.json")
     _probe_state_store = JsonStateStore(STATE_DIR / "master_probe_state.json")
     _probe_state_lock = asyncio.Lock()
+    _legacy_check_mode_warned = False
 
     @classmethod
     def _server_dir(cls, server: str) -> Path:
@@ -125,18 +130,33 @@ class MasterDataProvider:
     def _normalize_probe_state(cls, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
             return dict(_PROBE_STATE_DEFAULT)
-        cursor = payload.get("cursor", 0)
-        try:
-            normalized_cursor = max(0, int(cursor))
-        except (TypeError, ValueError):
-            normalized_cursor = 0
         sources = payload.get("sources", {})
         if not isinstance(sources, dict):
             sources = {}
         return {
-            "cursor": normalized_cursor,
             "sources": {
-                str(name): value
+                str(name): {
+                    "last_version": (
+                        str(value.get("last_version"))
+                        if value.get("last_version") is not None
+                        else None
+                    ),
+                    "last_revision": (
+                        str(value.get("last_revision"))
+                        if value.get("last_revision") is not None
+                        else None
+                    ),
+                    "last_checked_at": (
+                        str(value.get("last_checked_at"))
+                        if value.get("last_checked_at") is not None
+                        else None
+                    ),
+                    "error": (
+                        str(value.get("error"))
+                        if value.get("error") is not None
+                        else None
+                    ),
+                }
                 for name, value in sources.items()
                 if isinstance(value, dict)
             },
@@ -153,24 +173,6 @@ class MasterDataProvider:
     async def _save_probe_state(cls, payload: dict[str, Any]) -> None:
         async with cls._probe_state_lock:
             cls._probe_state_store.save(cls._normalize_probe_state(payload))
-
-    @classmethod
-    async def _next_probe_family(cls, families: list[str]) -> str | None:
-        if not families:
-            return None
-        async with cls._probe_state_lock:
-            state = cls._normalize_probe_state(
-                cls._probe_state_store.load(_PROBE_STATE_DEFAULT)
-            )
-            cursor = state.get("cursor", 0)
-            try:
-                cursor_value = int(cursor)
-            except (TypeError, ValueError):
-                cursor_value = 0
-            family = families[cursor_value % len(families)]
-            state["cursor"] = (cursor_value + 1) % len(families)
-            cls._probe_state_store.save(state)
-            return family
 
     @classmethod
     async def _get_probe_source_state(cls, source_name: str) -> dict[str, Any]:
@@ -191,13 +193,7 @@ class MasterDataProvider:
             source_state = state["sources"].get(source_name, {})
             if not isinstance(source_state, dict):
                 source_state = {}
-            source_state.update(
-                {
-                    key: value
-                    for key, value in updates.items()
-                    if value is not None
-                }
-            )
+            source_state.update(updates)
             state["sources"][source_name] = source_state
             cls._probe_state_store.save(state)
             return source_state.copy()
@@ -263,7 +259,7 @@ class MasterDataProvider:
         return "rate limit" in text or "secondary rate limit" in text
 
     @classmethod
-    def _build_github_headers(cls, *, etag: str | None = None) -> dict[str, str]:
+    def _build_github_headers(cls) -> dict[str, str]:
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -271,202 +267,195 @@ class MasterDataProvider:
         token = get_settings().github_token
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        if etag:
-            headers["If-None-Match"] = etag
         return headers
 
     @classmethod
-    def _family_order(cls) -> list[str]:
-        settings = get_settings()
-        result: list[str] = []
-        seen: set[str] = set()
-        for family in settings.master_source_order:
-            if family and family not in seen:
-                result.append(family)
-                seen.add(family)
-        for source in settings.master_sources:
-            if source.family and source.family not in seen:
-                result.append(source.family)
-                seen.add(source.family)
-        return result
+    def _warn_legacy_check_mode(cls) -> None:
+        if cls._legacy_check_mode_warned:
+            return
+        mode = getattr(get_settings(), "master_check_mode", "version")
+        if mode in {"revision", "hybrid"}:
+            logger.warning(
+                "MoeSekai 主数据自动更新现已统一按 version 判定，"
+                "MOESEKAI_MASTER_CHECK_MODE 仅保留兼容语义",
+                MODULE_NAME,
+            )
+            cls._legacy_check_mode_warned = True
+
+    @staticmethod
+    def _version_key(version: str) -> tuple[int, ...]:
+        text = str(version or "").strip()
+        if not text:
+            raise ValueError("版本号为空")
+        parts = tuple(int(item) for item in text.split("."))
+        if not parts:
+            raise ValueError("版本号为空")
+        return parts
+
+    @classmethod
+    def _compare_versions(cls, left: str | None, right: str | None) -> int:
+        if left is None and right is None:
+            return 0
+        if left is None:
+            return -1
+        if right is None:
+            return 1
+        left_key = cls._version_key(left)
+        right_key = cls._version_key(right)
+        if left_key == right_key:
+            return 0
+        return 1 if left_key > right_key else -1
+
+    @classmethod
+    def _source_priority(
+        cls,
+        source: MasterSourceConfig,
+        position: int,
+    ) -> int:
+        order = {
+            family: index
+            for index, family in enumerate(get_settings().master_source_order)
+        }
+        family_index = order.get(source.family)
+        if family_index is not None:
+            return family_index
+        return len(order) + position
+
+    @classmethod
+    def _sources_for_server(
+        cls,
+        server: str,
+        *,
+        include_lazy: bool,
+    ) -> list[MasterSourceConfig]:
+        return [
+            item
+            for item in get_settings().master_sources
+            if item.region == server and (include_lazy or item.auto_probe)
+        ]
+
+    @classmethod
+    def _has_all_datasets(cls, source: MasterSourceConfig) -> bool:
+        return all(dataset in source.datasets for dataset in MASTER_DATASET_KEYS)
 
     @classmethod
     def get_probe_interval_seconds(cls) -> float:
-        family_count = max(1, len(cls._family_order()))
-        return max(1.0, get_settings().master_check_interval_seconds / family_count)
+        return float(max(1, get_settings().master_check_interval_seconds))
 
     @classmethod
-    async def _fetch_source_revision(
+    async def _fetch_source_snapshot(
         cls, source: MasterSourceConfig
     ) -> SourceRevisionInfo:
-        previous_probe_state = await cls._get_probe_source_state(source.name)
         checked_at = datetime.now().isoformat(timespec="seconds")
         try:
-            if source.revision_api_url and get_settings().master_check_mode in {
-                "revision",
-                "hybrid",
-            }:
-                async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
-                    response = await client.get(
-                        source.revision_api_url,
-                        headers=cls._build_github_headers(
-                            etag=str(previous_probe_state.get("etag") or "") or None
-                        ),
-                    )
-                if response.status_code == 304:
-                    revision = str(
-                        previous_probe_state.get("last_revision")
-                        or previous_probe_state.get("last_version")
-                        or ""
-                    ) or None
-                    version = (
-                        str(previous_probe_state.get("last_version"))
-                        if previous_probe_state.get("last_version")
-                        else None
-                    )
-                    await cls._update_probe_source_state(
-                        source.name,
-                        etag=response.headers.get("etag")
-                        or previous_probe_state.get("etag"),
-                        last_checked_at=checked_at,
-                    )
-                    return SourceRevisionInfo(
-                        source=source,
-                        revision=revision,
-                        version=version,
-                        success=True,
-                    )
-                if cls._is_rate_limited(response):
-                    logger.warning(
-                        f"MoeSekai GitHub 轮询触发限流，回退版本文件检查: {source.name}",
-                        MODULE_NAME,
-                    )
-                    version = await cls._fetch_version(source)
-                    revision = str(previous_probe_state.get("last_revision") or version)
-                    await cls._update_probe_source_state(
-                        source.name,
-                        etag=response.headers.get("etag")
-                        or previous_probe_state.get("etag"),
-                        last_revision=revision,
-                        last_version=version,
-                        last_checked_at=checked_at,
-                    )
-                    return SourceRevisionInfo(
-                        source=source,
-                        revision=revision,
-                        version=version,
-                        success=True,
-                    )
-                response.raise_for_status()
-                payload = response.json()
-                if isinstance(payload, dict) and payload.get("sha"):
-                    revision = str(payload["sha"])
-                    version = None
-                    if get_settings().master_check_mode == "hybrid":
-                        try:
-                            version = await cls._fetch_version(source)
-                        except Exception:
-                            version = None
-                    await cls._update_probe_source_state(
-                        source.name,
-                        etag=response.headers.get("etag")
-                        or previous_probe_state.get("etag"),
-                        last_revision=revision,
-                        last_version=version
-                        or previous_probe_state.get("last_version"),
-                        last_checked_at=checked_at,
-                    )
-                    return SourceRevisionInfo(
-                        source=source,
-                        revision=revision,
-                        version=version,
-                        success=True,
-                    )
             version = await cls._fetch_version(source)
-            revision = (
-                version
-                if get_settings().master_check_mode == "version"
-                or not previous_probe_state.get("last_revision")
-                else str(previous_probe_state["last_revision"])
-            )
+            cls._version_key(version)
             await cls._update_probe_source_state(
                 source.name,
-                last_revision=revision,
                 last_version=version,
                 last_checked_at=checked_at,
+                error=None,
             )
             return SourceRevisionInfo(
                 source=source,
-                revision=revision,
                 version=version,
                 success=True,
             )
         except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
             logger.warning(
                 f"获取 MoeSekai 主数据源版本失败: {source.name}",
                 MODULE_NAME,
                 e=exc,
             )
+            await cls._update_probe_source_state(
+                source.name,
+                last_checked_at=checked_at,
+                error=error,
+            )
             return SourceRevisionInfo(
                 source=source,
                 success=False,
-                error=f"{type(exc).__name__}: {exc}",
+                error=error,
             )
+
+    @classmethod
+    async def _fetch_selected_revision(cls, source: MasterSourceConfig) -> str | None:
+        previous_probe_state = await cls._get_probe_source_state(source.name)
+        checked_at = datetime.now().isoformat(timespec="seconds")
+        previous_revision = (
+            str(previous_probe_state.get("last_revision"))
+            if previous_probe_state.get("last_revision") is not None
+            else None
+        )
+        if not source.revision_api_url:
+            return previous_revision
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
+                response = await client.get(
+                    source.revision_api_url,
+                    headers=cls._build_github_headers(),
+                )
+            if cls._is_rate_limited(response):
+                logger.warning(
+                    f"MoeSekai GitHub revision 获取触发限流，跳过 revision 刷新: {source.name}",
+                    MODULE_NAME,
+                )
+                return previous_revision
+            response.raise_for_status()
+            payload = response.json()
+            revision = str(payload["sha"]) if isinstance(payload, dict) and payload.get("sha") else None
+            await cls._update_probe_source_state(
+                source.name,
+                last_revision=revision,
+                last_checked_at=checked_at,
+            )
+            return revision
+        except Exception as exc:
+            logger.warning(
+                f"获取 MoeSekai 主数据源 revision 失败: {source.name}",
+                MODULE_NAME,
+                e=exc,
+            )
+            return previous_revision
 
     @classmethod
     async def _select_source(
-        cls, server: str
+        cls,
+        server: str,
+        *,
+        include_lazy: bool,
     ) -> tuple[MasterSourceConfig | None, list[SourceRevisionInfo]]:
-        sources = [item for item in get_settings().master_sources if item.region == server]
+        sources = cls._sources_for_server(server, include_lazy=include_lazy)
         if not sources:
             return None, []
-        results: list[SourceRevisionInfo] = []
-        for source in sources:
-            results.append(await cls._fetch_source_revision(source))
-        for item in results:
-            if not item.success:
+        results = list(await asyncio.gather(*(cls._fetch_source_snapshot(source) for source in sources)))
+        candidates: list[tuple[tuple[int, ...], int, SourceRevisionInfo]] = []
+        for position, item in enumerate(results):
+            if not item.success or not item.version or not cls._has_all_datasets(item.source):
                 continue
-            if all(dataset in item.source.datasets for dataset in MASTER_DATASET_KEYS):
-                return item.source, results
-        return None, results
+            candidates.append(
+                (
+                    cls._version_key(item.version),
+                    cls._source_priority(item.source, position),
+                    item,
+                )
+            )
+        if not candidates:
+            return None, results
+        candidates.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+        selected_info = candidates[0][2]
+        selected_info.revision = await cls._fetch_selected_revision(selected_info.source)
+        return selected_info.source, results
 
     @classmethod
     async def probe_next_updates(cls) -> list[RegionUpdateResult]:
-        families = cls._family_order()
-        family = await cls._next_probe_family(families)
-        if not family:
-            return []
-
-        changed_regions: list[tuple[str, str]] = []
-        for server in SERVERS:
-            source = next(
-                (
-                    item
-                    for item in get_settings().master_sources
-                    if item.region == server and item.family == family
-                ),
-                None,
-            )
-            if not source:
-                continue
-            previous_probe_state = await cls._get_probe_source_state(source.name)
-            info = await cls._fetch_source_revision(source)
-            if not info.success:
-                continue
-            if info.revision != previous_probe_state.get("last_revision") or (
-                info.version is not None
-                and info.version != previous_probe_state.get("last_version")
-            ):
-                changed_regions.append((server, family))
-
-        state = cls._load_state()
         results: list[RegionUpdateResult] = []
-        for server, changed_family in changed_regions:
-            region_state = state.get(server, {})
-            force_refresh = (
-                not region_state or region_state.get("family") == changed_family
-            )
-            results.append(await cls.update_region(server, force=force_refresh))
+        cls._warn_legacy_check_mode()
+        for server in SERVERS:
+            result = await cls.update_region(server, force=False)
+            if result.updated:
+                results.append(result)
         return results
 
     @classmethod
@@ -505,6 +494,7 @@ class MasterDataProvider:
             return RegionUpdateResult(server=server, error="不支持的区服")
 
         async with cls._lock:
+            cls._warn_legacy_check_mode()
             state = cls._load_state()
             region_state = state.get(server, {})
             result = RegionUpdateResult(
@@ -514,9 +504,63 @@ class MasterDataProvider:
                 previous_version=region_state.get("version"),
                 checked_at=datetime.now().isoformat(timespec="seconds"),
             )
-            selected_source, source_versions = await cls._select_source(server)
+            selected_source, source_versions = await cls._select_source(
+                server,
+                include_lazy=force,
+            )
             result.source_versions = source_versions
             if not selected_source:
+                if force:
+                    fallback_sources = [
+                        source
+                        for source in cls._sources_for_server(server, include_lazy=True)
+                        if cls._has_all_datasets(source)
+                    ]
+                    ordered_fallback_sources = sorted(
+                        enumerate(fallback_sources),
+                        key=lambda item: cls._source_priority(item[1], item[0]),
+                    )
+                    for _, source in ordered_fallback_sources:
+                        try:
+                            payloads, fetched_version = await cls._fetch_selected_payloads(source)
+                            result.selected_source_name = source.name
+                            result.current_revision = await cls._fetch_selected_revision(source)
+                            result.current_version = fetched_version
+                            result.selection_note = _VERSIONLESS_FALLBACK_NOTE
+                            for dataset, payload in payloads.items():
+                                if not isinstance(payload, list):
+                                    raise TypeError(f"{dataset}.json 格式无效")
+                                old_payload = cls._load_dataset_from_disk(server, dataset)
+                                added_records = cls._diff_added_records(old_payload, payload)
+                                if added_records:
+                                    result.added_records[dataset] = added_records
+                                    result.changed_datasets.append(dataset)
+                                cls._dataset_path(server, dataset).write_text(
+                                    json.dumps(payload, ensure_ascii=False),
+                                    encoding="utf-8",
+                                )
+
+                            cls._clear_region_cache(server)
+                            state[server] = {
+                                "source_name": source.name,
+                                "family": source.family,
+                                "revision": result.current_revision,
+                                "version": result.current_version,
+                                "checked_at": result.checked_at,
+                                "updated_at": result.checked_at,
+                                "datasets": list(MASTER_DATASET_KEYS),
+                            }
+                            cls._save_state(state)
+                            result.updated = True
+                            result.download_success = True
+                            return result
+                        except Exception as exc:
+                            logger.warning(
+                                f"MoeSekai 手动回退源下载失败: {source.name}",
+                                MODULE_NAME,
+                                e=exc,
+                            )
+                            continue
                 result.error = "没有可用的主数据源"
                 return result
 
@@ -527,8 +571,11 @@ class MasterDataProvider:
             result.current_revision = selected_info.revision
             result.current_version = selected_info.version
 
-            needs_update = force or region_state.get("source_name") != selected_source.name
-            if result.previous_revision != result.current_revision:
+            needs_update = force or not region_state
+            if result.current_version and cls._compare_versions(
+                result.current_version,
+                result.previous_version,
+            ) > 0:
                 needs_update = True
             if any(
                 not cls._dataset_path(server, dataset).exists()
