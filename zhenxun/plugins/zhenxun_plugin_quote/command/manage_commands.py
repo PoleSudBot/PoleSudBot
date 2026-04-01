@@ -1,6 +1,7 @@
 import os
 from typing import Optional, Literal, Union
 from nonebot.permission import SUPERUSER
+from nonebot.rule import Rule
 from arclet.alconna import Alconna, Args, Arparma, MultiVar, Option, Subcommand
 from nonebot.adapters.onebot.v11 import (
     Bot,
@@ -106,62 +107,103 @@ async def is_reply_to_bot(event: Event) -> bool:
     )
 
 
-delete_quote_cmd = on_alconna(Alconna("删除"), aliases={"del"}, priority=11, block=True)
+def reply_to_bot_rule() -> Rule:
+    """仅在回复机器人消息时匹配命令"""
+
+    async def _rule(bot: Bot, event: Event, session: Uninfo):
+        return await is_reply_to_bot(event)
+
+    return Rule(_rule)
+
+
+async def _handle_delete_reply_quote(bot: Bot, event: MessageEvent, session: Uninfo):
+    """处理回复语录图片后的删除逻辑"""
+    group_id = session.group.id
+    user_id = session.user.id
+
+    if not await uploader_or_admin_check(bot, event, session):
+        await delete_quote_reply_cmd.finish()
+
+    if not (image_seg := await _get_image_from_reply(event, bot)):
+        logger.debug("回复的消息中未找到图片，无法执行删除操作。", "群聊语录")
+        return
+
+    if not image_seg.id:
+        logger.warning("无法获取到回复图片的唯一标识，删除失败。", "群聊语录")
+        return
+
+    image_basename = os.path.basename(image_seg.id)
+    is_deleted = await QuoteService.delete_quote(group_id, image_basename)
+
+    if is_deleted:
+        await MessageUtils.build_message(
+            [At(target=user_id, flag="user"), " 删除成功"]
+        ).send()
+        return
+
+    logger.info(
+        f"尝试删除语录失败，图片 '{image_basename}' 不在群组 {group_id} 的语录库中。",
+        "群聊语录",
+    )
+
+
+async def _handle_delete_last_quote(bot: Bot, event: MessageEvent, session: Uninfo):
+    """处理直接删除本群上一条语录的逻辑"""
+    group_id = session.group.id
+    user_id = session.user.id
+
+    if not await admin_check("quote", "DELETE_ADMIN_LEVEL")(bot, event, session):
+        await delete_quote_cmd.finish()
+
+    quote = await QuoteService.get_last_quote(group_id)
+    if not quote:
+        await MessageUtils.build_message("本群语录库为空").send()
+        return
+
+    image_basename = os.path.basename(quote.image_path)
+    is_deleted = await QuoteService.delete_quote(group_id, image_basename)
+
+    if is_deleted:
+        await MessageUtils.build_message(
+            [At(target=user_id, flag="user"), " 成功删除本群上一条语录"]
+        ).send()
+        return
+
+    await MessageUtils.build_message("删除失败，可能语录已被手动删除").send()
+
+
+delete_quote_reply_cmd = on_alconna(
+    Alconna("删除"), priority=11, block=True, rule=reply_to_bot_rule()
+)
+delete_quote_cmd = on_alconna(Alconna("删除语录"), aliases={"del"}, priority=11, block=True)
+
+
+@delete_quote_reply_cmd.handle()
+async def handle_delete_quote_reply(
+    bot: Bot, event: MessageEvent, session: Uninfo
+):
+    """处理回复语录图片后发送“删除”的情况"""
+    if not session.group:
+        logger.debug("删除命令在非群聊环境中使用，已忽略。", "群聊语录")
+        return
+
+    await _handle_delete_reply_quote(bot, event, session)
 
 
 @delete_quote_cmd.handle()
 async def handle_delete_quote_standalone(
     bot: Bot, event: MessageEvent, session: Uninfo
 ):
-    """独立的删除语录处理函数"""
+    """处理“删除语录”/“del”命令"""
     if not session.group:
         logger.debug("删除命令在非群聊环境中使用，已忽略。", "群聊语录")
         return
 
-    group_id = session.group.id
-    user_id = session.user.id
+    if await is_reply_to_bot(event):
+        await _handle_delete_reply_quote(bot, event, session)
+        return
 
-    is_reply = await is_reply_to_bot(event)
-
-    if is_reply:
-        if not await uploader_or_admin_check(bot, event, session):
-            await delete_quote_cmd.finish()
-
-        if not (image_seg := await _get_image_from_reply(event, bot)):
-            logger.debug("回复的消息中未找到图片，无法执行删除操作。", "群聊语录")
-            return
-
-        if not image_seg.id:
-            logger.warning("无法获取到回复图片的唯一标识，删除失败。", "群聊语录")
-            return
-
-        image_basename = os.path.basename(image_seg.id)
-        is_deleted = await QuoteService.delete_quote(group_id, image_basename)
-    else:
-        if not await admin_check("quote", "DELETE_ADMIN_LEVEL")(bot, event, session):
-            await delete_quote_cmd.finish()
-
-        quote = await QuoteService.get_last_quote(group_id)
-        if not quote:
-            await MessageUtils.build_message("本群语录库为空").send()
-            return
-
-        image_basename = os.path.basename(quote.image_path)
-        is_deleted = await QuoteService.delete_quote(group_id, image_basename)
-
-    if is_deleted:
-        msg = "成功删除本群上一条语录" if not is_reply else "删除成功"
-        await MessageUtils.build_message(
-            [At(target=user_id, flag="user"), f" {msg}"]
-        ).send()
-    else:
-        if is_reply:
-            logger.info(
-                f"尝试删除语录失败，图片 '{image_basename}' 不在群组 {group_id} 的语录库中。",
-                "群聊语录",
-            )
-        else:
-            await MessageUtils.build_message("删除失败，可能语录已被手动删除").send()
+    await _handle_delete_last_quote(bot, event, session)
 
 
 quote_manage_cmd = on_alconna(
