@@ -1,21 +1,16 @@
-import datetime
 import json
-from pathlib import Path
 import random
+import datetime
 import time
+from functools import wraps
+import httpx
+from pathlib import Path
 from typing import Optional
 
-import httpx
-from nonebot import get_driver, on_command, require
-from nonebot.adapters.onebot.v11 import (
-    Bot,
-    Event,
-    GroupMessageEvent,
-    Message,
-    MessageSegment,
-)
-from nonebot.log import logger
+from nonebot import on_command, require, get_driver, get_bot
+from nonebot.adapters.onebot.v11 import Event, MessageSegment, Message, GroupMessageEvent, Bot
 from nonebot.params import CommandArg
+from nonebot.log import logger
 from nonebot.plugin import PluginMetadata
 
 # 确保依赖插件先被 NoneBot 注册（必须在本地模块 import 之前）
@@ -27,33 +22,33 @@ from nonebot_plugin_htmlrender import template_to_pic
 
 # 本地模块（在 require() 之后 import）
 from .config import Config
-from .data_manager import data_manager
 from .roast_manager import roast_manager
+from .runtime import is_daily_summary_enabled, is_group_rollpig_enabled, resolve_roast_cooldown_seconds
+from .store import store
+from .store.cloud import CloudStoreError
+from .store.models import RoastEvent
+from .summary_service import build_daily_summary
 from .texts import (
-    BACKFIRE_FOOD_TEXTS,
-    BACKFIRE_GENERIC_TEXTS,
-    BACKFIRE_HUMAN_TEXTS,
-    BACKFIRE_NO_PIG_TEXTS,
-    ESCAPE_TEXTS,
-    FOOD_PIG_IDS,
-    FORCE_ROAST_KEYWORDS,
-    FORCE_ROAST_LIMIT_TEXTS,
-    FORCE_ROAST_PREFIX_TEXTS,
-    HUMAN_PIG_ID,
-    ROAST_BOT_TEXTS,
-    SUPER_FORCE_ROAST_KEYWORD,
-    SUPER_FORCE_ROAST_PREFIX_TEXTS,
-    TARGET_FOOD_BLOCK_TEXTS,
-    TARGET_HUMAN_BLOCK_TEXTS,
-    TODAY_ROAST_FOOD_BLOCK_TEXTS,
-    TODAY_ROAST_HUMAN_BLOCK_TEXTS,
     TOMORROW_TEXTS,
+    FOOD_PIG_IDS, HUMAN_PIG_ID,
+    FORCE_ROAST_KEYWORDS, SUPER_FORCE_ROAST_KEYWORD,
+    TODAY_ROAST_HUMAN_BLOCK_TEXTS, TODAY_ROAST_FOOD_BLOCK_TEXTS,
+    TARGET_HUMAN_BLOCK_TEXTS, TARGET_FOOD_BLOCK_TEXTS,
+    BACKFIRE_HUMAN_TEXTS, BACKFIRE_FOOD_TEXTS,
+    BACKFIRE_NO_PIG_TEXTS, BACKFIRE_GENERIC_TEXTS,
+    ESCAPE_TEXTS,
+    SUPER_FORCE_ROAST_PREFIX_TEXTS, FORCE_ROAST_PREFIX_TEXTS,
+    FORCE_ROAST_LIMIT_TEXTS,
+    ROAST_BOT_TEXTS,
+    AUTO_ROLL_ROAST_TEXTS,
+    DAILY_SUMMARY_EMPTY_TEXTS, DAILY_SUMMARY_HEADER, DAILY_SUMMARY_FOOTER,
+    PROTECTION_BLOCK_TEXTS, PROTECTION_BREAK_TEXTS,
+    RANDOM_ROAST_INTRO_TEXTS,
 )
 
 # --- 引入 PIL ---
 try:
     from PIL import Image as PILImage
-
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
@@ -85,6 +80,10 @@ __plugin_meta__ = PluginMetadata(
     homepage="https://github.com/Felis2026/nonebot-plugin-rollpig",
     supported_adapters={"~onebot.v11"},
     config=Config,
+    extra={
+        "author": "Felis2026",
+        "version": "0.5.0",
+    },
 )
 
 # ================= 资源路径 =================
@@ -101,7 +100,6 @@ pighub_last_loaded: float = 0.0
 
 # ================= 资源加载 =================
 
-
 def load_resource_json(path, default):
     if not path.exists():
         return default
@@ -116,7 +114,6 @@ PIG_LIST = load_resource_json(PIGINFO_PATH, [])
 
 # ================= 工具函数 =================
 
-
 def find_image_file(pig_id: str) -> Path | None:
     exts = ["png", "jpg", "jpeg", "webp", "gif"]
     for ext in exts:
@@ -126,7 +123,7 @@ def find_image_file(pig_id: str) -> Path | None:
     return None
 
 
-def get_pig_by_id(pig_id: str | None) -> dict | None:
+def get_pig_by_id(pig_id: Optional[str]) -> Optional[dict]:
     if not pig_id:
         return None
     for p in PIG_LIST:
@@ -135,11 +132,11 @@ def get_pig_by_id(pig_id: str | None) -> dict | None:
     return None
 
 
-def is_food_pig(pig_data: dict | None) -> bool:
+def is_food_pig(pig_data: Optional[dict]) -> bool:
     return bool(pig_data and pig_data.get("id") in FOOD_PIG_IDS)
 
 
-def is_human_pig(pig_data: dict | None) -> bool:
+def is_human_pig(pig_data: Optional[dict]) -> bool:
     return bool(pig_data and pig_data.get("id") == HUMAN_PIG_ID)
 
 
@@ -150,7 +147,7 @@ def is_superuser_user(user_id: str) -> bool:
     return any(s.endswith(f":{user_id}") for s in superusers)
 
 
-def detect_force_roast_mode(raw_text: str, user_id: str) -> str | None:
+def detect_force_roast_mode(raw_text: str, user_id: str) -> Optional[str]:
     normalized = raw_text.replace("/", "").replace(" ", "").replace("　", "")
     has_super_cmd = SUPER_FORCE_ROAST_KEYWORD in normalized
     has_force_cmd = any(k in normalized for k in FORCE_ROAST_KEYWORDS)
@@ -162,9 +159,7 @@ def detect_force_roast_mode(raw_text: str, user_id: str) -> str | None:
     return None
 
 
-def pick_backfire_text(
-    attacker_name: str, target_name: str, attacker_pig: dict | None
-) -> str:
+def pick_backfire_text(attacker_name: str, target_name: str, attacker_pig: Optional[dict]) -> str:
     if not attacker_pig:
         pool = BACKFIRE_NO_PIG_TEXTS
         shape = "未抽形态"
@@ -178,18 +173,12 @@ def pick_backfire_text(
         pool = BACKFIRE_GENERIC_TEXTS
         shape = attacker_pig.get("name", "未知形态")
 
-    return random.choice(pool).format(
-        attacker=attacker_name, target=target_name, shape=shape
-    )
+    return random.choice(pool).format(attacker=attacker_name, target=target_name, shape=shape)
 
 
-def pick_escape_text(
-    attacker_name: str, target_name: str, target_pig: dict | None
-) -> str:
+def pick_escape_text(attacker_name: str, target_name: str, target_pig: Optional[dict]) -> str:
     shape = target_pig.get("name", "未知形态") if target_pig else "未知形态"
-    return random.choice(ESCAPE_TEXTS).format(
-        attacker=attacker_name, target=target_name, shape=shape
-    )
+    return random.choice(ESCAPE_TEXTS).format(attacker=attacker_name, target=target_name, shape=shape)
 
 
 def pick_force_prefix_text(target_name: str, is_super_mode: bool) -> str:
@@ -198,9 +187,96 @@ def pick_force_prefix_text(target_name: str, is_super_mode: bool) -> str:
 
 
 def pick_force_limit_text(operator_name: str, target_name: str) -> str:
-    return random.choice(FORCE_ROAST_LIMIT_TEXTS).format(
-        operator=operator_name, target=target_name
-    )
+    return random.choice(FORCE_ROAST_LIMIT_TEXTS).format(operator=operator_name, target=target_name)
+
+
+def get_event_group_id(event: Event) -> str:
+    return str(event.group_id) if isinstance(event, GroupMessageEvent) else ""
+
+
+def get_event_user_name(event: Event) -> str:
+    sender = getattr(event, "sender", None)
+    if sender:
+        return getattr(sender, "card", "") or getattr(sender, "nickname", "") or str(getattr(event, "user_id", ""))
+    return str(getattr(event, "user_id", ""))
+
+
+async def get_group_roll_candidates(bot: Bot, group_id: int, exclude_ids: set[str]) -> list[str]:
+    """优先按当前群成员范围筛候选；接口异常时回退到群内已登记过的今日形态。"""
+    today = datetime.date.today().isoformat()
+    today_rolls = await store.get_daily_rolls(today)
+
+    try:
+        members = await bot.call_api("get_group_member_list", group_id=group_id)
+        member_ids = {
+            str(member.get("user_id"))
+            for member in members
+            if member.get("user_id") is not None
+        }
+        return [uid for uid in today_rolls if uid in member_ids and uid not in exclude_ids]
+    except Exception as e:
+        logger.debug(f"获取群成员列表失败: group={group_id} error={e}")
+        group_rolls = await store.get_group_rolls(str(group_id), today)
+        return [uid for uid in group_rolls if uid not in exclude_ids]
+
+
+def format_cooldown_message(remaining_seconds: int) -> str:
+    remaining = max(0, int(remaining_seconds))
+    minutes, seconds = divmod(remaining, 60)
+    hours, minutes = divmod(minutes, 60)
+    time_str = f"{hours}小时{minutes}分" if hours > 0 else f"{minutes}分{seconds}秒"
+    return f"技能冷却中！还需要休息 {time_str} 才能再次烧烤。"
+
+
+# ================================ 群开关守卫 ================================ #
+# 这里统一拦截群聊中的 rollpig 指令入口。
+# 一旦宿主项目（如 nekobot_v2）给 runtime 挂上了外部群开关检查器，
+# 未启用的群将直接静默跳过；没有接控制台时则默认放行。
+def guard_group_enabled(matcher):
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            event = kwargs.get("event")
+            if event is None:
+                for arg in args:
+                    if isinstance(arg, Event):
+                        event = arg
+                        break
+
+            group_id = get_event_group_id(event) if isinstance(event, Event) else ""
+            if group_id and not is_group_rollpig_enabled(group_id):
+                logger.debug(f"rollpig 群功能未启用，跳过处理: group={group_id}")
+                await matcher.finish()
+
+            return await func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+def guard_store_errors(matcher, message: str = "猪圈云账本暂时离线，请稍后再试。"):
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            event = kwargs.get("event")
+            if event is None:
+                for arg in args:
+                    if isinstance(arg, Event):
+                        event = arg
+                        break
+
+            try:
+                return await func(*args, **kwargs)
+            except CloudStoreError as error:
+                logger.warning(f"rollpig cloud store unavailable: {error}")
+                if event is not None:
+                    await matcher.finish(MessageSegment.reply(event.message_id) + message)
+                await matcher.finish(message)
+
+        return wrapper
+
+    return decorator
 
 
 async def ensure_pighub_images_loaded() -> bool:
@@ -224,11 +300,7 @@ async def ensure_pighub_images_loaded() -> bool:
         if not isinstance(data, dict) or not isinstance(data.get("images"), list):
             raise ValueError("PigHub 返回结构异常，缺少 images 列表")
 
-        valid = [
-            item
-            for item in data["images"]
-            if isinstance(item, dict) and item.get("thumbnail")
-        ]
+        valid = [item for item in data["images"] if isinstance(item, dict) and item.get("thumbnail")]
         if not valid:
             raise ValueError("PigHub 返回空图集")
 
@@ -239,23 +311,19 @@ async def ensure_pighub_images_loaded() -> bool:
     except Exception as e:
         if pighub_images:
             # 刷新失败但有旧缓存：继续使用，不打挂功能
-            logger.warning(
-                f"PigHub 刷新失败，继续使用旧缓存（{len(pighub_images)} 张）: {e}"
-            )
+            logger.warning(f"PigHub 刷新失败，继续使用旧缓存（{len(pighub_images)} 张）: {e}")
             return True
         logger.warning(f"PigHub 连接失败: {e}")
         return False
 
 
-def build_pighub_image_url(pig_item: dict) -> str | None:
+def build_pighub_image_url(pig_item: dict) -> Optional[str]:
     thumbnail = pig_item.get("thumbnail")
     if not isinstance(thumbnail, str) or not thumbnail:
         return None
     return PIGHUB_IMAGE_BASE_URL + thumbnail.split("/")[-1]
 
-
 # ================= 辅助渲染函数 =================
-
 
 async def send_rendered_pig(
     matcher, event, pig_data: dict, extra_text: str = "", is_new: bool = False
@@ -266,7 +334,6 @@ async def send_rendered_pig(
     name = pig_data.get("name", "未知小猪")
     desc = pig_data.get("description", "")
     analysis = pig_data.get("analysis", "你今天是只神秘小猪。")
-
     new_icon_file = IMAGE_DIR / "new.png"
     new_icon_uri = new_icon_file.as_uri() if new_icon_file.exists() else ""
 
@@ -295,17 +362,18 @@ async def send_rendered_pig(
     msg += MessageSegment.image(pic)
     await matcher.finish(msg)
 
-
 # ================= 指令处理区域 =================
 
 # 1. 今日小猪
 cmd_today = on_command("今天是什么小猪", aliases={"今日小猪"}, block=True)
 
-
 @cmd_today.handle()
+@guard_group_enabled(cmd_today)
+@guard_store_errors(cmd_today)
 async def _(event: Event):
     user_id = str(event.user_id)
-    pig_id = data_manager.get_today_pig(user_id)
+    group_id = get_event_group_id(event)
+    pig_id = await store.get_daily_roll(user_id)
     pig = get_pig_by_id(pig_id)
     is_new = False
 
@@ -313,10 +381,17 @@ async def _(event: Event):
         if not PIG_LIST:
             await cmd_today.finish("猪圈塌房了（数据缺失）")
             return
-        pig = random.choice(PIG_LIST)
-        is_new = await data_manager.set_today_pig(user_id, pig["id"])
-        if random.randint(1, 20) == 1:
-            await data_manager.clean_old_history()
+        proposed_pig = random.choice(PIG_LIST)
+        unlocked_before = set(await store.get_user_collection(user_id))
+        resolved_pig_id, created = await store.get_or_create_daily_roll(
+            user_id,
+            proposed_pig["id"],
+            group_id=group_id,
+        )
+        is_new = created and resolved_pig_id not in unlocked_before
+        pig = get_pig_by_id(resolved_pig_id) or proposed_pig
+    elif group_id:
+        await store.mark_group_roll_seen(user_id, pig["id"], group_id)
 
     await send_rendered_pig(cmd_today, event, pig, is_new=is_new)
 
@@ -324,8 +399,8 @@ async def _(event: Event):
 # 2. 随机小猪
 cmd_roll = on_command("随机小猪", block=True)
 
-
 @cmd_roll.handle()
+@guard_group_enabled(cmd_roll)
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     if not await ensure_pighub_images_loaded():
         await cmd_roll.finish("连不上 PigHub...")
@@ -345,9 +420,7 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
         return
 
     if count == 1:
-        await cmd_roll.finish(
-            MessageSegment.reply(event.message_id) + MessageSegment.image(image_url)
-        )
+        await cmd_roll.finish(MessageSegment.reply(event.message_id) + MessageSegment.image(image_url))
         return
 
     # 私聊不支持合并转发，降级为单张
@@ -368,17 +441,14 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
         url = build_pighub_image_url(pig)
         if not url:
             continue
-        messages.append(
-            {
-                "type": "node",
-                "data": {
-                    "name": "随机小猪Bot",
-                    "uin": event.self_id,
-                    "content": Message(pig.get("title", "随机小猪"))
-                    + MessageSegment.image(url),
-                },
-            }
-        )
+        messages.append({
+            "type": "node",
+            "data": {
+                "name": "随机小猪Bot",
+                "uin": event.self_id,
+                "content": Message(pig.get("title", "随机小猪")) + MessageSegment.image(url),
+            },
+        })
 
     if not messages:
         await cmd_roll.finish("PigHub 图片数据异常，请稍后再试。")
@@ -390,8 +460,8 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
 # 2.5 找猪
 cmd_find = on_command("找猪", aliases={"搜猪"}, block=True)
 
-
 @cmd_find.handle()
+@guard_group_enabled(cmd_find)
 async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     if not await ensure_pighub_images_loaded():
         await cmd_find.finish("连不上 PigHub，请稍后再试。")
@@ -402,9 +472,7 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
         await cmd_find.finish("请加上关键词，如：/找猪 玩偶")
         return
 
-    found_pigs = [
-        pig for pig in pighub_images if keyword.lower() in pig.get("title", "").lower()
-    ]
+    found_pigs = [pig for pig in pighub_images if keyword.lower() in pig.get("title", "").lower()]
     if not found_pigs:
         await cmd_find.finish(f"没找到叫「{keyword}」的猪。")
         return
@@ -417,17 +485,14 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
             image_url = build_pighub_image_url(pig)
             if not image_url:
                 continue
-            messages.append(
-                {
-                    "type": "node",
-                    "data": {
-                        "name": "搜猪小助手",
-                        "uin": event.self_id,
-                        "content": Message(pig.get("title", "未命名小猪"))
-                        + MessageSegment.image(image_url),
-                    },
-                }
-            )
+            messages.append({
+                "type": "node",
+                "data": {
+                    "name": "搜猪小助手",
+                    "uin": event.self_id,
+                    "content": Message(pig.get("title", "未命名小猪")) + MessageSegment.image(image_url),
+                },
+            })
         if not messages:
             await cmd_find.finish("搜索结果数据异常，请稍后再试。")
             return
@@ -450,23 +515,22 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
 # 3. 明日小猪
 cmd_tmr = on_command("明日小猪", block=True)
 
-
 @cmd_tmr.handle()
+@guard_group_enabled(cmd_tmr)
 async def _(event: Event):
-    await cmd_tmr.finish(
-        MessageSegment.reply(event.message_id) + random.choice(TOMORROW_TEXTS)
-    )
+    await cmd_tmr.finish(MessageSegment.reply(event.message_id) + random.choice(TOMORROW_TEXTS))
 
 
 # 4. 昨日小猪
 cmd_yest = on_command("昨日小猪", block=True)
 
-
 @cmd_yest.handle()
+@guard_group_enabled(cmd_yest)
+@guard_store_errors(cmd_yest)
 async def _(event: Event):
     user_id = str(event.user_id)
     yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
-    pig = get_pig_by_id(data_manager.get_pig_by_date(user_id, yesterday))
+    pig = get_pig_by_id(await store.get_pig_by_date(user_id, yesterday))
 
     if not pig:
         await cmd_yest.finish(MessageSegment.reply(event.message_id) + "你昨天没抽猪。")
@@ -477,17 +541,30 @@ async def _(event: Event):
 # 5. 今日烤猪
 cmd_roast = on_command("今日烤猪", block=True)
 
-
 @cmd_roast.handle()
+@guard_group_enabled(cmd_roast)
+@guard_store_errors(cmd_roast)
 async def _(event: Event):
     user_id = str(event.user_id)
-    original_pig = get_pig_by_id(data_manager.get_today_pig(user_id))
+    group_id = get_event_group_id(event)
+    attacker_name = get_event_user_name(event)
+    original_pig = get_pig_by_id(await store.get_daily_roll(user_id))
 
+    auto_roll_hint = ""
     if not original_pig:
-        await cmd_roast.finish(
-            MessageSegment.reply(event.message_id) + "你连猪都不是，怎么烤？"
+        if not PIG_LIST:
+            await cmd_roast.finish(MessageSegment.reply(event.message_id) + "猪圈埋房了（数据缺失）")
+            return
+        proposed_pig = random.choice(PIG_LIST)
+        resolved_pig_id, _ = await store.get_or_create_daily_roll(
+            user_id,
+            proposed_pig["id"],
+            group_id=group_id,
         )
-        return
+        original_pig = get_pig_by_id(resolved_pig_id) or proposed_pig
+        auto_roll_hint = random.choice(AUTO_ROLL_ROAST_TEXTS).format(name=original_pig["name"]) + "\n"
+    elif group_id:
+        await store.mark_group_roll_seen(user_id, original_pig["id"], group_id)
 
     if is_human_pig(original_pig):
         await cmd_roast.finish(
@@ -499,9 +576,7 @@ async def _(event: Event):
     if is_food_pig(original_pig):
         await cmd_roast.finish(
             MessageSegment.reply(event.message_id)
-            + random.choice(TODAY_ROAST_FOOD_BLOCK_TEXTS).format(
-                shape=original_pig.get("name", "熟食")
-            )
+            + random.choice(TODAY_ROAST_FOOD_BLOCK_TEXTS).format(shape=original_pig.get("name", "熟食"))
         )
         return
 
@@ -515,23 +590,40 @@ async def _(event: Event):
     roasted_pig_data = food_pig_template.copy()
     roasted_pig_data["analysis"] = roast_text
 
-    await send_rendered_pig(cmd_roast, event, roasted_pig_data)
+    if group_id:
+        await store.append_roast_event(
+            RoastEvent(
+                event_type="self_roast",
+                attacker_id=user_id,
+                target_id=user_id,
+                attacker_name=attacker_name,
+                target_name=attacker_name,
+                food=food_pig_template["name"],
+                group_id=group_id,
+            )
+        )
+    await send_rendered_pig(cmd_roast, event, roasted_pig_data, extra_text=auto_roll_hint)
 
 
 # 5.5 烤群友
 cmd_roast_member = on_command("烤群友", block=True)
 
-
 @cmd_roast_member.handle()
+@guard_group_enabled(cmd_roast_member)
+@guard_store_errors(cmd_roast_member)
 async def _(bot: Bot, event: GroupMessageEvent):
     attacker_id = str(event.user_id)
     attacker_name = event.sender.card or event.sender.nickname
+    group_id = str(event.group_id)
     force_mode = detect_force_roast_mode(event.get_plaintext(), attacker_id)
+    attacker_pig = get_pig_by_id(await store.get_daily_roll(attacker_id))
+
+    if attacker_pig:
+        await store.mark_group_roll_seen(attacker_id, attacker_pig["id"], group_id)
 
     if force_mode == "super_denied":
         await cmd_roast_member.finish(
-            MessageSegment.reply(event.message_id)
-            + "口令【强行点火】仅 superuser 可用。"
+            MessageSegment.reply(event.message_id) + "口令【强行点火】仅 superuser 可用。"
         )
         return
 
@@ -549,17 +641,17 @@ async def _(bot: Bot, event: GroupMessageEvent):
                 target_name = "对方"
                 break
 
+    # @Bot 时框架会把 at 消费掉，补充判断
+    if not target_id and event.to_me:
+        target_id = str(event.self_id)
+
     # 尝试获取更准确的 target_name
     if target_id:
         try:
-            member_info = await bot.get_group_member_info(
-                group_id=event.group_id, user_id=int(target_id)
-            )
+            member_info = await bot.get_group_member_info(group_id=event.group_id, user_id=int(target_id))
             target_name = member_info.get("card") or member_info.get("nickname")
         except Exception as e:
-            logger.debug(
-                f"获取群成员信息失败: group={event.group_id} user={target_id} error={e}"
-            )
+            logger.debug(f"获取群成员信息失败: group={event.group_id} user={target_id} error={e}")
 
     if not target_id:
         await cmd_roast_member.finish("请 At 或回复你要烤的群友！")
@@ -574,23 +666,40 @@ async def _(bot: Bot, event: GroupMessageEvent):
         food_id = random.choice(FOOD_PIG_IDS)
         food_pig = get_pig_by_id(food_id)
         food_name = food_pig["name"] if food_pig else "美食"
-        bot_text = random.choice(ROAST_BOT_TEXTS).format(
-            attacker=attacker_name, food=food_name
-        )
-        logger.info(
-            f"[烤群友→Bot] 特殊反噬 | 凶手={attacker_name}({attacker_id}) 变成={food_name}"
+        bot_text = random.choice(ROAST_BOT_TEXTS).format(attacker=attacker_name, food=food_name)
+        logger.info(f"[烤群友→Bot] 特殊反噬 | 凶手={attacker_name}({attacker_id}) 变成={food_name}")
+        await store.append_roast_event(
+            RoastEvent(
+                event_type="bot_backfire",
+                attacker_id=attacker_id,
+                target_id=target_id,
+                attacker_name=attacker_name,
+                target_name=target_name,
+                food=food_name,
+                group_id=group_id,
+            )
         )
         await cmd_roast_member.finish(MessageSegment.reply(event.message_id) + bot_text)
         return
-
     # 读取目标形态（后门模式也不绕过此检查）
-    target_pig = get_pig_by_id(data_manager.get_today_pig(target_id))
+    target_pig = get_pig_by_id(await store.get_daily_roll(target_id))
     if not target_pig:
         await cmd_roast_member.finish(
-            MessageSegment.reply(event.message_id)
-            + f"【{target_name}】今天还没抽猪，没法下嘴！"
+            MessageSegment.reply(event.message_id) + f"【{target_name}】今天还没抽猪，没法下嘴！"
         )
         return
+    await store.mark_group_roll_seen(target_id, target_pig["id"], group_id)
+
+    # 保护检查：被烤最多的用户次日受保护（后门可突破）
+    if await store.is_protected(group_id, target_id):
+        if force_mode in {"normal", "super"}:
+            break_text = random.choice(PROTECTION_BREAK_TEXTS).format(target=target_name)
+            logger.info(f"[烤群友] 保护被突破 | 凶手={attacker_name}({attacker_id}) 目标={target_name}({target_id})")
+            await cmd_roast_member.send(MessageSegment.reply(event.message_id) + break_text)
+        else:
+            prot_text = random.choice(PROTECTION_BLOCK_TEXTS).format(target=target_name)
+            await cmd_roast_member.finish(MessageSegment.reply(event.message_id) + prot_text)
+            return
 
     if is_human_pig(target_pig):
         await cmd_roast_member.finish(
@@ -610,21 +719,20 @@ async def _(bot: Bot, event: GroupMessageEvent):
 
     # 模式化限制/计数
     if force_mode == "normal":
-        if not data_manager.check_force_roast_usage(attacker_id):
+        if not await store.consume_force_usage(attacker_id):
             reject_text = pick_force_limit_text(attacker_name, target_name)
-            await cmd_roast_member.finish(
-                MessageSegment.reply(event.message_id) + reject_text
-            )
+            await cmd_roast_member.finish(MessageSegment.reply(event.message_id) + reject_text)
             return
-        await data_manager.update_force_roast_usage(attacker_id)
     elif force_mode is None:
-        is_available, tip_msg = data_manager.check_roast_usage(attacker_id)
-        if not is_available:
+        cooldown_result = await store.consume_roast_cooldown(
+            attacker_id,
+            cooldown_seconds=resolve_roast_cooldown_seconds(),
+        )
+        if not cooldown_result.allowed:
             await cmd_roast_member.finish(
-                MessageSegment.reply(event.message_id) + tip_msg
+                MessageSegment.reply(event.message_id) + format_cooldown_message(cooldown_result.remaining_seconds)
             )
             return
-        await data_manager.update_roast_usage(attacker_id)
     # super 模式：无限制，不消耗后门次数，不走 CD
 
     # --- 后门模式：必定成功 ---
@@ -636,24 +744,29 @@ async def _(bot: Bot, event: GroupMessageEvent):
             return
 
         text = await roast_manager.get_roast_text(
-            target_pig,
-            food_pig_template,
-            operator_name=attacker_name,
-            target_name=target_name,
+            target_pig, food_pig_template,
+            operator_name=attacker_name, target_name=target_name,
         )
-        prefix_text = pick_force_prefix_text(
-            target_name, is_super_mode=(force_mode == "super")
-        )
+        prefix_text = pick_force_prefix_text(target_name, is_super_mode=(force_mode == "super"))
 
         logger.info(
             f"[烤群友] 后门成功 | 凶手={attacker_name}({attacker_id}) "
             f"目标={target_name}({target_id}) 模式={force_mode} 结果={food_pig_template['name']}"
         )
+        await store.append_roast_event(
+            RoastEvent(
+                event_type="success",
+                attacker_id=attacker_id,
+                target_id=target_id,
+                attacker_name=attacker_name,
+                target_name=target_name,
+                food=food_pig_template["name"],
+                group_id=str(event.group_id),
+            )
+        )
         roasted_data = food_pig_template.copy()
         roasted_data["analysis"] = text
-        await send_rendered_pig(
-            cmd_roast_member, event, roasted_data, extra_text=prefix_text
-        )
+        await send_rendered_pig(cmd_roast_member, event, roasted_data, extra_text=prefix_text)
         return
 
     # --- 普通模式概率判定 ---
@@ -668,14 +781,23 @@ async def _(bot: Bot, event: GroupMessageEvent):
             return
 
         text = await roast_manager.get_roast_text(
-            target_pig,
-            food_pig_template,
-            operator_name=attacker_name,
-            target_name=target_name,
+            target_pig, food_pig_template,
+            operator_name=attacker_name, target_name=target_name,
         )
         logger.info(
             f"[烤群友] 成功 | 凶手={attacker_name}({attacker_id}) "
             f"目标={target_name}({target_id}) 结果={food_pig_template['name']}"
+        )
+        await store.append_roast_event(
+            RoastEvent(
+                event_type="success",
+                attacker_id=attacker_id,
+                target_id=target_id,
+                attacker_name=attacker_name,
+                target_name=target_name,
+                food=food_pig_template["name"],
+                group_id=str(event.group_id),
+            )
         )
         roasted_data = food_pig_template.copy()
         roasted_data["analysis"] = text
@@ -687,36 +809,45 @@ async def _(bot: Bot, event: GroupMessageEvent):
         logger.info(
             f"[烤群友] 逃脱 | 凶手={attacker_name}({attacker_id}) 目标={target_name}({target_id})"
         )
-        await cmd_roast_member.finish(
-            MessageSegment.reply(event.message_id) + escape_text
+        await store.append_roast_event(
+            RoastEvent(
+                event_type="escape",
+                attacker_id=attacker_id,
+                target_id=target_id,
+                attacker_name=attacker_name,
+                target_name=target_name,
+                group_id=str(event.group_id),
+            )
         )
+        await cmd_roast_member.finish(MessageSegment.reply(event.message_id) + escape_text)
 
     # === 反噬 (10%) ===
     else:
-        attacker_pig = get_pig_by_id(data_manager.get_today_pig(attacker_id))
-
-        if (
-            attacker_pig
-            and (not is_food_pig(attacker_pig))
-            and (not is_human_pig(attacker_pig))
-        ):
+        if attacker_pig and (not is_food_pig(attacker_pig)) and (not is_human_pig(attacker_pig)):
             food_id = random.choice(FOOD_PIG_IDS)
             food_pig_template = get_pig_by_id(food_id)
             if not food_pig_template:
-                await cmd_roast_member.finish(
-                    "食材配置缺失，请联系管理员修复 pig.json。"
-                )
+                await cmd_roast_member.finish("食材配置缺失，请联系管理员修复 pig.json。")
                 return
 
             text = await roast_manager.get_roast_text(attacker_pig, food_pig_template)
-            fail_text = (
-                f"偷鸡不成蚀把米！【{attacker_name}】抓猪失败，反倒把自己摔进了火坑！\n\n"
-                + text
-            )
+            fail_intro = pick_backfire_text(attacker_name, target_name, attacker_pig)
+            fail_text = fail_intro + "\n\n" + text
 
             logger.info(
                 f"[烤群友] 反噬 | 凶手={attacker_name}({attacker_id}) "
                 f"目标={target_name}({target_id}) 凶手变成={food_pig_template['name']}"
+            )
+            await store.append_roast_event(
+                RoastEvent(
+                    event_type="backfire",
+                    attacker_id=attacker_id,
+                    target_id=target_id,
+                    attacker_name=attacker_name,
+                    target_name=target_name,
+                    food=food_pig_template["name"],
+                    group_id=group_id,
+                )
             )
             roasted_data = food_pig_template.copy()
             roasted_data["analysis"] = fail_text
@@ -727,32 +858,216 @@ async def _(bot: Bot, event: GroupMessageEvent):
                 f"[烤群友] 反噬(文字) | 凶手={attacker_name}({attacker_id}) "
                 f"目标={target_name}({target_id})"
             )
-            await cmd_roast_member.finish(
-                MessageSegment.reply(event.message_id) + fail_text
+            await store.append_roast_event(
+                RoastEvent(
+                    event_type="backfire",
+                    attacker_id=attacker_id,
+                    target_id=target_id,
+                    attacker_name=attacker_name,
+                    target_name=target_name,
+                    group_id=group_id,
+                )
             )
+            await cmd_roast_member.finish(MessageSegment.reply(event.message_id) + fail_text)
+
+
+# 5.6 随机烤群友
+cmd_random_roast = on_command("随机烤群友", aliases={"随机烤猪", "抽个群友烤了"}, block=True)
+
+@cmd_random_roast.handle()
+@guard_group_enabled(cmd_random_roast)
+@guard_store_errors(cmd_random_roast)
+async def _(bot: Bot, event: GroupMessageEvent):
+    attacker_id = str(event.user_id)
+    attacker_name = event.sender.card or event.sender.nickname
+    group_id = str(event.group_id)
+    attacker_pig = get_pig_by_id(await store.get_daily_roll(attacker_id))
+
+    if attacker_pig:
+        await store.mark_group_roll_seen(attacker_id, attacker_pig["id"], group_id)
+
+    bot_id = str(event.self_id)
+    candidates = await get_group_roll_candidates(bot, event.group_id, {attacker_id, bot_id})
+
+    if not candidates:
+        await cmd_random_roast.finish(
+            MessageSegment.reply(event.message_id) + "今天还没有别人抽猪，没有可以烤的目标！"
+        )
+        return
+
+    target_id = random.choice(candidates)
+
+    # 获取目标昵称
+    target_name = "群友"
+    try:
+        member_info = await bot.get_group_member_info(group_id=event.group_id, user_id=int(target_id))
+        target_name = member_info.get("card") or member_info.get("nickname") or "群友"
+    except Exception:
+        pass
+
+    # 检查攻击者 CD
+    cooldown_result = await store.consume_roast_cooldown(
+        attacker_id,
+        cooldown_seconds=resolve_roast_cooldown_seconds(),
+    )
+    if not cooldown_result.allowed:
+        await cmd_random_roast.finish(
+            MessageSegment.reply(event.message_id) + format_cooldown_message(cooldown_result.remaining_seconds)
+        )
+        return
+
+    # 读取目标形态
+    target_pig = get_pig_by_id(await store.get_daily_roll(target_id))
+    if not target_pig:
+        await cmd_random_roast.finish(
+            MessageSegment.reply(event.message_id) + f"系统随机选中了【{target_name}】，但对方的猪数据异常。"
+        )
+        return
+    await store.mark_group_roll_seen(target_id, target_pig["id"], group_id)
+
+    # 保护检查
+    if await store.is_protected(group_id, target_id):
+        prot_text = random.choice(PROTECTION_BLOCK_TEXTS).format(target=target_name)
+        await cmd_random_roast.finish(
+            MessageSegment.reply(event.message_id)
+            + f"系统随机选中了【{target_name}】——\n{prot_text}"
+        )
+        return
+
+    # 目标是人类/熟食形态 → 拦截
+    if is_human_pig(target_pig):
+        await cmd_random_roast.finish(
+            MessageSegment.reply(event.message_id)
+            + f"系统随机选中了【{target_name}】，但对方是人类形态，烤架拒绝处理。换一次试试？"
+        )
+        return
+
+    if is_food_pig(target_pig):
+        await cmd_random_roast.finish(
+            MessageSegment.reply(event.message_id)
+            + f"系统随机选中了【{target_name}】，但对方已经是【{target_pig.get('name', '熟食')}】了，别鞭尸了。"
+        )
+        return
+
+    # 正常概率判定
+    intro = random.choice(RANDOM_ROAST_INTRO_TEXTS).format(target=target_name) + "\n\n"
+    roll = random.randint(1, 100)
+
+    # 成功 (60%)
+    if roll <= 60:
+        food_id = random.choice(FOOD_PIG_IDS)
+        food_pig_template = get_pig_by_id(food_id)
+        if not food_pig_template:
+            await cmd_random_roast.finish("食材配置缺失，请联系管理员修复 pig.json。")
+            return
+
+        text = await roast_manager.get_roast_text(
+            target_pig, food_pig_template,
+            operator_name=attacker_name, target_name=target_name,
+        )
+        logger.info(
+            f"[随机烤群友] 成功 | 凶手={attacker_name}({attacker_id}) "
+            f"目标={target_name}({target_id}) 结果={food_pig_template['name']}"
+        )
+        await store.append_roast_event(
+            RoastEvent(
+                event_type="success",
+                attacker_id=attacker_id,
+                target_id=target_id,
+                attacker_name=attacker_name,
+                target_name=target_name,
+                food=food_pig_template["name"],
+                group_id=str(event.group_id),
+            )
+        )
+        roasted_data = food_pig_template.copy()
+        roasted_data["analysis"] = text
+        await send_rendered_pig(cmd_random_roast, event, roasted_data, extra_text=intro)
+
+    # 逃脱 (30%)
+    elif roll <= 90:
+        escape_text = pick_escape_text(attacker_name, target_name, target_pig)
+        logger.info(
+            f"[随机烤群友] 逃脱 | 凶手={attacker_name}({attacker_id}) 目标={target_name}({target_id})"
+        )
+        await store.append_roast_event(
+            RoastEvent(
+                event_type="escape",
+                attacker_id=attacker_id,
+                target_id=target_id,
+                attacker_name=attacker_name,
+                target_name=target_name,
+                group_id=str(event.group_id),
+            )
+        )
+        await cmd_random_roast.finish(MessageSegment.reply(event.message_id) + intro + escape_text)
+
+    # 反噬 (10%)
+    else:
+        if attacker_pig and (not is_food_pig(attacker_pig)) and (not is_human_pig(attacker_pig)):
+            food_id = random.choice(FOOD_PIG_IDS)
+            food_pig_template = get_pig_by_id(food_id)
+            if not food_pig_template:
+                await cmd_random_roast.finish("食材配置缺失。")
+                return
+            text = await roast_manager.get_roast_text(attacker_pig, food_pig_template)
+            fail_intro = pick_backfire_text(attacker_name, target_name, attacker_pig)
+            fail_text = fail_intro + "\n\n" + text
+            logger.info(
+                f"[随机烤群友] 反噬 | 凶手={attacker_name}({attacker_id}) "
+                f"目标={target_name}({target_id}) 凶手变成={food_pig_template['name']}"
+            )
+            await store.append_roast_event(
+                RoastEvent(
+                    event_type="backfire",
+                    attacker_id=attacker_id,
+                    target_id=target_id,
+                    attacker_name=attacker_name,
+                    target_name=target_name,
+                    food=food_pig_template["name"],
+                    group_id=group_id,
+                )
+            )
+            roasted_data = food_pig_template.copy()
+            roasted_data["analysis"] = fail_text
+            await send_rendered_pig(cmd_random_roast, event, roasted_data, extra_text=intro)
+        else:
+            fail_text = pick_backfire_text(attacker_name, target_name, attacker_pig)
+            logger.info(
+                f"[随机烤群友] 反噬(文字) | 凶手={attacker_name}({attacker_id}) "
+                f"目标={target_name}({target_id})"
+            )
+            await store.append_roast_event(
+                RoastEvent(
+                    event_type="backfire",
+                    attacker_id=attacker_id,
+                    target_id=target_id,
+                    attacker_name=attacker_name,
+                    target_name=target_name,
+                    group_id=group_id,
+                )
+            )
+            await cmd_random_roast.finish(MessageSegment.reply(event.message_id) + intro + fail_text)
 
 
 # 6. 我的猪圈
 cmd_sty = on_command("我的猪圈", aliases={"我的小猪"}, block=True)
 
-
 @cmd_sty.handle()
+@guard_group_enabled(cmd_sty)
+@guard_store_errors(cmd_sty)
 async def _(event: Event):
     user_id = str(event.user_id)
-    collection = data_manager.get_user_collection(user_id)
+    collection = await store.get_user_collection(user_id)
     total_pigs = len(PIG_LIST)
     user_count = len(collection)
 
     if total_pigs <= 0:
-        await cmd_sty.finish(
-            MessageSegment.reply(event.message_id) + "猪图鉴为空，请先检查资源文件。"
-        )
+        await cmd_sty.finish(MessageSegment.reply(event.message_id) + "猪图鉴为空，请先检查资源文件。")
         return
 
     if user_count == 0:
-        await cmd_sty.finish(
-            MessageSegment.reply(event.message_id) + "你的猪圈空空如也！"
-        )
+        await cmd_sty.finish(MessageSegment.reply(event.message_id) + "你的猪圈空空如也！")
         return
 
     percent = int((user_count / total_pigs) * 100)
@@ -770,8 +1085,9 @@ async def _(event: Event):
 # 7. 本周小猪
 cmd_week = on_command("本周小猪", block=True)
 
-
 @cmd_week.handle()
+@guard_group_enabled(cmd_week)
+@guard_store_errors(cmd_week)
 async def _(event: Event):
     if not HAS_PIL:
         await cmd_week.finish("Bot 未安装 PIL 库。")
@@ -782,16 +1098,14 @@ async def _(event: Event):
     images_to_merge = []
     for i in range(7):
         d = today - datetime.timedelta(days=(6 - i))
-        pig = get_pig_by_id(data_manager.get_pig_by_date(user_id, d.isoformat()))
+        pig = get_pig_by_id(await store.get_pig_by_date(user_id, d.isoformat()))
         if pig:
             img_file = find_image_file(pig["id"])
             if img_file:
                 images_to_merge.append(img_file)
 
     if not images_to_merge:
-        await cmd_week.finish(
-            MessageSegment.reply(event.message_id) + "你这周还没抽过猪呢！"
-        )
+        await cmd_week.finish(MessageSegment.reply(event.message_id) + "你这周还没抽过猪呢！")
         return
 
     try:
@@ -809,7 +1123,6 @@ async def _(event: Event):
                 canvas.paste(img, (x, y), img)
 
         from io import BytesIO
-
         output = BytesIO()
         canvas.save(output, format="PNG")
 
@@ -824,3 +1137,127 @@ async def _(event: Event):
         return
 
     await cmd_week.finish(msg)
+
+
+# ================= 定时任务：每日总结 =================
+
+require("nonebot_plugin_apscheduler")
+from nonebot_plugin_apscheduler import scheduler
+
+
+def build_daily_summary_text(summary: dict) -> str:
+    """将按群聚合后的日报结果拼成文案。"""
+    roll_count = summary.get("roll_count", 0)
+    roast_total = summary.get("total", 0)
+
+    # 完全无活动
+    if roll_count == 0 and roast_total == 0:
+        return random.choice(DAILY_SUMMARY_EMPTY_TEXTS)
+
+    lines = [DAILY_SUMMARY_HEADER]
+
+    # 抽猪统计
+    if roll_count > 0:
+        top_pig_id = summary.get("top_pig_id")
+        if top_pig_id:
+            pig_data = get_pig_by_id(top_pig_id)
+            pig_name = pig_data["name"] if pig_data else top_pig_id
+            lines.append(f"\U0001f451 最热门形态：【{pig_name}】（共 {summary.get('top_pig_count', 0)} 人抽到）")
+        human_count = summary.get("human_count", 0)
+        if human_count > 0:
+            lines.append(f"\U0001f9cd 今日人类：{human_count} 位幸运儿逃过了猪化")
+        lines.append("")
+
+    # 烧烤统计
+    if roast_total > 0:
+        lines.append(f"\U0001f525 今日共发生 {roast_total} 场烧烤事件")
+
+        if summary.get("most_active_id"):
+            lines.append(f"\U0001f3c6 烧烤狂人：【{summary['most_active_name']}】（发起 {summary['most_active_count']} 次）")
+
+        if summary.get("most_roasted_id"):
+            lines.append(f"\U0001f356 最惨食材：【{summary['most_roasted_name']}】（被烤 {summary['most_roasted_count']} 次）")
+
+        if summary.get("escape_king_id") and summary["escape_king_count"] > 0:
+            lines.append(f"\U0001f3c3 逃脱大师：【{summary['escape_king_name']}】（成功逃脱 {summary['escape_king_count']} 次）")
+
+        if summary.get("backfire_king_id") and summary["backfire_king_count"] > 0:
+            lines.append(f"\U0001f4a5 反噬之王：【{summary['backfire_king_name']}】（自爆 {summary['backfire_king_count']} 次）")
+
+        # 保护提示
+        if summary.get("most_roasted_id") and summary["most_roasted_count"] >= 2:
+            lines.append(f"\n\U0001f6e1\ufe0f 【{summary['most_roasted_name']}】明天将获得猪圈保护协议，免受一切烧烤！")
+    else:
+        lines.append("\U0001f54a 今天无人烧烤，猪们度过了平静的一天。")
+
+    lines.append("\n" + DAILY_SUMMARY_FOOTER)
+    return "\n".join(lines)
+
+
+@scheduler.scheduled_job("cron", hour=23, minute=45, id="rollpig_daily_summary")
+async def daily_summary_job():
+    """每晚 23:45~23:55 推送当日猪圈日报（随机延迟 0~10 分钟防风控）。"""
+    import asyncio
+    delay = random.randint(0, 600)  # 0~10 分钟随机延迟
+    logger.info(f"[每日总结] 定时触发，随机延迟 {delay} 秒后推送")
+    await asyncio.sleep(delay)
+    try:
+        active_groups = await store.get_active_group_ids()
+        if not active_groups:
+            logger.info("[每日总结] 今日无活跃群，跳过推送")
+            return
+
+        # ================================ 控制台开关过滤 ================================ #
+        # 如果宿主项目接入了 admin_console 群开关，这里必须在定时任务层同步收口：
+        # 未启用的群既不推日报，也不写次日保护名单，保证“关闭就是彻底关闭”。
+        enabled_active_groups = [
+            group_id for group_id in sorted(active_groups)
+            if is_group_rollpig_enabled(group_id)
+        ]
+        if not enabled_active_groups:
+            logger.info("[每日总结] 今日没有启用 rollpig 的活跃群，跳过推送")
+            return
+
+        group_summaries = {}
+        protect_date = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+        for group_id in enabled_active_groups:
+            summary = await build_daily_summary(store, group_id=group_id)
+            group_summaries[group_id] = summary
+            if summary.get("most_roasted_id") and summary.get("most_roasted_count", 0) >= 2:
+                await store.replace_group_protections(group_id, [summary["most_roasted_id"]], protect_date)
+            else:
+                await store.replace_group_protections(group_id, [], protect_date)
+
+        # 清理旧事件
+        await store.prune_events(days_to_keep=7)
+        await store.prune_history(days_to_keep=14)
+
+        try:
+            bot = get_bot()
+        except ValueError:
+            logger.warning("[每日总结] 无可用 Bot，跳过推送")
+            return
+
+        # ================================ 日报推送开关过滤 ================================ #
+        # “日报推送”是独立于 rollpig 主功能的第二层开关：
+        # 群内玩法可以开启，但日报消息可以单独关闭。
+        summary_push_groups = [
+            group_id for group_id in enabled_active_groups
+            if is_daily_summary_enabled(group_id)
+        ]
+        if not summary_push_groups:
+            logger.info("[每日总结] 已完成保护名单刷新，但没有群开启日报推送")
+            return
+
+        for group_id in summary_push_groups:
+            try:
+                text = build_daily_summary_text(group_summaries[group_id])
+                await bot.send_group_msg(group_id=int(group_id), message=text)
+            except Exception as e:
+                logger.warning(f"[每日总结] 推送失败: group={group_id} error={e}")
+
+        logger.info(f"[每日总结] 推送完成, 共 {len(summary_push_groups)} 个群")
+    except CloudStoreError as e:
+        logger.warning(f"[每日总结] 云端账本暂时不可用，跳过本轮推送: {e}")
+    except Exception as e:
+        logger.error(f"[每日总结] 任务异常: {e}")
