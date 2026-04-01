@@ -34,6 +34,11 @@ class ManagerSettings(BaseModel):
     max_workers: int = Field(default=8, gt=0)
     command_timeout: int = Field(default=1200, gt=0)
     dev_branch: str = "dev"
+    project_branch: str = "dev"
+    resources_branch: str = "dev"
+    plugin_branch: str | None = None
+    resources_repo: str = "https://github.com/PoleSudBot/resources.git"
+    prod_sync_extras: list[str] = Field(default_factory=list)
     default_scope: str = "all"
 
 
@@ -46,13 +51,26 @@ def load_settings() -> ManagerSettings:
     """Loads settings from 'manage.toml' at the project root."""
     config_file = PROJECT_ROOT / "manage.toml"
     if not config_file.exists():
-        return ManagerSettings()  # Return defaults if file not found
+        settings = ManagerSettings()
+        settings.plugin_branch = settings.dev_branch
+        return settings
     try:
         config_data = tomlkit.parse(config_file.read_text("utf-8"))
-        return ManagerSettings.model_validate(config_data.get("manager", {}))
+        manager_data = config_data.get("manager", {})
+        settings = ManagerSettings.model_validate(manager_data)
+        if settings.plugin_branch is None:
+            settings.plugin_branch = settings.dev_branch
+            if "dev_branch" in manager_data and "plugin_branch" not in manager_data:
+                logger.warning(
+                    "⚠️ `manage.toml` 中的 `dev_branch` 已作为兼容配置读取。"
+                    "建议迁移到 `plugin_branch`。"
+                )
+        return settings
     except (ValidationError, Exception) as e:
         logger.error(f"❌ Failed to parse 'manage.toml': {e}\nUsing defaults.")
-        return ManagerSettings()
+        settings = ManagerSettings()
+        settings.plugin_branch = settings.dev_branch
+        return settings
 
 
 # --- Exported Constants ---
@@ -72,4 +90,9 @@ YOUR_GITHUB_ORG = settings.github_org
 MAX_WORKERS = settings.max_workers
 COMMAND_TIMEOUT = settings.command_timeout
 DEV_BRANCH = settings.dev_branch
+PROJECT_BRANCH = settings.project_branch
+RESOURCES_BRANCH = settings.resources_branch
+PLUGIN_BRANCH = settings.plugin_branch or settings.dev_branch
+RESOURCES_REPO = settings.resources_repo
+PROD_SYNC_EXTRAS = tuple(settings.prod_sync_extras)
 DEFAULT_SCOPE = settings.default_scope

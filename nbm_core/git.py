@@ -86,3 +86,31 @@ def is_workspace_dirty(cwd: Path) -> bool:
     # An empty output means the workspace is clean.
     status_output = git(["status", "--porcelain"], cwd=cwd, quiet=True)
     return bool(status_output)
+
+
+def has_tracked_changes(cwd: Path) -> bool:
+    """Checks if tracked files have uncommitted changes, ignoring untracked files."""
+    status_output = git(["status", "--porcelain", "-uno"], cwd=cwd, quiet=True)
+    return bool(status_output)
+
+
+def get_head_commit(cwd: Path) -> str:
+    """Returns the current HEAD commit hash for the repository."""
+    return git(["rev-parse", "HEAD"], cwd=cwd, quiet=True)
+
+
+def local_branch_exists(cwd: Path, branch: str) -> bool:
+    """Checks whether a local branch exists."""
+    return bool(git(["rev-parse", "--verify", branch], cwd=cwd, check=False, quiet=True))
+
+
+def remote_branch_exists(cwd: Path, remote: str, branch: str) -> bool:
+    """Checks whether a remote branch exists."""
+    return bool(
+        git(
+            ["ls-remote", "--heads", remote, f"refs/heads/{branch}"],
+            cwd=cwd,
+            check=False,
+            quiet=True,
+        )
+    )

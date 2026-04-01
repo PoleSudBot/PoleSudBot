@@ -5,6 +5,7 @@
 
 import os
 from pathlib import Path
+import re
 import shutil
 from typing import ClassVar, Literal
 import zipfile
@@ -21,6 +22,27 @@ from zhenxun.utils.repo_utils.models import RepoUpdateResult
 from zhenxun.utils.repo_utils.utils import check_git
 
 LOG_COMMAND = "ZhenxunRepoManager"
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _read_manage_setting(key: str, default: str) -> str:
+    manage_toml = PROJECT_ROOT / "manage.toml"
+    if not manage_toml.exists():
+        return default
+    try:
+        content = manage_toml.read_text("utf-8")
+    except OSError:
+        return default
+
+    match = re.search(rf'^{re.escape(key)}\s*=\s*["\']([^"\']+)["\']', content, re.M)
+    return match.group(1) if match else default
+
+
+def _build_github_tree_url(repo_url: str, branch: str) -> str:
+    match = re.search(r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?$", repo_url)
+    if not match:
+        return f"{repo_url.rstrip('/')}/tree/{branch}"
+    return f"https://github.com/{match.group(1)}/tree/{branch}"
 
 
 class ZhenxunUpdateException(Exception):
@@ -74,8 +96,11 @@ class ZhenxunRepoConfig:
     WEBUI_BACKUP_PATH = DATA_PATH / "web_ui" / "backup_public"
 
     # 资源管理相关配置
-    RESOURCE_GIT = "https://github.com/PoleSudBot/resources.git"
-    RESOURCE_GITHUB_URL = "https://github.com/PoleSudBot/resources/tree/main"
+    RESOURCE_BRANCH = _read_manage_setting("resources_branch", "main")
+    RESOURCE_GIT = _read_manage_setting(
+        "resources_repo", "https://github.com/PoleSudBot/resources.git"
+    )
+    RESOURCE_GITHUB_URL = _build_github_tree_url(RESOURCE_GIT, RESOURCE_BRANCH)
     RESOURCE_ZIP_FILE_STRING = "resources.zip"
     RESOURCE_ZIP_FILE = TEMP_PATH / RESOURCE_ZIP_FILE_STRING
     RESOURCE_UNZIP_PATH = TEMP_PATH / "resources"
@@ -397,7 +422,10 @@ class ZhenxunRepoManagerClass:
         await self.resources_unzip()
 
     async def resources_git_update(
-        self, source: Literal["git", "ali"], branch: str = "main", force: bool = False
+        self,
+        source: Literal["git", "ali"],
+        branch: str | None = None,
+        force: bool = False,
     ) -> RepoUpdateResult:
         """使用git或阿里云更新资源文件
 
@@ -406,18 +434,19 @@ class ZhenxunRepoManagerClass:
             branch: 分支名称
             force: 是否强制更新
         """
+        target_branch = branch or self.config.RESOURCE_BRANCH
         # 用户已使用私人资源仓库，阿里云镜像不再适用，强制使用 git 更新
         return await GithubRepoManager.update_via_git(
             self.config.RESOURCE_GIT,
             self.config.RESOURCE_PATH,
-            branch=branch,
+            branch=target_branch,
             force=force,
         )
 
     async def resources_update(
         self,
         source: Literal["git", "ali"] = "ali",
-        branch: str = "main",
+        branch: str | None = None,
         force: bool = False,
     ):
         """更新资源文件
@@ -427,6 +456,7 @@ class ZhenxunRepoManagerClass:
             branch: 分支名称
             force: 是否强制更新
         """
+        target_branch = branch or self.config.RESOURCE_BRANCH
         critical_dir = self.config.RESOURCE_PATH / "themes" / "default"
         if not critical_dir.exists() or not any(critical_dir.iterdir()):
             logger.warning(
@@ -436,7 +466,7 @@ class ZhenxunRepoManagerClass:
             force = True
 
         if await check_git():
-            await self.resources_git_update(source, branch, force)
+            await self.resources_git_update(source, target_branch, force)
             logger.debug("使用git更新资源文件!", LOG_COMMAND)
         else:
             await self.resources_zip_update()

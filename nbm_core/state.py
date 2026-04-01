@@ -8,41 +8,37 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-import portalocker
-
 from .config import logger
 
 
 class StateManager:
-    """Atomically reads and writes JSON state files using file locks."""
+    """Atomically reads and writes JSON state files."""
 
     def __init__(self, path: Path):
         self.path = path
+        self._thread_lock = threading.Lock()
 
     def read(self) -> dict:
-        """Reads the state file with a shared lock."""
+        """Reads the state file."""
         if not self.path.exists():
             return {}
         try:
-            with portalocker.Lock(str(self.path), "r", timeout=5) as f:
+            with self._thread_lock, self.path.open("r", encoding="utf-8") as f:
                 return json.load(f) if self.path.stat().st_size > 0 else {}
-        except (
-            portalocker.exceptions.LockException,
-            OSError,
-            json.JSONDecodeError,
-        ) as e:
+        except (OSError, json.JSONDecodeError) as e:
             logger.error(f"❌ Failed to read state file '{self.path}': {e}")
             return {}
 
     def write(self, state: dict) -> None:
-        """Writes to the state file atomically using a temporary file."""
+        """Writes to the state file atomically."""
         temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
         try:
-            with temp_path.open("w", encoding="utf-8") as f:
-                json.dump(state, f, indent=2, ensure_ascii=False)
-            with portalocker.Lock(str(self.path), "w", timeout=5):
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self._thread_lock:
+                with temp_path.open("w", encoding="utf-8") as f:
+                    json.dump(state, f, indent=2, ensure_ascii=False)
                 temp_path.replace(self.path)
-        except (portalocker.exceptions.LockException, OSError) as e:
+        except OSError as e:
             logger.error(f"❌ Failed to write state file '{self.path}': {e}")
         finally:
             temp_path.unlink(missing_ok=True)

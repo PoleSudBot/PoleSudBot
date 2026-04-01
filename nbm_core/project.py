@@ -20,14 +20,29 @@ MANAGE_TOML_TEMPLATE = """# nbm (NoneBot Manager) 配置文件
 # [必填] 你的 GitHub组织/用户名，用于存放所有插件的 Fork
 github_org = "my-bot-workspace"
 
+# [可选] update 命令更新主仓库时使用的分支
+project_branch = "dev"
+
+# [可选] resources 仓库使用的分支
+resources_branch = "dev"
+
+# [可选] 你希望在插件 Fork 中使用的主要开发分支名
+plugin_branch = "dev"
+
+# [兼容旧配置] 未设置 plugin_branch 时将回退到 dev_branch
+dev_branch = "dev"
+
+# [可选] resources 仓库地址
+resources_repo = "https://github.com/PoleSudBot/resources.git"
+
 # [可选] 存放插件源码的本地目录名
 plugins_src_dir = "plugins"
 
 # [可选] 记录插件仓库地址列表的文件名
 plugins_list_file = "plugins.txt"
 
-# [可选] 你希望在插件 Fork 中使用的主要开发分支名
-dev_branch = "dev"
+# [可选] 生产部署时额外安装的 extras 列表
+prod_sync_extras = []
 
 # [可选] 并发执行任务时使用的最大线程数
 max_workers = 8
@@ -105,23 +120,23 @@ def setup_plugin_repo(
         config.PLUGINS_SRC_DIR.mkdir(parents=True, exist_ok=True)
         process.git(["clone", clone_url, str(local_path)], config.PROJECT_ROOT)
         process.git(["remote", "add", "upstream", url], local_path, check=False)
-        config.logger.info(f"  - Setting up '{config.DEV_BRANCH}' branch...")
+        config.logger.info(f"  - Setting up '{config.PLUGIN_BRANCH}' branch...")
         remote_dev_exists = process.git(
-            ["ls-remote", "--heads", "origin", f"refs/heads/{config.DEV_BRANCH}"],
+            ["ls-remote", "--heads", "origin", f"refs/heads/{config.PLUGIN_BRANCH}"],
             local_path,
             check=False,
             quiet=True,
         )
         if remote_dev_exists:
-            process.git(["checkout", config.DEV_BRANCH], local_path)
+            process.git(["checkout", config.PLUGIN_BRANCH], local_path)
         else:
             main_branch = git.get_default_branch(repo_name)
             process.git(["fetch", "upstream", main_branch], local_path, quiet=True)
             process.git(
-                ["checkout", "-b", config.DEV_BRANCH, f"upstream/{main_branch}"],
+                ["checkout", "-b", config.PLUGIN_BRANCH, f"upstream/{main_branch}"],
                 local_path,
             )
-            process.git(["push", "-u", "origin", config.DEV_BRANCH], local_path)
+            process.git(["push", "-u", "origin", config.PLUGIN_BRANCH], local_path)
         return "success", local_path
     except CommandError as e:
         config.logger.error(f"  - 💥 Failed to set up {plugin_name}: {e}")

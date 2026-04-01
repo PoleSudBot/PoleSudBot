@@ -12,11 +12,17 @@ git clone https://github.com/PoleSudBot/Bot.git PoleSudBot
 cd PoleSudBot
 
 pip install uv
-python nbm.py prod-setup
+uv run --no-project nbm.py prod-setup
 uv run bot.py
 ```
 
-`prod-setup` 会按 [plugins.txt](./plugins.txt) 拉取当前使用的插件源码，并依据现有 `uv.lock` / `pyproject.toml` 同步依赖环境。
+`prod-setup` 会按 [plugins.txt](./plugins.txt) 拉取当前使用的插件源码，并以 `pyproject.toml` 为主完成依赖同步；当检测到插件提交、`manage.toml` 或 `pyproject.toml` 变化时，会自动重建 `uv.lock`。
+
+如需一键更新主仓库、resources 和插件源码，可执行：
+
+```bash
+uv run --no-project nbm.py update
+```
 
 ## 简单配置
 
@@ -56,4 +62,4 @@ uv run bot.py
 ## 说明
 
 - 当前插件列表由 `plugins.txt` 管理。
-- 常规部署推荐使用 `python nbm.py prod-setup`。
+- 常规部署推荐使用 `uv run --no-project nbm.py prod-setup`。

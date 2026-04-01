@@ -5,14 +5,26 @@
 # [必填] 你的 GitHub组织/用户名，用于存放所有插件的 Fork
 github_org = "PoleSudBot"
 
+# [可选] update 命令更新主仓库时使用的分支
+project_branch = "dev"
+
+# [可选] resources 仓库使用的分支
+resources_branch = "dev"
+
+# [可选] 你希望在插件 Fork 中使用的主要开发分支名
+plugin_branch = "L7dev"
+
+# [可选] resources 仓库地址
+resources_repo = "https://github.com/PoleSudBot/resources.git"
+
 # [可选] 存放插件源码的本地目录名
 plugins_src_dir = "plugins"
 
 # [可选] 记录插件仓库地址列表的文件名
 plugins_list_file = "plugins.txt"
 
-# [可选] 你希望在插件 Fork 中使用的主要开发分支名
-dev_branch = "L7dev"
+# [可选] 生产部署时额外安装的 extras 列表
+prod_sync_extras = []
 
 # [可选] 并发执行任务时使用的最大线程数
 max_workers = 8

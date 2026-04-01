@@ -124,8 +124,7 @@ async def _(
                 source_str = None
             result += await UpdateManager.update_resources(
                 source_str,  # type: ignore
-                "main",
-                force.result,
+                force=force.result,
             )
         except Exception as e:
             logger.error("资源更新下载失败...", "检查更新", session=session, e=e)

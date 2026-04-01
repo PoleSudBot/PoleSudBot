@@ -165,7 +165,7 @@ class UpdateManager:
     async def update_resources(
         cls,
         source: Literal["git", "ali"] | None,
-        branch: str = "main",
+        branch: str | None = None,
         force: bool = False,
     ) -> str:
         """更新资源
@@ -178,12 +178,13 @@ class UpdateManager:
         返回:
             str: 返回消息
         """
+        target_branch = branch or ZhenxunRepoConfig.RESOURCE_BRANCH
         if not source:
             await ZhenxunRepoManager.resources_zip_update()
             return "真寻资源更新完成!"
         result = await ZhenxunRepoManager.resources_git_update(
             source,
-            branch=branch,
+            branch=target_branch,
             force=force,
         )
         if not result.success:

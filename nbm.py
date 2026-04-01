@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-# nbm.py - v1.1 (Refactored & Patched)
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "pydantic>=2,<3",
+#   "tomlkit>=0.13,<1",
+#   "tqdm>=4.67,<5",
+# ]
+# ///
 """
 A professional-grade management script for fork-based NoneBot2 projects.
 Powered by uv and a modular, robust core library.
@@ -7,7 +14,9 @@ Powered by uv and a modular, robust core library.
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 import hashlib
+import json
 import logging
 from pathlib import Path
 import shutil
@@ -16,15 +25,28 @@ import sys
 import time
 from typing import Any
 
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
 
-# --- Core Library Imports ---
-from nbm_core import config, git, process, project
-from nbm_core.exceptions import CommandError
+    from nbm_core import config, git, process, project
+    from nbm_core.exceptions import CommandError
+    from nbm_core.state import StateManager
+except ModuleNotFoundError as exc:
+    missing = exc.name or "unknown dependency"
+    print(f"❌ 缺少运行 nbm 所需依赖：{missing}", file=sys.stderr)
+    print(
+        "👉 请改用 `uv run --no-project nbm.py <command>` 运行该脚本。",
+        file=sys.stderr,
+    )
+    raise SystemExit(1) from None
 
 
-# --- Helper Functions ---
-def ensure_venv_exists():
+SYNC_STATE_MANAGER = StateManager(config.SYNC_STATE_FILE)
+PROD_SETUP_STATE_KEY = "prod_setup"
+RESOURCES_DIR = config.PROJECT_ROOT / "resources"
+
+
+def ensure_venv_exists() -> None:
     """Checks for a .venv directory and runs `uv venv` if not found."""
     venv_path = config.PROJECT_ROOT / ".venv"
     if not venv_path.is_dir():
@@ -32,7 +54,6 @@ def ensure_venv_exists():
             " Virtual environment not found. Creating one with `uv venv`..."
         )
         try:
-            # Use direct subprocess call for bootstrapping before full process setup
             subprocess.run(
                 ["uv", "venv"],
                 check=True,
@@ -48,34 +69,211 @@ def ensure_venv_exists():
             sys.exit(1)
 
 
-# def _overwrite_with_editable_installs():
-#     """
-#     使用可编辑模式强制重新安装所有本地插件。
-#     这会覆盖掉 `uv sync` 创建的复制版安装。
-#     """
-#     config.logger.info("🛠️  Overwriting local plugins with editable mode...")
-
-#     local_plugin_paths = [p for p in config.PLUGINS_SRC_DIR.iterdir() if p.is_dir()]
-
-#     if not local_plugin_paths:
-#         config.logger.info("  - No local plugins found to install in editable mode.")
-#         return
-
-#     # 构建 uv pip install 命令，一次性安装所有插件以提高效率
-#     install_args = ["pip", "install", "--no-deps", "--no-cache-dir"]
-#     for plugin_path in local_plugin_paths:
-#         install_args.extend(["-e", str(plugin_path)])
-
-#     try:
-#         process.uv(install_args, config.PROJECT_ROOT)
-#         config.logger.info("  - ✅ All local plugins are now in editable mode.")
-#     except CommandError as e:
-#         config.logger.error(f"❌ Failed to install local plugins in editable mode: {e}")
-#         # 在实际命令中，错误会向上抛出，这里只在直接调用时记录日志
-#         raise  # 重新抛出异常，让调用方处理
+def _read_plugin_urls() -> list[str]:
+    if not config.PLUGINS_LIST_FILE.exists():
+        raise CommandError(
+            f"'{config.PLUGINS_LIST_FILE.name}' not found. Aborting deployment."
+        )
+    return [
+        line.strip()
+        for line in config.PLUGINS_LIST_FILE.read_text("utf-8").splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
 
 
-# --- Command Base Classes ---
+def _tracked_status_output(cwd: Path) -> str:
+    return process.git(["status", "--short", "-uno"], cwd, check=False, quiet=True)
+
+
+def _ensure_tracked_clean(cwd: Path, label: str) -> None:
+    if status_output := _tracked_status_output(cwd):
+        raise CommandError(
+            f"{label} 存在未提交的已跟踪修改，已停止更新：\n{status_output}"
+        )
+
+
+def _ensure_upstream_remote(cwd: Path, upstream_url: str | None) -> None:
+    if not upstream_url:
+        return
+    current_url = process.git(
+        ["remote", "get-url", "upstream"], cwd, check=False, quiet=True
+    )
+    if not current_url:
+        process.git(["remote", "add", "upstream", upstream_url], cwd, check=False)
+
+
+def _checkout_target_branch(cwd: Path, branch: str, label: str) -> None:
+    if not git.remote_branch_exists(cwd, "origin", branch):
+        raise CommandError(f"{label} 的远程分支 origin/{branch} 不存在。")
+    if git.local_branch_exists(cwd, branch):
+        process.git(["checkout", branch], cwd)
+    else:
+        process.git(["checkout", "-b", branch, f"origin/{branch}"], cwd)
+
+
+def _update_existing_repo(cwd: Path, branch: str, label: str) -> str:
+    if not (cwd / ".git").is_dir():
+        raise CommandError(f"{label} 路径存在，但不是独立 Git 仓库：{cwd}")
+    _ensure_tracked_clean(cwd, label)
+    process.git(["fetch", "origin", "--prune"], cwd, quiet=True)
+    _checkout_target_branch(cwd, branch, label)
+    process.git(["pull", "--ff-only", "origin", branch], cwd)
+    return git.get_head_commit(cwd)
+
+
+def _sync_managed_repo(
+    *,
+    local_path: Path,
+    clone_url: str,
+    branch: str,
+    label: str,
+    upstream_url: str | None = None,
+) -> str:
+    if local_path.exists():
+        config.logger.info(f"  - Updating {label}: {local_path.name}")
+        _ensure_upstream_remote(local_path, upstream_url)
+        return _update_existing_repo(local_path, branch, label)
+
+    config.logger.info(f"  - Cloning {label}: {local_path.name}")
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    process.git(
+        ["clone", "--depth=1", "-b", branch, clone_url, str(local_path)],
+        config.PROJECT_ROOT,
+    )
+    _ensure_upstream_remote(local_path, upstream_url)
+    return git.get_head_commit(local_path)
+
+
+def _sync_resources_repo() -> str:
+    return _sync_managed_repo(
+        local_path=RESOURCES_DIR,
+        clone_url=config.RESOURCES_REPO,
+        branch=config.RESOURCES_BRANCH,
+        label="resources 仓库",
+    )
+
+
+def _sync_plugin_repositories(urls: list[str]) -> dict[str, str]:
+    config.PLUGINS_SRC_DIR.mkdir(parents=True, exist_ok=True)
+    plugin_heads: dict[str, str] = {}
+    for url in tqdm(urls, desc="Syncing plugins"):
+        repo_name_with_owner = git.get_repo_name_from_url(url)
+        if not repo_name_with_owner:
+            raise CommandError(f"Invalid GitHub URL in plugins.txt: {url}")
+        plugin_name = repo_name_with_owner.split("/")[-1]
+        clone_url = f"https://github.com/{config.YOUR_GITHUB_ORG}/{plugin_name}.git"
+        local_path = config.PLUGINS_SRC_DIR / plugin_name
+        plugin_heads[plugin_name] = _sync_managed_repo(
+            local_path=local_path,
+            clone_url=clone_url,
+            branch=config.PLUGIN_BRANCH,
+            label=f"插件仓库 {plugin_name}",
+            upstream_url=url,
+        )
+    return plugin_heads
+
+
+def _file_sha256(path: Path) -> str:
+    if not path.exists():
+        return ""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _build_lock_fingerprint(
+    *, plugin_heads: dict[str, str], resources_head: str
+) -> tuple[str, dict[str, Any]]:
+    material = {
+        "pyproject_sha256": _file_sha256(config.PROJECT_ROOT / "pyproject.toml"),
+        "plugins_txt_sha256": _file_sha256(config.PLUGINS_LIST_FILE),
+        "manage": {
+            "project_branch": config.PROJECT_BRANCH,
+            "resources_branch": config.RESOURCES_BRANCH,
+            "plugin_branch": config.PLUGIN_BRANCH,
+            "resources_repo": config.RESOURCES_REPO,
+            "prod_sync_extras": list(config.PROD_SYNC_EXTRAS),
+        },
+        "resources": {
+            "path": RESOURCES_DIR.name,
+            "head": resources_head,
+        },
+        "plugins": dict(sorted(plugin_heads.items())),
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(material, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return fingerprint, material
+
+
+def _get_prod_setup_state() -> dict[str, Any]:
+    state = SYNC_STATE_MANAGER.read()
+    section = state.get(PROD_SETUP_STATE_KEY)
+    return section if isinstance(section, dict) else {}
+
+
+def _save_prod_setup_state(
+    *,
+    lock_fingerprint: str,
+    fingerprint_material: dict[str, Any],
+    plugin_heads: dict[str, str],
+    resources_head: str,
+) -> None:
+    state = SYNC_STATE_MANAGER.read()
+    state[PROD_SETUP_STATE_KEY] = {
+        "lock_fingerprint": lock_fingerprint,
+        "fingerprint_material": fingerprint_material,
+        "plugin_heads": dict(sorted(plugin_heads.items())),
+        "resources_head": resources_head,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    SYNC_STATE_MANAGER.write(state)
+
+
+def _should_regenerate_lock(lock_fingerprint: str) -> tuple[bool, str]:
+    current_state = _get_prod_setup_state()
+    if not config.LOCK_FILE.exists():
+        return True, f"'{config.LOCK_FILE.name}' 不存在"
+    if current_state.get("lock_fingerprint") != lock_fingerprint:
+        return True, "检测到 pyproject / manage.toml / resources / 插件提交发生变化"
+    return False, "部署输入未变化，直接复用现有锁文件"
+
+
+def _build_prod_sync_args() -> list[str]:
+    args = ["sync", "--frozen"]
+    for extra in config.PROD_SYNC_EXTRAS:
+        args.extend(["--extra", extra])
+    return args
+
+
+def _managed_branch_for_path(path: Path) -> str:
+    return config.PROJECT_BRANCH if path == config.PROJECT_ROOT else config.PLUGIN_BRANCH
+
+
+def _reexec_latest_nbm(
+    *,
+    command: str,
+    extra_args: list[str] | None = None,
+    verbose: int = 0,
+    scope: str = config.DEFAULT_SCOPE,
+) -> None:
+    cmd = ["uv", "run", "--no-project", "nbm.py"]
+    if verbose > 0:
+        cmd.extend(["-v"] * verbose)
+    if scope != config.DEFAULT_SCOPE:
+        cmd.extend(["--scope", scope])
+    cmd.append(command)
+    if extra_args:
+        cmd.extend(extra_args)
+
+    config.logger.info(f"♻️ Re-executing latest nbm.py: {' '.join(cmd)}")
+    try:
+        result = subprocess.run(cmd, cwd=config.PROJECT_ROOT)
+    except FileNotFoundError as exc:
+        raise CommandError(
+            "Unable to re-execute nbm.py because `uv` is not available in PATH."
+        ) from exc
+    raise SystemExit(result.returncode)
+
+
 class CommandBase:
     """Base class for all commands, handling argument parsing and target selection."""
 
@@ -93,9 +291,8 @@ class CommandBase:
             paths.extend(
                 p for p in config.PLUGINS_SRC_DIR.iterdir() if (p / ".git").is_dir()
             )
-        if self.scope in ["all", "root"]:
-            if (config.PROJECT_ROOT / ".git").is_dir():
-                paths.insert(0, config.PROJECT_ROOT)
+        if self.scope in ["all", "root"] and (config.PROJECT_ROOT / ".git").is_dir():
+            paths.insert(0, config.PROJECT_ROOT)
         return sorted(paths)
 
     def execute(self) -> Any:
@@ -135,7 +332,6 @@ class ConcurrentCommand(CommandBase):
         return results
 
 
-# --- Command Implementations ---
 class SetupCommand(CommandBase):
     description = "【首次运行】初始化 nbm 的工作环境"
 
@@ -148,25 +344,15 @@ class InitCommand(CommandBase):
     description = "【项目初始化】根据 plugins.txt 构建整个项目"
 
     def execute(self) -> None:
-        ensure_venv_exists()  # Ensure foundation is laid first!
+        ensure_venv_exists()
 
-        if not config.PLUGINS_LIST_FILE.exists():
-            config.logger.warning(
-                f"🤷‍♀️ '{config.PLUGINS_LIST_FILE.name}' not found. Aborting."
-            )
-            return
-
-        urls = [
-            ln.strip()
-            for ln in config.PLUGINS_LIST_FILE.read_text("utf-8").splitlines()
-            if ln.strip() and not ln.startswith("#")
-        ]
+        urls = _read_plugin_urls()
 
         successful_paths: list[Path] = []
         with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as ex:
-            f_map = {ex.submit(project.setup_plugin_repo, url): url for url in urls}
+            future_map = {ex.submit(project.setup_plugin_repo, url): url for url in urls}
             for future in tqdm(
-                as_completed(f_map), total=len(urls), desc="Setting up repositories"
+                as_completed(future_map), total=len(urls), desc="Setting up repositories"
             ):
                 status, path = future.result()
                 if path and status in ["success", "exists"]:
@@ -195,7 +381,6 @@ class InitCommand(CommandBase):
             f"\n⚡️ All dependencies added. Generating lock file '{config.LOCK_FILE.name}'..."
         )
         try:
-            # CORRECTED: Use process.uv, not config.uv
             process.uv_streamed(["lock"], config.PROJECT_ROOT)
         except CommandError as e:
             config.logger.error(
@@ -206,10 +391,7 @@ class InitCommand(CommandBase):
 
         if getattr(self.args, "install", False):
             config.logger.info("\n🔧 Syncing virtual environment...")
-            # CORRECTED: Use process.uv, not config.uv
             process.uv_streamed(["sync", "--all-extras"], config.PROJECT_ROOT)
-
-        # _overwrite_with_editable_installs()
 
         config.logger.info("\n🎉 Project initialization complete!")
 
@@ -226,7 +408,6 @@ class AddCommand(CommandBase):
 
         try:
             project.add_local_dependency(path)
-        # --- 捕获新的、更具体的错误 ---
         except FileNotFoundError as e:
             config.logger.error(f"❌ Validation failed for '{path.name}':\n{e}")
             config.logger.info(
@@ -243,14 +424,11 @@ class AddCommand(CommandBase):
                 "\n--install flag detected. Performing full environment update..."
             )
             try:
-                config.logger.info("  - Step 1/3: Locking dependencies...")
+                config.logger.info("  - Step 1/2: Locking dependencies...")
                 process.uv_streamed(["lock"], config.PROJECT_ROOT)
 
-                config.logger.info("  - Step 2/3: Syncing environment...")
+                config.logger.info("  - Step 2/2: Syncing environment...")
                 process.uv_streamed(["sync", "--all-extras"], config.PROJECT_ROOT)
-
-                config.logger.info("  - Step 3/3: Applying editable mode...")
-                # _overwrite_with_editable_installs()
 
                 config.logger.info(
                     f"\n🎉 Plugin '{path.name}' added and installed successfully!"
@@ -261,7 +439,6 @@ class AddCommand(CommandBase):
                     "💡 Please try running 'nbm init --install' to fix potential issues."
                 )
         else:
-            # --- 原有的提示信息 ---
             config.logger.info(
                 f"\n🎉 Plugin '{path.name}' added successfully! Run 'nbm init --install' or 'uv sync' to update your environment."
             )
@@ -275,7 +452,7 @@ class RemoveCommand(CommandBase):
         plugin_name = self.args.plugin_name
 
         if not project.remove_dependency(plugin_name):
-            return  # Error already logged
+            return
 
         project.update_plugins_list(plugin_name=plugin_name, action="remove")
 
@@ -300,7 +477,7 @@ class PackageCommand(CommandBase):
     description = "【生产打包】生成用于生产环境的部署文件"
 
     def execute(self) -> None:
-        branch = self.args.branch or config.DEV_BRANCH
+        branch = self.args.branch or config.PLUGIN_BRANCH
         project.create_production_package(branch)
 
 
@@ -311,7 +488,6 @@ class StatusCommand(ConcurrentCommand):
         try:
             branch = git.get_current_branch(path)
             dirty_str = "⚠️  Dirty" if git.is_workspace_dirty(path) else "✅ Clean"
-            # CORRECTED: Use process.git
             process.git(["fetch", "origin", branch], path, check=False, quiet=True)
             ahead = process.git(
                 ["rev-list", "--count", f"origin/{branch}..HEAD"], path, quiet=True
@@ -329,7 +505,6 @@ class StatusCommand(ConcurrentCommand):
 class CommitCommand(ConcurrentCommand):
     description = "【一键提交】将所有仓库中的修改以一个统一的消息和ID进行提交"
 
-    # --- FIX 4: Correct method signature and return value ---
     def execute(self) -> dict:
         timestamp = str(time.time()).encode()
         msg_bytes = self.args.message.encode()
@@ -359,15 +534,15 @@ class SyncCommand(ConcurrentCommand):
 
     def worker(self, path: Path) -> dict[str, Any]:
         repo_name = path.name if path != config.PROJECT_ROOT else "root project"
+        target_branch = _managed_branch_for_path(path)
         try:
             current_branch = git.get_current_branch(path)
-            if current_branch != config.DEV_BRANCH:
+            if current_branch != target_branch:
                 config.logger.info(
-                    f"  - 🔄 Skipping {repo_name} (not on '{config.DEV_BRANCH}' branch)"
+                    f"  - 🔄 Skipping {repo_name} (not on '{target_branch}' branch)"
                 )
                 return {"status": "skipped", "reason": "wrong branch"}
 
-            # 修正：使用 process.git 而不是 config.git
             process.git(["fetch", "upstream", "--prune"], path, quiet=True)
             process.git(["fetch", "origin", "--prune"], path, quiet=True)
 
@@ -384,10 +559,10 @@ class SyncCommand(ConcurrentCommand):
 
             if getattr(self.args, "push", False):
                 config.logger.info(
-                    f"  - 🚀 Pushing {repo_name} to origin/{config.DEV_BRANCH}..."
+                    f"  - 🚀 Pushing {repo_name} to origin/{target_branch}..."
                 )
                 process.git(
-                    ["push", "--force-with-lease", "origin", config.DEV_BRANCH], path
+                    ["push", "--force-with-lease", "origin", target_branch], path
                 )
 
             return {"status": "success"}
@@ -465,8 +640,7 @@ class CleanupBranchesCommand(ConcurrentCommand):
                 )
                 process.git(["push", "origin", "--delete", branch], path)
                 return {"status": "deleted"}
-            else:
-                return {"status": "not_found"}
+            return {"status": "not_found"}
         except CommandError as e:
             config.logger.error(f"  - ❌ Failed to delete branch in {repo_name}:\n{e}")
             return {"status": "failed"}
@@ -480,7 +654,6 @@ class DiagnoseCommand(CommandBase):
         config.logger.info("🩺 Running dependency resolver to diagnose conflicts...")
         result = process.uv(["lock"], config.PROJECT_ROOT, check=False)
 
-        # --- FINAL FIX: Use isinstance for definitive type narrowing ---
         if isinstance(result, subprocess.CompletedProcess) and result.returncode == 0:
             config.logger.info("✅ No dependency conflicts detected!")
             return
@@ -493,7 +666,6 @@ class DiagnoseCommand(CommandBase):
                 f"The command timed out after {result.timeout} seconds."
             )
         elif result:
-            # This branch safely handles other non-CompletedProcess results
             config.logger.error(
                 f"The command failed with an unexpected result: {result}"
             )
@@ -504,94 +676,81 @@ class DiagnoseCommand(CommandBase):
 
 
 class ProdSetupCommand(CommandBase):
-    description = "【生产部署】克隆所有插件的源代码并同步环境"
+    description = "【生产部署】同步 resources / 插件源码并准备环境"
 
     def execute(self) -> None:
         ensure_venv_exists()
 
-        if not config.PLUGINS_LIST_FILE.exists():
-            config.logger.warning(
-                f"🤷‍♀️ '{config.PLUGINS_LIST_FILE.name}' not found. Aborting clone phase."
-            )
-            return
-
-        urls = [
-            ln.strip()
-            for ln in config.PLUGINS_LIST_FILE.read_text("utf-8").splitlines()
-            if ln.strip() and not ln.startswith("#")
-        ]
+        urls = _read_plugin_urls()
 
         config.logger.info(
-            f"🚀 Starting to clone/update {len(urls)} plugin repositories..."
+            f"🧱 Preparing resources repository on '{config.RESOURCES_BRANCH}'..."
         )
-        config.PLUGINS_SRC_DIR.mkdir(parents=True, exist_ok=True)
+        resources_head = _sync_resources_repo()
 
-        for url in tqdm(urls, desc="Cloning plugins"):
-            repo_name_with_owner = git.get_repo_name_from_url(url)
-            if not repo_name_with_owner:
-                config.logger.warning(f"  - Invalid URL, skipping: {url}")
-                continue
+        config.logger.info(
+            f"🚀 Syncing {len(urls)} plugin repositories on '{config.PLUGIN_BRANCH}'..."
+        )
+        plugin_heads = _sync_plugin_repositories(urls)
 
-            plugin_name = repo_name_with_owner.split("/")[-1]
-            local_path = config.PLUGINS_SRC_DIR / plugin_name
-            fork_repo = f"{config.YOUR_GITHUB_ORG}/{plugin_name}"
-            clone_url = f"https://github.com/{fork_repo}.git"
+        lock_fingerprint, fingerprint_material = _build_lock_fingerprint(
+            plugin_heads=plugin_heads,
+            resources_head=resources_head,
+        )
+        should_relock, reason = _should_regenerate_lock(lock_fingerprint)
 
-            if local_path.exists():
-                # 如果已存在，则更新
-                config.logger.info(f"  - Updating existing repo: {plugin_name}")
-                try:
-                    process.git(
-                        ["-C", str(local_path), "pull", "origin", config.DEV_BRANCH],
-                        config.PROJECT_ROOT,
-                    )
-                except CommandError as e:
-                    config.logger.error(
-                        f"  - ❌ Failed to pull updates for {plugin_name}: {e}"
-                    )
-            else:
-                # 如果不存在，则克隆
-                config.logger.info(f"  - Cloning new repo: {plugin_name}")
-                try:
-                    process.git(
-                        [
-                            "clone",
-                            "--depth=1",
-                            "-b",
-                            config.DEV_BRANCH,
-                            clone_url,
-                            str(local_path),
-                        ],
-                        config.PROJECT_ROOT,
-                    )
-                except CommandError as e:
-                    config.logger.error(f"  - ❌ Failed to clone {plugin_name}: {e}")
+        if should_relock:
+            config.logger.info(f"\n🔁 Regenerating '{config.LOCK_FILE.name}': {reason}")
+            process.uv_streamed(["lock"], config.PROJECT_ROOT)
+        else:
+            config.logger.info(f"\n✅ Reusing '{config.LOCK_FILE.name}': {reason}")
 
-        config.logger.info("\n✅ All plugin sources are ready.")
-        config.logger.info("🔧 Syncing environment from lock file...")
+        sync_args = _build_prod_sync_args()
+        config.logger.info(f"🔧 Syncing environment with: uv {' '.join(sync_args)}")
+        process.uv_streamed(sync_args, config.PROJECT_ROOT)
 
-        try:
-            # 直接使用 lock 文件进行同步
-            process.uv(["sync", "--all-extras"], config.PROJECT_ROOT)
-            config.logger.info("\n🎉 Production setup complete! Environment is ready.")
-        except CommandError as e:
-            config.logger.error(f"\n❌ Failed to sync environment: {e}")
-            sys.exit(1)
+        _save_prod_setup_state(
+            lock_fingerprint=lock_fingerprint,
+            fingerprint_material=fingerprint_material,
+            plugin_heads=plugin_heads,
+            resources_head=resources_head,
+        )
+
+        config.logger.info("\n🎉 Production setup complete! Environment is ready.")
 
 
-# --- Main Application ---
-def main():
+class UpdateCommand(CommandBase):
+    description = "【更新部署】先更新主仓库，再使用最新 nbm 继续部署"
+
+    def execute(self) -> None:
+        if getattr(self.args, "resume_after_root", False):
+            config.logger.info("♻️ Root project updated. Continuing with prod-setup...")
+            ProdSetupCommand(self.args).execute()
+            return
+
+        config.logger.info(
+            f"🔄 Updating root project from origin/{config.PROJECT_BRANCH}..."
+        )
+        _update_existing_repo(config.PROJECT_ROOT, config.PROJECT_BRANCH, "主仓库")
+
+        _reexec_latest_nbm(
+            command="update",
+            extra_args=["--resume-after-root"],
+            verbose=getattr(self.args, "verbose", 0),
+            scope=getattr(self.args, "scope", config.DEFAULT_SCOPE),
+        )
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument(
         "--scope",
         choices=["all", "plugins", "root"],
-        default=config.DEFAULT_SCOPE,  # 使用 argparse 的 default 机制
+        default=config.DEFAULT_SCOPE,
         help="Command scope (default: %(default)s)",
     )
-    # -------------------------
-
     parser.add_argument(
         "-v", "--verbose", action="count", default=0, help="Increase output verbosity"
     )
@@ -600,18 +759,16 @@ def main():
     )
 
     command_map = {
-        # 项目生命周期
         "setup": SetupCommand,
         "init": InitCommand,
         "add": AddCommand,
         "remove": RemoveCommand,
         "package": PackageCommand,
         "prod-setup": ProdSetupCommand,
-        # 日常开发
+        "update": UpdateCommand,
         "status": StatusCommand,
         "commit": CommitCommand,
         "sync": SyncCommand,
-        # 批量维护与工具
         "push": PushCommand,
         "checkout": CheckoutCommand,
         "cleanup-branches": CleanupBranchesCommand,
@@ -619,52 +776,60 @@ def main():
     }
 
     for name, cmd_class in command_map.items():
-        p = subparsers.add_parser(name, help=cmd_class.description)
+        subparser = subparsers.add_parser(name, help=cmd_class.description)
         if name == "init":
-            p.add_argument(
+            subparser.add_argument(
                 "--install",
                 action="store_true",
                 help="Sync environment after initialization",
             )
         elif name == "add":
-            p.add_argument("plugin_url", help="The GitHub URL of the plugin to add")
-            p.add_argument(
+            subparser.add_argument(
+                "plugin_url", help="The GitHub URL of the plugin to add"
+            )
+            subparser.add_argument(
                 "--install",
                 action="store_true",
                 help="Lock, sync, and install the new plugin immediately.",
             )
         elif name == "remove":
-            p.add_argument(
+            subparser.add_argument(
                 "plugin_name", help="The name of the plugin folder to remove"
             )
-            p.add_argument(
+            subparser.add_argument(
                 "-f",
                 "--force",
                 action="store_true",
                 help="Force delete the plugin source folder",
             )
         elif name == "package":
-            p.add_argument(
+            subparser.add_argument(
                 "--branch",
-                help=f"Git branch to use for dependencies (default: {config.DEV_BRANCH})",
+                help=f"Git branch to use for dependencies (default: {config.PLUGIN_BRANCH})",
+            )
+        elif name == "update":
+            subparser.add_argument(
+                "--resume-after-root",
+                action="store_true",
+                help=argparse.SUPPRESS,
             )
         elif name == "commit":
-            p.add_argument("-m", "--message", required=True, help="Commit message")
+            subparser.add_argument("-m", "--message", required=True, help="Commit message")
         elif name == "sync":
-            p.add_argument(
+            subparser.add_argument(
                 "--push", action="store_true", help="Push after successful rebase"
             )
         elif name == "push":
-            p.add_argument(
+            subparser.add_argument(
                 "-f", "--force", action="store_true", help="Use --force-with-lease"
             )
         elif name == "checkout":
-            p.add_argument("branch_name", help="Branch to switch to or create")
-            p.add_argument(
+            subparser.add_argument("branch_name", help="Branch to switch to or create")
+            subparser.add_argument(
                 "-b", "--create-new", action="store_true", help="Create if not exists"
             )
         elif name == "cleanup-branches":
-            p.add_argument("branch_name", help="Remote branch to delete from forks")
+            subparser.add_argument("branch_name", help="Remote branch to delete from forks")
 
     args = parser.parse_args()
 
