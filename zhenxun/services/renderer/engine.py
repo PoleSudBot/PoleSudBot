@@ -260,6 +260,9 @@ class PlaywrightEngine(BaseScreenshotEngine):
                 600,
             ),
         )
+        self._idle_recycle_enabled = bool(
+            Config.get_config("UI", "UI_RENDERER_IDLE_RECYCLE_ENABLED", False)
+        )
         self._prewarm_enabled = bool(
             Config.get_config("UI", "UI_RENDERER_PREWARM_ENABLED", True)
         )
@@ -277,6 +280,7 @@ class PlaywrightEngine(BaseScreenshotEngine):
         self._all_contexts: set[Any] = set()
         self._idle_recycle_task: asyncio.Task[None] | None = None
         self._memory_diag_task: asyncio.Task[None] | None = None
+        self._initialized = False
         self._closing = False
         self._process = psutil.Process()
 
@@ -491,14 +495,18 @@ class PlaywrightEngine(BaseScreenshotEngine):
 
     async def initialize(self) -> None:
         should_prewarm = False
+        idle_recycle_enabled = False
         async with self._state_lock:
-            if self._idle_recycle_task and not self._idle_recycle_task.done():
+            if self._initialized:
                 return
+            self._initialized = True
             self._closing = False
             self._last_render_finished_at = time.monotonic()
             if current_rss := self._get_total_rss():
                 self._rss_baseline_bytes = current_rss
-            self._idle_recycle_task = asyncio.create_task(self._idle_recycle_loop())
+            idle_recycle_enabled = self._idle_recycle_enabled
+            if idle_recycle_enabled:
+                self._idle_recycle_task = asyncio.create_task(self._idle_recycle_loop())
             if self._memory_diag_enabled:
                 self._memory_diag_task = asyncio.create_task(self._memory_diag_loop())
             should_prewarm = self._prewarm_enabled
@@ -506,6 +514,14 @@ class PlaywrightEngine(BaseScreenshotEngine):
         if self._memory_diag_enabled:
             logger.info(
                 f"截图引擎内存诊断已开启，输出间隔 {self._memory_diag_interval_seconds} 秒。",
+                "PlaywrightEngine",
+            )
+
+        if idle_recycle_enabled:
+            logger.info("截图引擎空闲回收已启用。", "PlaywrightEngine")
+        else:
+            logger.info(
+                "截图引擎空闲回收已禁用，仅保留渲染中回收与异常恢复回收。",
                 "PlaywrightEngine",
             )
 
@@ -525,6 +541,7 @@ class PlaywrightEngine(BaseScreenshotEngine):
         memory_diag_task: asyncio.Task[None] | None = None
         async with self._state_lock:
             self._closing = True
+            self._initialized = False
             idle_task = self._idle_recycle_task
             self._idle_recycle_task = None
             memory_diag_task = self._memory_diag_task

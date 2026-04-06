@@ -1,11 +1,99 @@
 from __future__ import annotations
 
+import asyncio
+
 import nonebot
 import pytest
 
 nonebot.init()
 
+from zhenxun.services.renderer import engine as renderer_engine
 from zhenxun.services.renderer.engine import PlaywrightEngine, _is_browser_closed_error
+
+
+@pytest.mark.asyncio
+async def test_initialize_disables_idle_recycle_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def fake_get_config(_module: str, key: str, default=None):
+        if key == "UI_RENDERER_PREWARM_ENABLED":
+            return False
+        return default
+
+    async def fake_prewarm():
+        return None
+
+    async def fake_dispose():
+        return None
+
+    async def fake_shutdown():
+        return None
+
+    monkeypatch.setattr(renderer_engine.Config, "get_config", fake_get_config)
+    monkeypatch.setattr(renderer_engine, "_shutdown_browser_instance", fake_shutdown)
+
+    engine = PlaywrightEngine()
+    monkeypatch.setattr(engine, "_prewarm_browser_and_pool", fake_prewarm)
+    monkeypatch.setattr(engine, "_dispose_context_pool", fake_dispose)
+
+    await engine.initialize()
+
+    assert engine._idle_recycle_task is None
+
+    await engine.close()
+    assert engine._initialized is False
+
+
+@pytest.mark.asyncio
+async def test_initialize_creates_and_cancels_idle_recycle_task_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def fake_get_config(_module: str, key: str, default=None):
+        if key == "UI_RENDERER_IDLE_RECYCLE_ENABLED":
+            return True
+        if key == "UI_RENDERER_PREWARM_ENABLED":
+            return False
+        return default
+
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def fake_idle_recycle_loop():
+        started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    async def fake_prewarm():
+        return None
+
+    async def fake_dispose():
+        return None
+
+    async def fake_shutdown():
+        return None
+
+    monkeypatch.setattr(renderer_engine.Config, "get_config", fake_get_config)
+    monkeypatch.setattr(renderer_engine, "_shutdown_browser_instance", fake_shutdown)
+
+    engine = PlaywrightEngine()
+    monkeypatch.setattr(engine, "_idle_recycle_loop", fake_idle_recycle_loop)
+    monkeypatch.setattr(engine, "_prewarm_browser_and_pool", fake_prewarm)
+    monkeypatch.setattr(engine, "_dispose_context_pool", fake_dispose)
+
+    await engine.initialize()
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    assert engine._idle_recycle_task is not None
+    assert not engine._idle_recycle_task.done()
+
+    await engine.close()
+
+    assert cancelled.is_set()
+    assert engine._idle_recycle_task is None
+    assert engine._initialized is False
 
 
 @pytest.mark.asyncio

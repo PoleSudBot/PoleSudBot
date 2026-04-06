@@ -83,6 +83,14 @@ __plugin_meta__ = PluginMetadata(
             ),
             RegisterConfig(
                 module="UI",
+                key="UI_RENDERER_IDLE_RECYCLE_ENABLED",
+                value=False,
+                help="是否开启渲染引擎空闲时自动回收浏览器，关闭后仅保留渲染中回收与异常恢复回收",
+                default_value=False,
+                type=bool,
+            ),
+            RegisterConfig(
+                module="UI",
                 key="UI_RENDERER_PREWARM_ENABLED",
                 value=True,
                 help="是否在渲染引擎初始化时预热浏览器与上下文池，关闭后仅在首次渲染时按需启动",
