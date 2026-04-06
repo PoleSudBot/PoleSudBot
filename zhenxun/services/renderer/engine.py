@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import json
 from pathlib import Path
+import shutil
 import time
 from typing import Any, ClassVar, cast
 
@@ -183,6 +184,13 @@ def _patch_playwright_env_check_once() -> None:
 class PlaywrightEngine(BaseScreenshotEngine):
     """使用 nonebot-plugin-htmlrender 实现的截图引擎。"""
 
+    _BROWSER_PROCESS_MARKERS: ClassVar[tuple[str, ...]] = (
+        "chrome",
+        "chromium",
+        "msedge",
+        "playwright",
+        "headless_shell",
+    )
     _MAX_CONCURRENT_RENDER = 2
     _CONTEXT_POOL_SIZE = 2
     _PREWARM_CONTEXT_COUNT = 1
@@ -242,6 +250,19 @@ class PlaywrightEngine(BaseScreenshotEngine):
         _patch_playwright_env_check_once()
         self._render_semaphore = asyncio.Semaphore(self._MAX_CONCURRENT_RENDER)
         self._debug_console_log = bool(Config.get_config("UI", "DEBUG_MODE", False))
+        self._memory_diag_enabled = bool(
+            Config.get_config("UI", "MEMORY_DIAG_ENABLED", False)
+        )
+        self._memory_diag_interval_seconds = max(
+            10,
+            self._coerce_non_negative_int(
+                Config.get_config("UI", "MEMORY_DIAG_INTERVAL_SECONDS", 600),
+                600,
+            ),
+        )
+        self._prewarm_enabled = bool(
+            Config.get_config("UI", "UI_RENDERER_PREWARM_ENABLED", True)
+        )
         self._state_lock = asyncio.Lock()
         self._recycle_lock = asyncio.Lock()
         self._active_renders = 0
@@ -255,6 +276,7 @@ class PlaywrightEngine(BaseScreenshotEngine):
         self._context_pool: asyncio.LifoQueue[Any] = asyncio.LifoQueue()
         self._all_contexts: set[Any] = set()
         self._idle_recycle_task: asyncio.Task[None] | None = None
+        self._memory_diag_task: asyncio.Task[None] | None = None
         self._closing = False
         self._process = psutil.Process()
 
@@ -308,6 +330,134 @@ class PlaywrightEngine(BaseScreenshotEngine):
         except Exception:
             return None
 
+    @classmethod
+    def _is_browser_process(cls, process: psutil.Process) -> bool:
+        parts: list[str] = []
+        with contextlib.suppress(Exception):
+            parts.append(process.name().lower())
+        with contextlib.suppress(Exception):
+            parts.extend(arg.lower() for arg in process.cmdline())
+        return any(
+            marker in part
+            for part in parts
+            for marker in cls._BROWSER_PROCESS_MARKERS
+        )
+
+    def _get_process_tree_memory_metrics(self) -> tuple[int | None, int, int, int]:
+        try:
+            main_rss = self._process.memory_info().rss
+        except Exception:
+            return None, 0, 0, 0
+
+        child_rss_total = 0
+        browser_rss_total = 0
+        browser_process_count = 0
+        with contextlib.suppress(Exception):
+            for child in self._process.children(recursive=True):
+                try:
+                    child_rss = child.memory_info().rss
+                except Exception:
+                    continue
+                child_rss_total += child_rss
+                if self._is_browser_process(child):
+                    browser_process_count += 1
+                    browser_rss_total += child_rss
+
+        return main_rss, child_rss_total, browser_rss_total, browser_process_count
+
+    @staticmethod
+    def _get_dev_shm_usage() -> tuple[int, int] | None:
+        shm_path = Path("/dev/shm")
+        if not shm_path.exists():
+            return None
+        with contextlib.suppress(OSError):
+            usage = shutil.disk_usage(shm_path)
+            return usage.used, usage.total
+        return None
+
+    @staticmethod
+    def _get_system_shmem_bytes() -> int | None:
+        meminfo_path = Path("/proc/meminfo")
+        if not meminfo_path.exists():
+            return None
+        try:
+            with meminfo_path.open(encoding="utf-8") as meminfo_file:
+                for line in meminfo_file:
+                    if not line.startswith("Shmem:"):
+                        continue
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        return int(parts[1]) * 1024
+                    return None
+        except OSError:
+            return None
+        return None
+
+    @staticmethod
+    def _format_bytes(value: int | None) -> str:
+        if value is None:
+            return "n/a"
+
+        size = float(value)
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if size < 1024 or unit == "TB":
+                if unit == "B":
+                    return f"{int(size)}{unit}"
+                return f"{size:.1f}{unit}"
+            size /= 1024
+        return "n/a"
+
+    async def _log_memory_diagnostics(self, source: str) -> None:
+        async with self._state_lock:
+            if self._closing:
+                return
+            context_pool_size = self._context_pool.qsize()
+            all_contexts = len(self._all_contexts)
+            inflight_tasks = len(self._inflight_tasks)
+            active_renders = self._active_renders
+            render_count = self._render_count
+
+        main_rss, child_rss, browser_rss, browser_process_count = (
+            self._get_process_tree_memory_metrics()
+        )
+        dev_shm_usage = self._get_dev_shm_usage()
+        system_shmem = self._get_system_shmem_bytes()
+
+        dev_shm_text = "n/a"
+        if dev_shm_usage is not None:
+            dev_shm_used, dev_shm_total = dev_shm_usage
+            dev_shm_text = (
+                f"{self._format_bytes(dev_shm_used)}/"
+                f"{self._format_bytes(dev_shm_total)}"
+            )
+
+        logger.info(
+            "内存诊断({source}): rss(main={main} child={child} "
+            "browser={browser} browser_proc={browser_proc}) "
+            "shm(/dev/shm={dev_shm} shmem={system_shmem}) "
+            "renderer(pool={pool} contexts={contexts} inflight={inflight} "
+            "active={active} renders={renders})".format(
+                source=source,
+                main=self._format_bytes(main_rss),
+                child=self._format_bytes(child_rss),
+                browser=self._format_bytes(browser_rss),
+                browser_proc=browser_process_count,
+                dev_shm=dev_shm_text,
+                system_shmem=self._format_bytes(system_shmem),
+                pool=context_pool_size,
+                contexts=all_contexts,
+                inflight=inflight_tasks,
+                active=active_renders,
+                renders=render_count,
+            ),
+            "PlaywrightEngine",
+        )
+
+    async def _memory_diag_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._memory_diag_interval_seconds)
+            await self._log_memory_diagnostics("periodic")
+
     def _update_rss_baseline_nolock(self, current_rss: int) -> None:
         if self._rss_baseline_bytes is None or current_rss < self._rss_baseline_bytes:
             self._rss_baseline_bytes = current_rss
@@ -340,6 +490,7 @@ class PlaywrightEngine(BaseScreenshotEngine):
             self._recycle_pending = True
 
     async def initialize(self) -> None:
+        should_prewarm = False
         async with self._state_lock:
             if self._idle_recycle_task and not self._idle_recycle_task.done():
                 return
@@ -348,14 +499,36 @@ class PlaywrightEngine(BaseScreenshotEngine):
             if current_rss := self._get_total_rss():
                 self._rss_baseline_bytes = current_rss
             self._idle_recycle_task = asyncio.create_task(self._idle_recycle_loop())
-        await self._prewarm_browser_and_pool()
+            if self._memory_diag_enabled:
+                self._memory_diag_task = asyncio.create_task(self._memory_diag_loop())
+            should_prewarm = self._prewarm_enabled
+
+        if self._memory_diag_enabled:
+            logger.info(
+                f"截图引擎内存诊断已开启，输出间隔 {self._memory_diag_interval_seconds} 秒。",
+                "PlaywrightEngine",
+            )
+
+        if should_prewarm:
+            await self._prewarm_browser_and_pool()
+        else:
+            logger.info(
+                "截图引擎启动预热已禁用，将在首次渲染时按需拉起浏览器。",
+                "PlaywrightEngine",
+            )
+
+        if self._memory_diag_enabled:
+            await self._log_memory_diagnostics("startup")
 
     async def close(self) -> None:
         idle_task: asyncio.Task[None] | None = None
+        memory_diag_task: asyncio.Task[None] | None = None
         async with self._state_lock:
             self._closing = True
             idle_task = self._idle_recycle_task
             self._idle_recycle_task = None
+            memory_diag_task = self._memory_diag_task
+            self._memory_diag_task = None
             for task in self._inflight_tasks.values():
                 task.cancel()
             self._inflight_tasks.clear()
@@ -366,6 +539,10 @@ class PlaywrightEngine(BaseScreenshotEngine):
             idle_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await idle_task
+        if memory_diag_task:
+            memory_diag_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await memory_diag_task
 
         await self._dispose_context_pool()
         await _shutdown_browser_instance()
@@ -795,6 +972,8 @@ class PlaywrightEngine(BaseScreenshotEngine):
                     f"截图引擎触发回收({reason})，已重建浏览器实例。",
                     "PlaywrightEngine",
                 )
+                if self._memory_diag_enabled:
+                    await self._log_memory_diagnostics(f"recycle:{reason}")
             except Exception as e:
                 logger.warning("浏览器实例重建失败。", "PlaywrightEngine", e=e)
 
