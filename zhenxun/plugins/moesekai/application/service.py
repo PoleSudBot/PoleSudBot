@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from collections import defaultdict
+import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Literal
 
 from nonebot.adapters import Bot
 from nonebot_plugin_alconna import At, Image, Text, UniMessage
@@ -12,9 +12,11 @@ from tortoise import Tortoise
 from ..adapters.results import (
     MoeForwardMessage,
     MoeImageTextMessage,
+    build_alias_profile_image,
     build_forward_message,
     build_image_message,
     build_native_image_text_message,
+    build_text_block_image,
 )
 from ..adapters.reminder_renderer import render_reminder_card
 from ..adapters.runtime import AsyncHttpx, MessageUtils, PlatformUtils, logger
@@ -30,20 +32,19 @@ from ..constants import (
     MODULE_NAME,
     PREDICTION_SUPPORTED_SERVERS,
     RANK_SOURCE_NAME,
-    SEEDS_DIR,
     SERVER_SET,
     SERVERS,
     SCOPE_GLOBAL,
     STATE_DIR,
     YCX_SUPPORTED_SERVERS,
     make_scope_key,
-    normalize_alias,
     normalize_deck_difficulty,
     normalize_live_type,
     server_label,
 )
 from ..master_data import RegionUpdateResult
 from ..providers import (
+    alias_provider,
     asset_provider,
     character_cache_provider,
     hub_provider,
@@ -55,7 +56,6 @@ from ..repositories import (
     add_blacklist_entry,
     create_notification_record,
     delete_user_binding,
-    get_alias_entry,
     get_blacklist_entry,
     get_group_feature_toggle,
     get_or_create_user_settings,
@@ -63,21 +63,16 @@ from ..repositories import (
     get_user_feature_subscription,
     get_user_settings,
     has_notification_record,
-    list_alias_entries,
     list_blacklist_entries,
     list_enabled_group_feature_toggles,
     list_user_bindings,
     list_user_feature_subscriptions,
     query_bindings_by_uid,
-    remove_alias_entry,
     remove_blacklist_entry,
     remove_user_feature_subscription,
-    resolve_alias,
-    search_alias_entries,
     set_allow_share_profile,
     set_default_server,
     set_group_feature_toggle,
-    upsert_alias_entry,
     upsert_user_binding,
     upsert_user_feature_subscription,
 )
@@ -89,10 +84,15 @@ NEW_CARD_TEST_CARD_LIMIT = 3
 NEW_CARD_TEST_STAMP_LIMIT = 3
 NEW_CARD_TEST_SCAN_LIMIT = 12
 NEW_CARD_TEST_ASSET_TIMEOUT_SECONDS = 6.0
+ALIAS_IMAGE_TEXT_THRESHOLD = 100
+ALIAS_IMAGE_COUNT_THRESHOLD = 20
 _ALIAS_STATE = JsonStateStore(STATE_DIR / "alias_sync_state.json")
 
 
 class MoeSekaiApplication:
+    def __init__(self) -> None:
+        self._shared_capture_tasks: dict[str, asyncio.Task[bytes]] = {}
+
     def validate_game_id(self, game_id: str) -> str | None:
         if not game_id.isdigit():
             return "游戏ID必须全部为数字"
@@ -154,58 +154,7 @@ class MoeSekaiApplication:
                 await set_default_server("qq", user_id, server)
 
     async def seed_default_aliases(self) -> None:
-        state = _ALIAS_STATE.load({})
-        if not state.get("character_seed_loaded"):
-            for alias, character_id in hub_provider.read_character_alias_seed(
-                SEEDS_DIR / "character_alias.sql"
-            ):
-                await upsert_alias_entry(
-                    target_type=ALIAS_TARGET_CHARACTER,
-                    target_value=character_id,
-                    alias=alias,
-                    scope=SCOPE_GLOBAL,
-                    created_by="system",
-                )
-            state["character_seed_loaded"] = True
-            _ALIAS_STATE.save(state)
-
-        characters = await master_data_provider.get_game_characters("jp")
-        for character in characters:
-            char_id = str(character.get("id"))
-            aliases = [
-                f"{character.get('firstName', '')}{character.get('givenName', '')}".strip(),
-                f"{character.get('firstNameEnglish', '')} {character.get('givenNameEnglish', '')}".strip(),
-                str(character.get("givenName", "")).strip(),
-                str(character.get("givenNameEnglish", "")).strip(),
-                char_id,
-            ]
-            for alias in aliases:
-                if alias:
-                    await upsert_alias_entry(
-                        target_type=ALIAS_TARGET_CHARACTER,
-                        target_value=char_id,
-                        alias=alias,
-                        scope=SCOPE_GLOBAL,
-                        created_by="system",
-                    )
-
-        musics = await master_data_provider.get_musics("jp")
-        for music in musics:
-            music_id = str(music.get("id"))
-            aliases = [
-                str(music.get("title", "")).strip(),
-                str(music.get("pronunciation", "")).strip(),
-                music_id,
-            ]
-            for alias in aliases:
-                if alias:
-                    await upsert_alias_entry(
-                        target_type=ALIAS_TARGET_MUSIC,
-                        target_value=music_id,
-                        alias=alias,
-                        scope=SCOPE_GLOBAL,
-                        created_by="system",
-                    )
+        return None
 
     async def sync_music_aliases(self, *, force: bool = False) -> None:
         state = _ALIAS_STATE.load({})
@@ -215,35 +164,9 @@ class MoeSekaiApplication:
             if datetime.now().timestamp() - float(last_sync) < interval:
                 return
         alias_items = await hub_provider.get_music_alias_index()
-        synced = False
-        for item in alias_items:
-            try:
-                music_id = int(item.get("music_id", 0))
-            except (TypeError, ValueError):
-                continue
-            if not music_id:
-                continue
-            aliases = item.get("aliases", [])
-            if not isinstance(aliases, list):
-                continue
-            for alias in aliases:
-                alias_text = str(alias).strip()
-                if not alias_text:
-                    continue
-                await upsert_alias_entry(
-                    target_type=ALIAS_TARGET_MUSIC,
-                    target_value=str(music_id),
-                    alias=alias_text,
-                    scope=SCOPE_GLOBAL,
-                    created_by="system",
-                )
-                synced = True
-        if not synced and alias_items:
-            synced = True
-        if not synced:
-            return
+        snapshot_items = alias_provider.refresh_music_alias_snapshot(alias_items)
         state["music_alias_source"] = "MoeSekai-Hub/music_aliases.json"
-        state["music_alias_sync_count"] = len(alias_items)
+        state["music_alias_sync_count"] = len(snapshot_items)
         state["music_alias_sync_at"] = datetime.now().timestamp()
         _ALIAS_STATE.save(state)
 
@@ -763,7 +686,13 @@ class MoeSekaiApplication:
                     f"B站链接：{bvid_url}" if bvid_url else None,
                 )
         try:
-            image = await screenshot_service.capture_story(event_id)
+            if force_refresh:
+                image = await screenshot_service.capture_story(event_id)
+            else:
+                image = await self._await_shared_capture(
+                    f"story:{event_id}",
+                    lambda: screenshot_service.capture_story(event_id),
+                )
         except ScreenshotError as exc:
             return exc.to_user_message()
         story_cache_provider.set(event_id, image)
@@ -798,31 +727,27 @@ class MoeSekaiApplication:
         platform: str | None = None,
         group_id: str | None = None,
     ) -> str | None:
-        if query.isdigit():
-            return query
-        scopes = []
-        if group_id:
-            scopes.append(make_scope_key(group_id, platform=platform))
-        scopes.append(SCOPE_GLOBAL)
-        if entry := await resolve_alias(
-            target_type=ALIAS_TARGET_CHARACTER,
-            alias=query,
-            scopes=scopes,
-        ):
-            return entry.target_value
-        normalized = normalize_alias(query)
-        for character in await master_data_provider.get_game_characters("jp"):
-            character_id = str(character.get("id"))
-            names = [
-                f"{character.get('firstName', '')}{character.get('givenName', '')}".strip(),
-                f"{character.get('firstNameEnglish', '')}{character.get('givenNameEnglish', '')}".strip(),
-                str(character.get("givenName", "")).strip(),
-                str(character.get("givenNameEnglish", "")).strip(),
-                character_id,
-            ]
-            if any(normalized == normalize_alias(name) for name in names if name):
-                return character_id
-        return None
+        result = await alias_provider.resolve_character(
+            query,
+            platform=platform,
+            group_id=group_id,
+        )
+        return result.target_id if result else None
+
+    async def _await_shared_capture(
+        self,
+        key: str,
+        factory: Callable[[], Awaitable[bytes]],
+    ) -> bytes:
+        task = self._shared_capture_tasks.get(key)
+        if task is None:
+            task = asyncio.create_task(factory())
+            self._shared_capture_tasks[key] = task
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done() and self._shared_capture_tasks.get(key) is task:
+                self._shared_capture_tasks.pop(key, None)
 
     async def handle_character(
         self,
@@ -845,7 +770,13 @@ class MoeSekaiApplication:
             if cached is not None:
                 return cached
         try:
-            image = await screenshot_service.capture_character(resolved_character_id)
+            if force_refresh:
+                image = await screenshot_service.capture_character(resolved_character_id)
+            else:
+                image = await self._await_shared_capture(
+                    f"character:{resolved_character_id}",
+                    lambda: screenshot_service.capture_character(resolved_character_id),
+                )
         except ScreenshotError as exc:
             return exc.to_user_message()
         character_cache_provider.set(resolved_character_id, image)
@@ -858,29 +789,47 @@ class MoeSekaiApplication:
         platform: str | None = None,
         group_id: str | None = None,
     ) -> str | None:
-        if query.isdigit():
-            return query
-        scopes = []
-        if group_id:
-            scopes.append(make_scope_key(group_id, platform=platform))
-        scopes.append(SCOPE_GLOBAL)
-        if entry := await resolve_alias(
-            target_type=ALIAS_TARGET_MUSIC,
-            alias=query,
-            scopes=scopes,
-        ):
-            return entry.target_value
-        normalized = normalize_alias(query)
-        for music in await master_data_provider.get_musics("jp"):
-            music_id = str(music.get("id"))
-            names = [
-                str(music.get("title", "")).strip(),
-                str(music.get("pronunciation", "")).strip(),
-                music_id,
-            ]
-            if any(normalized == normalize_alias(name) for name in names if name):
-                return music_id
-        return None
+        result = await alias_provider.resolve_music(
+            query,
+            platform=platform,
+            group_id=group_id,
+        )
+        return result.target_id if result else None
+
+    @staticmethod
+    def _format_alias_profile_text(profile: Any) -> str:
+        lines = [profile.display_title]
+        if profile.merged_aliases:
+            lines.append(f"别名：{'，'.join(profile.merged_aliases)}")
+        if profile.group_aliases:
+            lines.append(f"本群别名：{'，'.join(profile.group_aliases)}")
+        return "\n".join(lines)
+
+    async def _maybe_render_alias_message(
+        self,
+        text: str,
+        *,
+        alias_count: int = 0,
+    ) -> str | MoeImageTextMessage:
+        if len(text) <= ALIAS_IMAGE_TEXT_THRESHOLD and alias_count <= ALIAS_IMAGE_COUNT_THRESHOLD:
+            return text
+        return build_native_image_text_message(build_text_block_image(text))
+
+    async def _maybe_render_alias_profile_message(
+        self,
+        profile: Any,
+    ) -> str | MoeImageTextMessage:
+        text = self._format_alias_profile_text(profile)
+        alias_count = len(profile.merged_aliases) + len(profile.group_aliases)
+        if len(text) <= ALIAS_IMAGE_TEXT_THRESHOLD and alias_count <= ALIAS_IMAGE_COUNT_THRESHOLD:
+            return text
+        return build_native_image_text_message(
+            build_alias_profile_image(
+                title=profile.display_title,
+                aliases=profile.merged_aliases,
+                group_aliases=profile.group_aliases,
+            )
+        )
 
     async def handle_alias_command(
         self,
@@ -895,7 +844,7 @@ class MoeSekaiApplication:
         is_superuser: bool = False,
         can_manage_group: bool = False,
         global_scope: bool = False,
-    ) -> str:
+    ) -> str | MoeImageTextMessage:
         scope = SCOPE_GLOBAL if global_scope else make_scope_key(group_id, platform=platform)
         allow_global = is_superuser or (
             group_id and group_id in get_settings().alias_global_editor_groups
@@ -907,59 +856,65 @@ class MoeSekaiApplication:
                 return "只有群管理员或超级用户才能编辑本群别名"
 
         if operation == "query":
-            scopes = [scope, SCOPE_GLOBAL] if scope != SCOPE_GLOBAL else [SCOPE_GLOBAL]
             if target_type == ALIAS_TARGET_CHARACTER:
-                target_id = await self._resolve_character_id(
+                resolved = await alias_provider.resolve_character(
                     query,
                     platform=platform,
                     group_id=group_id,
                 )
+                profile_loader = alias_provider.get_character_profile
+                search_loader = alias_provider.search_character
             else:
-                target_id = await self._resolve_music_id(
+                resolved = await alias_provider.resolve_music(
                     query,
                     platform=platform,
                     group_id=group_id,
                 )
-            if target_id:
-                aliases = await list_alias_entries(
-                    target_type=target_type,
-                    target_value=target_id,
+                profile_loader = alias_provider.get_music_profile
+                search_loader = alias_provider.search_music
+
+            if resolved:
+                profile = await profile_loader(
+                    resolved.target_id,
+                    platform=platform,
+                    group_id=group_id,
                 )
-                if not aliases:
-                    return f"未找到 {query} 的别名数据"
-                grouped: dict[str, list[str]] = defaultdict(list)
-                for entry in aliases:
-                    grouped[entry.scope].append(entry.alias)
-                lines = [f"{query} -> {target_id}"]
-                for alias_scope, alias_list in grouped.items():
-                    scope_name = "全局" if alias_scope == SCOPE_GLOBAL else "本群"
-                    lines.append(f"{scope_name}别名：{' / '.join(sorted(set(alias_list))[:20])}")
-                return "\n".join(lines)
-            matches = await search_alias_entries(
-                target_type=target_type,
-                keyword=query,
-                scopes=scopes,
+                if not profile:
+                    return "未找到相关别名"
+                return await self._maybe_render_alias_profile_message(profile)
+
+            matches = await search_loader(
+                query,
+                platform=platform,
+                group_id=group_id,
             )
             if not matches:
                 return "未找到相关别名"
-            return "\n".join(
-                [f"{entry.alias} -> {entry.target_value} ({'全局' if entry.scope == SCOPE_GLOBAL else '本群'})" for entry in matches]
+            result = "\n".join(
+                f"{entry.matched_text} -> {entry.target_id}. {entry.canonical_name}"
+                for entry in matches
             )
+            return await self._maybe_render_alias_message(result)
 
         if operation == "add":
             if not alias:
                 return "请提供要添加的别名"
             if target_type == ALIAS_TARGET_CHARACTER:
-                target_id = await self._resolve_character_id(
-                    query, platform=platform, group_id=group_id
+                resolved = await alias_provider.resolve_character(
+                    query,
+                    platform=platform,
+                    group_id=group_id,
                 )
             else:
-                target_id = await self._resolve_music_id(
-                    query, platform=platform, group_id=group_id
+                resolved = await alias_provider.resolve_music(
+                    query,
+                    platform=platform,
+                    group_id=group_id,
                 )
+            target_id = resolved.target_id if resolved else None
             if not target_id:
                 return f"未找到目标：{query}"
-            await upsert_alias_entry(
+            await alias_provider.add_managed_alias(
                 target_type=target_type,
                 target_value=target_id,
                 alias=alias,
@@ -970,12 +925,16 @@ class MoeSekaiApplication:
 
         if not alias:
             return "请提供要删除的别名"
-        removed = await remove_alias_entry(
+        removed = await alias_provider.remove_managed_alias(
             target_type=target_type,
             alias=alias,
             scope=scope,
         )
-        return "已删除别名" if removed else "该别名不存在"
+        if removed == "deleted":
+            return "已删除别名"
+        if removed == "system":
+            return "该别名为系统别名，不可删除"
+        return "该别名不存在"
 
     async def handle_admin_blacklist(self, command: ParsedCommand, operator_id: str) -> str:
         if command.admin_target_type == "uid":

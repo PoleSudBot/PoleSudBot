@@ -45,7 +45,7 @@ class RankingProvider:
             return []
         cache_key = f"rk:events:{server}"
         cached = await MoeSekaiCache.get(cache_key)
-        if cached:
+        if cached is not None:
             return cached
         base = get_settings().ranking_api_base.rstrip("/")
         payload = await AsyncHttpx.get_json(
@@ -75,7 +75,7 @@ class RankingProvider:
             return None
         cache_key = f"rk:latest:{server}:{event_id}"
         cached = await MoeSekaiCache.get(cache_key)
-        if cached:
+        if cached is not None:
             return self._build_snapshot(server, cached)
         base = get_settings().ranking_api_base.rstrip("/")
         payload = await AsyncHttpx.get_json(

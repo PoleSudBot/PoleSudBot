@@ -19,6 +19,7 @@ class AssetCacheProvider:
         self._store = store or PathBinaryFileStore(ASSET_MIRROR_DIR)
         self._manifest_store = manifest_store or JsonStateStore(ASSET_CACHE_INDEX_PATH)
         self._miss_store = miss_store or JsonStateStore(STATE_DIR / "asset_miss_cache.json")
+        self._miss_state_cache: dict[str, float] | None = None
 
     @staticmethod
     def canonical_relative_paths(
@@ -153,11 +154,10 @@ class AssetCacheProvider:
             if isinstance(path, str) and isinstance(value, dict)
         }
 
-    def _load_miss_state(self) -> dict[str, float]:
-        payload = self._miss_store.load({})
+    @staticmethod
+    def _normalize_miss_state(payload: Any, *, now: float) -> tuple[dict[str, float], bool]:
         if not isinstance(payload, dict):
-            return {}
-        now = time.time()
+            return {}, False
         changed = False
         result: dict[str, float] = {}
         for url, expire_at in payload.items():
@@ -170,9 +170,28 @@ class AssetCacheProvider:
                 changed = True
                 continue
             result[str(url)] = expire_ts
-        if changed:
-            self._miss_store.save(result)
-        return result
+        return result, changed
+
+    def _load_miss_state(self) -> dict[str, float]:
+        now = time.time()
+        if self._miss_state_cache is None:
+            payload = self._miss_store.load({})
+            normalized, changed = self._normalize_miss_state(payload, now=now)
+            self._miss_state_cache = normalized
+            if changed:
+                self._miss_store.save(normalized)
+            return self._miss_state_cache
+
+        expired_urls = [
+            url for url, expire_at in self._miss_state_cache.items() if expire_at <= now
+        ]
+        if not expired_urls:
+            return self._miss_state_cache
+
+        for url in expired_urls:
+            self._miss_state_cache.pop(url, None)
+        self._miss_store.save(self._miss_state_cache)
+        return self._miss_state_cache
 
     def is_known_missing(self, url: str) -> bool:
         return url in self._load_miss_state()
@@ -180,12 +199,14 @@ class AssetCacheProvider:
     def record_missing(self, url: str) -> None:
         payload = self._load_miss_state()
         payload[url] = time.time() + get_settings().asset_miss_cache_ttl_seconds
+        self._miss_state_cache = payload
         self._miss_store.save(payload)
 
     def clear_missing(self, url: str) -> None:
         payload = self._load_miss_state()
         if url in payload:
             payload.pop(url, None)
+            self._miss_state_cache = payload
             self._miss_store.save(payload)
 
 

@@ -572,15 +572,30 @@ class MasterDataProvider:
             result.current_version = selected_info.version
 
             needs_update = force or not region_state
-            if result.current_version and cls._compare_versions(
+            version_compare = cls._compare_versions(
                 result.current_version,
                 result.previous_version,
-            ) > 0:
+            )
+            if result.current_version and version_compare > 0:
                 needs_update = True
-            if any(
-                not cls._dataset_path(server, dataset).exists()
+            missing_datasets = [
+                dataset
                 for dataset in MASTER_DATASET_KEYS
+                if not cls._dataset_path(server, dataset).exists()
+            ]
+            if (
+                region_state
+                and result.previous_version
+                and version_compare < 0
             ):
+                result.download_success = True
+                result.selection_note = (
+                    "候选版本低于当前已落地版本，已跳过更新"
+                    if force
+                    else "候选版本低于当前已落地版本，已跳过自动回退"
+                )
+                return result
+            if missing_datasets:
                 needs_update = True
 
             if not needs_update:
@@ -643,6 +658,8 @@ class MasterDataProvider:
         path = cls._dataset_path(server, dataset)
         if not path.exists():
             await cls.update_region(server)
+        if not path.exists():
+            return []
         payload = cls._load_dataset_from_disk(server, dataset)
         cls._cache[key] = payload
         return payload

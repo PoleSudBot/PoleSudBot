@@ -225,7 +225,7 @@ async def list_alias_entries(
         query = query.filter(scope=scope)
     if target_value is not None:
         query = query.filter(target_value=target_value)
-    return await query.order_by("scope", "alias").all()
+    return await query.order_by("scope", "created_at", "id").all()
 
 
 async def search_alias_entries(

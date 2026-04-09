@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from contextlib import asynccontextmanager
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from io import BytesIO
 from math import ceil, floor
@@ -21,6 +21,8 @@ _MOBILE_USER_AGENT = (
     "AppleWebKit/605.1.15 (KHTML, like Gecko) "
     "Version/16.0 Mobile/15E148 Safari/604.1"
 )
+
+WaitCallback = Callable[[Any, int, dict[str, Any] | None], Awaitable[None]]
 
 
 def _build_viewport(width: int) -> dict[str, int]:
@@ -70,6 +72,7 @@ class ScreenshotJob:
     wait_until: Literal["domcontentloaded", "load", "networkidle"] = "networkidle"
     wait_selector: str | None = None
     wait_function: str | None = None
+    wait_callback: WaitCallback | None = None
     prepare_script: str | None = None
     before_capture_script: str | None = None
     scroll_if_function: str | None = None
@@ -78,12 +81,17 @@ class ScreenshotJob:
     stability_wait_ms: int = 0
     extra_wait_seconds: float = 1.5
     timeout_seconds: int = 45
+    log_timing: bool = False
 
 
 class ScreenshotService:
+    _DECK_IDLE_GRACE_SECONDS = 2.0
+    _DECK_POLL_INTERVAL_SECONDS = 0.2
+
     def __init__(self) -> None:
         self._site_failures: dict[str, float] = {}
         self._last_success_site: dict[str, str] = {}
+        self._capture_semaphore = asyncio.Semaphore(2)
 
     @staticmethod
     def _quality_scale_factor(quality: int) -> float:
@@ -101,6 +109,35 @@ class ScreenshotService:
     def _site_key(url: str) -> str:
         parsed = urlsplit(url)
         return f"{parsed.scheme}://{parsed.netloc}"
+
+    @staticmethod
+    def _append_stage_timing(
+        stage_timings: list[tuple[str, float]] | None,
+        stage_name: str,
+        started_at: float,
+    ) -> None:
+        if stage_timings is None:
+            return
+        stage_timings.append((stage_name, (time.perf_counter() - started_at) * 1000))
+
+    @staticmethod
+    def _format_stage_timings(stage_timings: list[tuple[str, float]]) -> str:
+        if not stage_timings:
+            return "无阶段耗时"
+        return " | ".join(f"{name}={elapsed:.1f}ms" for name, elapsed in stage_timings)
+
+    @staticmethod
+    def _format_attempt_meta(attempt_meta: dict[str, Any]) -> str:
+        parts: list[str] = []
+        page_state = attempt_meta.get("page_state")
+        if page_state:
+            parts.append(f"状态={page_state}")
+        page_state_detail = attempt_meta.get("page_state_detail")
+        if page_state_detail:
+            parts.append(f"详情={page_state_detail}")
+        if attempt_meta.get("fallback_clicked") == "1":
+            parts.append("兜底点击=1")
+        return " | ".join(parts)
 
     def _filter_urls(self, kind: str, urls: list[str]) -> list[str]:
         now = time.time()
@@ -152,40 +189,221 @@ async (ms) => {
             milliseconds,
         )
 
-    @asynccontextmanager
-    async def _new_page(
-        self,
-        *,
-        viewport: dict[str, int],
-        user_agent: str | None,
-        device_scale_factor: float,
-    ):
-        from nonebot_plugin_htmlrender.browser import get_browser
+    @staticmethod
+    async def _get_browser() -> Any:
+        from zhenxun.services.renderer.engine import get_managed_browser
 
-        browser = await get_browser()
-        context = await browser.new_context(
-            viewport=viewport,
-            user_agent=user_agent,
-            device_scale_factor=device_scale_factor,
+        return await get_managed_browser()
+
+    @staticmethod
+    def _is_deck_terminal_state(phase: str) -> bool:
+        return phase in {"success", "empty", "error"}
+
+    async def _read_deck_page_state(self, page: Any) -> dict[str, Any]:
+        state = await page.evaluate(
+            """
+() => {
+  const isVisible = (element) => {
+    if (!(element instanceof HTMLElement)) {
+      return false;
+    }
+    const style = window.getComputedStyle(element);
+    if (style.display === 'none' || style.visibility === 'hidden') {
+      return false;
+    }
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+  const text = document.body?.innerText || '';
+  const knownErrors = [
+    '用户数据未找到，请确认用户ID/所选服务器是否正确，并已在 Haruki 上传数据。',
+    '该用户的公开API未开启，请先在 Haruki 上开启公开API。',
+    '读取到的用户数据格式异常，请重新同步 Haruki/OAuth 数据后重试。',
+    '用户数据未找到 (404)',
+    '公开API未开启 (403)',
+  ];
+  const errorText = knownErrors.find((item) => text.includes(item)) || '';
+  const emptyText = '未找到可推荐的卡组，请检查您的卡牌数据和配置。';
+  const startButton = Array.from(document.querySelectorAll('button')).find(
+    (button) => isVisible(button) && (button.textContent || '').includes('开始计算')
+  );
+  const resultCards = Array.from(
+    document.querySelectorAll(
+      '.dr-result-row, .deck-card, .result-card, [class*="deck-card"], [class*="result-card"]'
+    )
+  ).filter((element) => {
+    if (!(element instanceof HTMLElement) || !isVisible(element)) {
+      return false;
+    }
+    const rect = element.getBoundingClientRect();
+    return rect.width >= 24 && rect.height >= 24;
+  });
+  const keyImages = resultCards
+    .slice(0, 3)
+    .flatMap((card) => Array.from(card.querySelectorAll('img')).slice(0, 4));
+  const keyImagesReady =
+    keyImages.length === 0 ||
+    keyImages.every((img) => img.complete && img.naturalWidth > 0);
+  const hasResultTitle =
+    text.includes('推荐卡组 Top') ||
+    text.includes('组卡结果') ||
+    text.includes('推荐结果');
+  const isRunning =
+    text.includes('计算中...') || !!document.querySelector('.dr-progress-container');
+  let phase = 'loading';
+  if (errorText) {
+    phase = 'error';
+  } else if (text.includes(emptyText)) {
+    phase = 'empty';
+  } else if (hasResultTitle && resultCards.length > 0 && keyImagesReady) {
+    phase = 'success';
+  } else if (isRunning || (hasResultTitle && resultCards.length > 0)) {
+    phase = 'running';
+  } else if (startButton && !startButton.disabled) {
+    phase = 'idle';
+  }
+  return {
+    phase,
+    detail: errorText,
+    hasStartButton: !!startButton,
+    startButtonDisabled: !!startButton?.disabled,
+    hasResultTitle,
+    keyImagesReady,
+    resultCardCount: resultCards.length,
+  };
+}
+            """.strip()
         )
-        page = await context.new_page()
-        try:
-            yield page
-        finally:
-            await page.close()
-            await context.close()
+        if not isinstance(state, dict):
+            return {"phase": "loading"}
+        return state
 
-    async def _capture_once(self, job: ScreenshotJob, url: str) -> bytes:
+    async def _click_deck_start_button(self, page: Any) -> bool:
+        clicked = await page.evaluate(
+            """
+() => {
+  const isVisible = (element) => {
+    if (!(element instanceof HTMLElement)) {
+      return false;
+    }
+    const style = window.getComputedStyle(element);
+    if (style.display === 'none' || style.visibility === 'hidden') {
+      return false;
+    }
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+  const button = Array.from(document.querySelectorAll('button')).find(
+    (candidate) =>
+      isVisible(candidate) &&
+      !candidate.disabled &&
+      (candidate.textContent || '').includes('开始计算')
+  );
+  if (!(button instanceof HTMLElement)) {
+    return false;
+  }
+  button.click();
+  return true;
+}
+            """.strip()
+        )
+        return bool(clicked)
+
+    async def _wait_for_deck_terminal_state(
+        self,
+        page: Any,
+        timeout_ms: int,
+        attempt_meta: dict[str, Any] | None = None,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + (timeout_ms / 1000)
+        idle_since: float | None = None
+        clicked_fallback = False
+        last_phase = "loading"
+
+        while True:
+            state = await self._read_deck_page_state(page)
+            phase = str(state.get("phase") or "loading")
+            last_phase = phase
+            if attempt_meta is not None:
+                attempt_meta["page_state"] = phase
+                detail = str(state.get("detail") or "")
+                if detail:
+                    attempt_meta["page_state_detail"] = detail
+                else:
+                    attempt_meta.pop("page_state_detail", None)
+
+            if self._is_deck_terminal_state(phase):
+                return
+
+            now = loop.time()
+            can_fallback_click = bool(state.get("hasStartButton")) and not bool(
+                state.get("startButtonDisabled")
+            )
+            if phase == "idle" and can_fallback_click:
+                if idle_since is None:
+                    idle_since = now
+                if (
+                    not clicked_fallback
+                    and now - idle_since >= self._DECK_IDLE_GRACE_SECONDS
+                ):
+                    clicked_fallback = await self._click_deck_start_button(page)
+                    if clicked_fallback:
+                        if attempt_meta is not None:
+                            attempt_meta["fallback_clicked"] = "1"
+                        logger.debug(
+                            "MoeSekai 截图阶段 [活动组卡] "
+                            "检测到待机态，触发一次兜底点击 开始计算",
+                            MODULE_NAME,
+                        )
+                        idle_since = None
+                        continue
+            else:
+                idle_since = None
+
+            if now >= deadline:
+                if attempt_meta is not None:
+                    attempt_meta["page_state"] = "stalled"
+                raise TimeoutError(f"活动组卡页面在 {last_phase} 状态下等待超时")
+
+            await asyncio.sleep(self._DECK_POLL_INTERVAL_SECONDS)
+
+    async def _capture_once(
+        self,
+        job: ScreenshotJob,
+        url: str,
+        *,
+        stage_timings: list[tuple[str, float]] | None = None,
+        attempt_meta: dict[str, Any] | None = None,
+    ) -> bytes:
         timeout_ms = job.timeout_seconds * 1000
-        async with self._new_page(
+        context = None
+        page = None
+        stage_started = time.perf_counter()
+        browser = await self._get_browser()
+        self._append_stage_timing(stage_timings, "browser/get", stage_started)
+        stage_started = time.perf_counter()
+        context = await browser.new_context(
             viewport=job.viewport,
             user_agent=job.user_agent,
             device_scale_factor=job.device_scale_factor,
-        ) as page:
+        )
+        self._append_stage_timing(stage_timings, "context/new", stage_started)
+        stage_started = time.perf_counter()
+        page = await context.new_page()
+        self._append_stage_timing(stage_timings, "page/new", stage_started)
+        try:
+            stage_started = time.perf_counter()
             await page.goto(url, wait_until=job.wait_until, timeout=timeout_ms)
+            self._append_stage_timing(stage_timings, "goto", stage_started)
             if job.prepare_script:
+                stage_started = time.perf_counter()
                 await page.evaluate(job.prepare_script)
+                self._append_stage_timing(
+                    stage_timings, "prepare_script", stage_started
+                )
             if job.required_body_classes:
+                stage_started = time.perf_counter()
                 await page.wait_for_function(
                     """
 (classes) => {
@@ -196,14 +414,28 @@ async (ms) => {
                     arg=job.required_body_classes,
                     timeout=timeout_ms,
                 )
+                self._append_stage_timing(
+                    stage_timings,
+                    "required_body_classes",
+                    stage_started,
+                )
             if job.wait_selector:
+                stage_started = time.perf_counter()
                 await page.wait_for_selector(job.wait_selector, timeout=timeout_ms)
+                self._append_stage_timing(stage_timings, "wait_selector", stage_started)
+            if job.wait_callback:
+                stage_started = time.perf_counter()
+                await job.wait_callback(page, timeout_ms, attempt_meta)
+                self._append_stage_timing(stage_timings, "wait_callback", stage_started)
             should_scroll = job.scroll_through_page
             if job.scroll_if_function:
+                stage_started = time.perf_counter()
                 should_scroll = should_scroll or bool(
                     await page.evaluate(job.scroll_if_function)
                 )
+                self._append_stage_timing(stage_timings, "scroll/check", stage_started)
             if should_scroll:
+                stage_started = time.perf_counter()
                 await page.evaluate(
                     """
 async () => {
@@ -223,21 +455,49 @@ async () => {
                     """.strip()
                 )
                 await asyncio.sleep(0.05)
+                self._append_stage_timing(stage_timings, "scroll", stage_started)
             if job.wait_function:
+                stage_started = time.perf_counter()
                 await page.wait_for_function(job.wait_function, timeout=timeout_ms)
+                self._append_stage_timing(stage_timings, "wait_function", stage_started)
             if job.before_capture_script:
+                stage_started = time.perf_counter()
                 await page.evaluate(job.before_capture_script)
+                self._append_stage_timing(
+                    stage_timings,
+                    "before_capture_script",
+                    stage_started,
+                )
+            stage_started = time.perf_counter()
             await self._wait_for_stability(page, job.stability_wait_ms)
+            self._append_stage_timing(stage_timings, "stability_wait", stage_started)
             if job.extra_wait_seconds > 0:
+                stage_started = time.perf_counter()
                 await asyncio.sleep(job.extra_wait_seconds)
+                self._append_stage_timing(stage_timings, "extra_wait", stage_started)
+            stage_started = time.perf_counter()
             image = await self._capture_image(page, job)
+            self._append_stage_timing(stage_timings, "capture_image", stage_started)
             if job.top_crop_css_pixels > 0:
+                stage_started = time.perf_counter()
                 image = self._crop_image_top(
                     image,
                     top_css_pixels=job.top_crop_css_pixels,
                     device_scale_factor=job.device_scale_factor,
                 )
+                self._append_stage_timing(stage_timings, "crop_image", stage_started)
             return image
+        finally:
+            if page is not None:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+            if context is not None:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
 
     @staticmethod
     async def _page_dimensions(page: Any) -> dict[str, int]:
@@ -345,31 +605,82 @@ async () => {
     async def capture(self, job: ScreenshotJob) -> bytes:
         settings = get_settings()
         errors: list[str] = []
+        selection_started = time.perf_counter()
         candidates = self._filter_urls(job.kind, job.urls)
-        for attempt in range(1, settings.screenshot_retry_times + 1):
-            for url in candidates:
-                site_key = self._site_key(url)
-                try:
-                    image = await self._capture_once(job, url)
-                    self._last_success_site[job.kind] = site_key
-                    return image
-                except Exception as exc:
-                    safe_url = _redact_url_secrets(url)
-                    detail = (
-                        f"第{attempt}次 {safe_url} "
-                        f"{type(exc).__name__}: {exc}"
-                    )
-                    logger.warning(
-                        f"MoeSekai 截图失败 [{job.kind}] {detail}",
-                        MODULE_NAME,
-                    )
-                    errors.append(detail)
-                    self._site_failures[site_key] = (
-                        time.time() + settings.screenshot_retry_delay_seconds * 30
-                    )
-            if attempt < settings.screenshot_retry_times:
-                await asyncio.sleep(settings.screenshot_retry_delay_seconds)
-                candidates = self._filter_urls(job.kind, job.urls)
+        selection_elapsed = (time.perf_counter() - selection_started) * 1000
+        if job.log_timing:
+            logger.debug(
+                "MoeSekai 截图阶段 "
+                f"[{job.kind}] 候选站点选择 {selection_elapsed:.1f}ms -> "
+                f"{', '.join(_redact_url_secrets(url) for url in candidates)}",
+                MODULE_NAME,
+            )
+        async with self._capture_semaphore:
+            for attempt in range(1, settings.screenshot_retry_times + 1):
+                for url in candidates:
+                    site_key = self._site_key(url)
+                    attempt_started = time.perf_counter()
+                    stage_timings: list[tuple[str, float]] = []
+                    attempt_meta: dict[str, Any] = {}
+                    try:
+                        image = await self._capture_once(
+                            job,
+                            url,
+                            stage_timings=stage_timings if job.log_timing else None,
+                            attempt_meta=attempt_meta,
+                        )
+                        attempt_elapsed = (time.perf_counter() - attempt_started) * 1000
+                        if job.log_timing:
+                            meta_text = self._format_attempt_meta(attempt_meta)
+                            logger.debug(
+                                "MoeSekai 截图阶段 "
+                                f"[{job.kind}] 第{attempt}次命中站点 "
+                                f"{_redact_url_secrets(url)} 总耗时 {attempt_elapsed:.1f}ms"
+                                f"{f' | {meta_text}' if meta_text else ''} | "
+                                f"{self._format_stage_timings(stage_timings)}",
+                                MODULE_NAME,
+                            )
+                        self._last_success_site[job.kind] = site_key
+                        return image
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        attempt_elapsed = (time.perf_counter() - attempt_started) * 1000
+                        safe_url = _redact_url_secrets(url)
+                        if job.log_timing:
+                            meta_text = self._format_attempt_meta(attempt_meta)
+                            logger.debug(
+                                "MoeSekai 截图阶段 "
+                                f"[{job.kind}] 第{attempt}次失败站点 "
+                                f"{safe_url} 总耗时 {attempt_elapsed:.1f}ms"
+                                f"{f' | {meta_text}' if meta_text else ''} | "
+                                f"{self._format_stage_timings(stage_timings)}",
+                                MODULE_NAME,
+                            )
+                        detail = (
+                            f"第{attempt}次 {safe_url} "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                        logger.warning(
+                            f"MoeSekai 截图失败 [{job.kind}] {detail}",
+                            MODULE_NAME,
+                        )
+                        errors.append(detail)
+                        self._site_failures[site_key] = (
+                            time.time() + settings.screenshot_retry_delay_seconds * 30
+                        )
+                if attempt < settings.screenshot_retry_times:
+                    await asyncio.sleep(settings.screenshot_retry_delay_seconds)
+                    selection_started = time.perf_counter()
+                    candidates = self._filter_urls(job.kind, job.urls)
+                    selection_elapsed = (time.perf_counter() - selection_started) * 1000
+                    if job.log_timing:
+                        logger.debug(
+                            "MoeSekai 截图阶段 "
+                            f"[{job.kind}] 重选候选站点 {selection_elapsed:.1f}ms -> "
+                            f"{', '.join(_redact_url_secrets(url) for url in candidates)}",
+                            MODULE_NAME,
+                        )
         raise ScreenshotError(job.kind, errors)
 
     async def capture_profile(self, server: str, game_id: str) -> bytes:
@@ -629,45 +940,21 @@ async () => {
             )
             for base in settings.site_bases
         ]
-        wait_function = """
-() => {
-  const text = document.body?.innerText || '';
-  const hasResult = text.includes('推荐卡组 Top');
-  const hasKnownError =
-    text.includes('未找到可推荐的卡组') ||
-    text.includes('用户数据未找到') ||
-    text.includes('公开API未开启') ||
-    text.includes('未找到可推荐');
-  const calculating = text.includes('计算中...');
-  if (calculating) {
-    return false;
-  }
-  if (hasKnownError) {
-    return true;
-  }
-  if (!hasResult) {
-    return false;
-  }
-  const card = document.querySelector(
-    '.deck-card, .result-card, [class*="deck-card"], [class*="result-card"]'
-  );
-  if (!(card instanceof HTMLElement)) {
-    return true;
-  }
-  const rect = card.getBoundingClientRect();
-  if (rect.width < 24 || rect.height < 24) {
-    return false;
-  }
-  const images = Array.from(card.querySelectorAll('img')).slice(0, 8);
-  return images.every((img) => img.complete && img.naturalWidth > 0);
-}
-""".strip()
         prepare_script = """
 () => {
   const nav = document.querySelector('body > main > nav');
   if (nav instanceof HTMLElement) {
     nav.style.display = 'none';
   }
+  Array.from(
+    document.querySelectorAll(
+      '[class*="floating"], [class*="Float"], [class*="back-to-top"], [class*="BackToTop"]'
+    )
+  ).forEach((element) => {
+    if (element instanceof HTMLElement) {
+      element.style.display = 'none';
+    }
+  });
   if (!document.head || document.getElementById('__moesekai_capture_style__')) {
     return;
   }
@@ -679,9 +966,96 @@ async () => {
       animation-delay: 0s !important;
       transition-duration: 0s !important;
       transition-delay: 0s !important;
+      scroll-behavior: auto !important;
     }
   `;
   document.head.appendChild(style);
+}
+        """.strip()
+        scroll_if_function = """
+() => {
+  const text = document.body?.innerText || '';
+  if (
+    text.includes('未找到可推荐的卡组') ||
+    text.includes('用户数据未找到') ||
+    text.includes('公开API未开启') ||
+    text.includes('读取到的用户数据格式异常')
+  ) {
+    return false;
+  }
+  const card = document.querySelector(
+    '.dr-result-row, .deck-card, .result-card, [class*="deck-card"], [class*="result-card"]'
+  );
+  if (!(card instanceof HTMLElement)) {
+    return false;
+  }
+  const rect = card.getBoundingClientRect();
+  if (rect.top < 0 || rect.bottom > window.innerHeight + 80) {
+    return true;
+  }
+  return Array.from(card.querySelectorAll('img'))
+    .slice(0, 8)
+    .some((img) => !img.complete || img.naturalWidth <= 0);
+}
+        """.strip()
+        before_capture_script = """
+async () => {
+  const nav = document.querySelector('body > main > nav');
+  if (nav instanceof HTMLElement) {
+    nav.style.display = 'none';
+  }
+  Array.from(
+    document.querySelectorAll(
+      '[class*="floating"], [class*="Float"], [class*="back-to-top"], [class*="BackToTop"]'
+    )
+  ).forEach((element) => {
+    if (element instanceof HTMLElement) {
+      element.style.display = 'none';
+    }
+  });
+  const cards = Array.from(
+    document.querySelectorAll(
+      '.dr-result-row, .deck-card, .result-card, [class*="deck-card"], [class*="result-card"]'
+    )
+  ).slice(0, 3);
+  const images = cards.flatMap(
+    (card) => Array.from(card.querySelectorAll('img')).slice(0, 4)
+  );
+  await Promise.allSettled(
+    images.map(
+      (img) =>
+        img.complete && img.naturalWidth > 0
+          ? Promise.resolve()
+          : new Promise((resolve) => {
+              let settled = false;
+              const finish = () => {
+                if (settled) {
+                  return;
+                }
+                settled = true;
+                resolve(null);
+              };
+              const timer = window.setTimeout(finish, 1200);
+              img.addEventListener(
+                'load',
+                () => {
+                  window.clearTimeout(timer);
+                  finish();
+                },
+                { once: true }
+              );
+              img.addEventListener(
+                'error',
+                () => {
+                  window.clearTimeout(timer);
+                  finish();
+                },
+                { once: true }
+              );
+            })
+    )
+  );
+  window.scrollTo(0, 0);
 }
         """.strip()
         job = ScreenshotJob(
@@ -694,12 +1068,15 @@ async () => {
             user_agent=_MOBILE_USER_AGENT,
             wait_until="domcontentloaded",
             wait_selector="main",
-            wait_function=wait_function,
+            wait_callback=self._wait_for_deck_terminal_state,
             prepare_script=prepare_script,
+            before_capture_script=before_capture_script,
+            scroll_if_function=scroll_if_function,
             top_crop_css_pixels=settings.deck_top_crop,
             stability_wait_ms=42,
             extra_wait_seconds=0,
             timeout_seconds=settings.deck_wait_timeout_seconds,
+            log_timing=True,
         )
         return await self.capture(job)
 
@@ -886,6 +1263,45 @@ async () => {
   });
 }
             """.strip(),
+            scroll_if_function="""
+() => {
+  const root = document.querySelector('main > div:nth-of-type(2)');
+  if (!(root instanceof HTMLElement)) {
+    return false;
+  }
+  const content = Array.from(root.children).find((element) => element.tagName !== 'ASIDE');
+  if (!(content instanceof HTMLElement)) {
+    return false;
+  }
+  const heroImage = Array.from(content.querySelectorAll('img')).find((img) =>
+    (img.getAttribute('alt') || '').includes('Character Trim')
+  );
+  if (!heroImage || !heroImage.complete || heroImage.naturalWidth <= 0) {
+    return true;
+  }
+  const cardLinks = Array.from(content.querySelectorAll('a[href]')).filter((element) => {
+    const href = element.getAttribute('href') || '';
+    return /\\/cards\\/\\d+\\/?$/.test(href);
+  });
+  if (!cardLinks.length) {
+    return false;
+  }
+  const hasVisibleCard = cardLinks.some((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.width >= 24 && rect.height >= 24;
+  });
+  if (!hasVisibleCard) {
+    return true;
+  }
+  return Array.from(content.querySelectorAll('a[href*="/cards/"] svg image')).some((img) => {
+    const href =
+      img.getAttribute('href') ||
+      img.getAttributeNS('http://www.w3.org/1999/xlink', 'href') ||
+      '';
+    return !href;
+  });
+}
+            """.strip(),
             before_capture_script="""
 async () => {
   const cardImageUrls = Array.from(
@@ -932,10 +1348,9 @@ async () => {
   );
 }
             """.strip(),
-            scroll_through_page=True,
             top_crop_css_pixels=settings.character_top_crop,
             stability_wait_ms=45,
-            extra_wait_seconds=3.0,
+            extra_wait_seconds=0,
             timeout_seconds=settings.screenshot_timeout_seconds,
         )
         return await self.capture(job)

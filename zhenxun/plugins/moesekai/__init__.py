@@ -204,7 +204,6 @@ if not _TEST_MODE:
         else:
             get_settings()
         await migrate_legacy_bindings()
-        await master_data_service.update_all(force=False)
         await seed_default_aliases()
 
     async def _auto_update_loop(bot: Bot) -> None:

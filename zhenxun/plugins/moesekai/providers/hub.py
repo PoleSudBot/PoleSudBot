@@ -25,7 +25,7 @@ class HubProvider:
     async def get_manga_index(self) -> list[dict[str, Any]]:
         cache_key = "hub:mangas:index"
         cached = await MoeSekaiCache.get(cache_key)
-        if cached:
+        if cached is not None:
             return cached
         payload = await AsyncHttpx.get_json(self.MANGA_INDEX_URL, raise_on_failure=True)
         items: list[Any]
@@ -91,7 +91,7 @@ class HubProvider:
     async def get_event_bvid_mapping(self) -> list[dict[str, Any]]:
         cache_key = "hub:event_bvid"
         cached = await MoeSekaiCache.get(cache_key)
-        if cached:
+        if cached is not None:
             return cached
         payload = await AsyncHttpx.get_json(self.EVENT_BVID_URL, raise_on_failure=True)
         result = payload.get("events", []) if isinstance(payload, dict) else []
@@ -112,7 +112,7 @@ class HubProvider:
     async def get_music_alias_index(self) -> list[dict[str, Any]]:
         cache_key = "hub:music_alias:index"
         cached = await MoeSekaiCache.get(cache_key)
-        if cached:
+        if cached is not None:
             return cached
         payload = await AsyncHttpx.get_json(
             self.MUSIC_ALIAS_INDEX_URL,
