@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import time
+from types import SimpleNamespace
 
 import nonebot
 import pytest
@@ -8,7 +10,11 @@ import pytest
 nonebot.init()
 
 from zhenxun.plugins.moesekai.config import MoeSekaiSettings
-from zhenxun.plugins.moesekai.screenshot import _redact_url_secrets, screenshot_service
+from zhenxun.plugins.moesekai.screenshot import (
+    ScreenshotJob,
+    _redact_url_secrets,
+    screenshot_service,
+)
 
 
 def test_default_profile_viewport_width_is_625():
@@ -147,7 +153,17 @@ async def test_capture_deck_uses_crop_config(
         assert job.full_page is True
         assert job.stability_wait_ms == 42
         assert job.extra_wait_seconds == 0
+        assert job.wait_function is None
+        assert job.wait_callback is not None
         assert "body > main > nav" in (job.prepare_script or "")
+        assert "scroll-behavior: auto" in (job.prepare_script or "")
+        assert job.scroll_if_function is not None
+        assert "window.innerHeight + 80" in (job.scroll_if_function or "")
+        assert "读取到的用户数据格式异常" in (job.scroll_if_function or "")
+        assert job.before_capture_script is not None
+        assert ".dr-result-row" in (job.before_capture_script or "")
+        assert "Promise.allSettled" in (job.before_capture_script or "")
+        assert job.log_timing is True
         return b"deck"
 
     monkeypatch.setattr(screenshot_service, "capture", fake_capture)
@@ -160,6 +176,70 @@ async def test_capture_deck_uses_crop_config(
         live_type="multi",
     )
     assert result == b"deck"
+
+
+@pytest.mark.asyncio
+async def test_capture_logs_stage_timings_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = type(screenshot_service)()
+    debug_messages: list[str] = []
+
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.screenshot.get_settings",
+        lambda: MoeSekaiSettings(
+            screenshot_retry_times=1, screenshot_retry_delay_seconds=0
+        ),
+    )
+
+    async def fake_capture_once(_job, _url, *, stage_timings=None, attempt_meta=None):
+        if stage_timings is not None:
+            stage_timings.extend(
+                [
+                    ("browser/get", 12.0),
+                    ("context/new", 8.0),
+                    ("page/new", 4.0),
+                    ("goto", 31.5),
+                    ("wait_callback", 48.2),
+                ]
+            )
+        if attempt_meta is not None:
+            attempt_meta["page_state"] = "success"
+            attempt_meta["fallback_clicked"] = "1"
+        return b"image"
+
+    def fake_debug(message: str, *_args, **_kwargs):
+        debug_messages.append(message)
+
+    monkeypatch.setattr(service, "_capture_once", fake_capture_once)
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.screenshot.logger",
+        SimpleNamespace(debug=fake_debug, warning=lambda *_args, **_kwargs: None),
+    )
+
+    result = await service.capture(
+        ScreenshotJob(
+            kind="活动组卡",
+            urls=["https://example.com/deck-recommend?token=secret"],
+            viewport={"width": 650, "height": 932},
+            device_scale_factor=1.0,
+            log_timing=True,
+        )
+    )
+
+    assert result == b"image"
+    combined = "\n".join(debug_messages)
+    assert "候选站点选择" in combined
+    assert "browser/get=12.0ms" in combined
+    assert "context/new=8.0ms" in combined
+    assert "page/new=4.0ms" in combined
+    assert "goto=31.5ms" in combined
+    assert "状态=success" in combined
+    assert "兜底点击=1" in combined
+    assert (
+        "第1次命中站点 https://example.com/deck-recommend?token=%2A%2A%2A"
+        in combined
+    )
 
 
 @pytest.mark.asyncio
@@ -206,10 +286,11 @@ async def test_capture_character_waits_for_related_cards_ready(
         assert "个人档案" in (job.wait_function or "")
         assert "相关卡牌" in (job.wait_function or "")
         assert "\\/cards\\/" in (job.wait_function or "")
-        assert job.scroll_through_page is True
+        assert job.scroll_through_page is False
+        assert job.scroll_if_function is not None
         assert "svg image" in (job.before_capture_script or "")
         assert "Promise.allSettled" in (job.before_capture_script or "")
-        assert job.extra_wait_seconds == 3.0
+        assert job.extra_wait_seconds == 0
         return b"character"
 
     monkeypatch.setattr(screenshot_service, "capture", fake_capture)
@@ -231,3 +312,162 @@ def test_filter_urls_prefers_last_successful_site():
     )
 
     assert urls[0] == "https://pjsk.moe/deck-recommend"
+
+
+@pytest.mark.asyncio
+async def test_capture_limits_concurrency_with_semaphore(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = type(screenshot_service)()
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.screenshot.get_settings",
+        lambda: MoeSekaiSettings(
+            screenshot_retry_times=1, screenshot_retry_delay_seconds=0
+        ),
+    )
+
+    current = 0
+    max_current = 0
+    release = asyncio.Event()
+
+    async def fake_capture_once(*_args, **_kwargs):
+        nonlocal current, max_current
+        current += 1
+        max_current = max(max_current, current)
+        try:
+            await release.wait()
+            return b"image"
+        finally:
+            current -= 1
+
+    monkeypatch.setattr(service, "_capture_once", fake_capture_once)
+
+    job = ScreenshotJob(
+        kind="查角色",
+        urls=["https://example.com/a"],
+        viewport={"width": 650, "height": 932},
+        device_scale_factor=1.0,
+    )
+
+    tasks = [asyncio.create_task(service.capture(job)) for _ in range(3)]
+    await asyncio.sleep(0.05)
+    release.set()
+    await asyncio.gather(*tasks)
+
+    assert max_current == 2
+
+
+@pytest.mark.asyncio
+async def test_wait_for_deck_terminal_state_clicks_start_button_once_when_idle(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = type(screenshot_service)()
+    monkeypatch.setattr(service, "_DECK_IDLE_GRACE_SECONDS", 0.0)
+    monkeypatch.setattr(service, "_DECK_POLL_INTERVAL_SECONDS", 0.001)
+
+    states = iter(
+        [
+            {"phase": "idle", "hasStartButton": True, "startButtonDisabled": False},
+            {"phase": "running"},
+            {"phase": "success"},
+        ]
+    )
+    clicked = 0
+
+    async def fake_read(_page):
+        return next(states)
+
+    async def fake_click(_page):
+        nonlocal clicked
+        clicked += 1
+        return True
+
+    monkeypatch.setattr(service, "_read_deck_page_state", fake_read)
+    monkeypatch.setattr(service, "_click_deck_start_button", fake_click)
+
+    attempt_meta: dict[str, str] = {}
+    await service._wait_for_deck_terminal_state(object(), 100, attempt_meta)
+
+    assert clicked == 1
+    assert attempt_meta["page_state"] == "success"
+    assert attempt_meta["fallback_clicked"] == "1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("phase", "detail"),
+    [
+        ("success", ""),
+        ("empty", ""),
+        (
+            "error",
+            "用户数据未找到，请确认用户ID/所选服务器是否正确，并已在 Haruki 上传数据。",
+        ),
+    ],
+)
+async def test_wait_for_deck_terminal_state_accepts_terminal_states(
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    detail: str,
+):
+    service = type(screenshot_service)()
+
+    async def fake_read(_page):
+        return {"phase": phase, "detail": detail}
+
+    monkeypatch.setattr(service, "_read_deck_page_state", fake_read)
+
+    attempt_meta: dict[str, str] = {}
+    await service._wait_for_deck_terminal_state(object(), 50, attempt_meta)
+
+    assert attempt_meta["page_state"] == phase
+    if detail:
+        assert attempt_meta["page_state_detail"] == detail
+
+
+@pytest.mark.asyncio
+async def test_wait_for_deck_terminal_state_marks_stalled_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = type(screenshot_service)()
+    monkeypatch.setattr(service, "_DECK_POLL_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(service, "_DECK_IDLE_GRACE_SECONDS", 999.0)
+
+    async def fake_read(_page):
+        return {"phase": "loading"}
+
+    monkeypatch.setattr(service, "_read_deck_page_state", fake_read)
+
+    attempt_meta: dict[str, str] = {}
+    with pytest.raises(TimeoutError, match="loading"):
+        await service._wait_for_deck_terminal_state(object(), 5, attempt_meta)
+
+    assert attempt_meta["page_state"] == "stalled"
+
+
+@pytest.mark.asyncio
+async def test_capture_propagates_cancelled_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = type(screenshot_service)()
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.screenshot.get_settings",
+        lambda: MoeSekaiSettings(
+            screenshot_retry_times=3, screenshot_retry_delay_seconds=0
+        ),
+    )
+
+    async def fake_capture_once(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(service, "_capture_once", fake_capture_once)
+
+    job = ScreenshotJob(
+        kind="活动组卡",
+        urls=["https://example.com/deck-recommend"],
+        viewport={"width": 650, "height": 932},
+        device_scale_factor=1.0,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await service.capture(job)

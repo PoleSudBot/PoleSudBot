@@ -499,7 +499,7 @@ class MoeSekaiApplication:
             platform,
             user_id,
             explicit_server=server,
-            fallback_jp=False,
+            fallback_jp=True,
         )
         if error or not resolved_server:
             return "请先绑定账号或使用区服前缀指定查询区服"
@@ -565,7 +565,7 @@ class MoeSekaiApplication:
             platform,
             user_id,
             explicit_server=server,
-            fallback_jp=False,
+            fallback_jp=True,
         )
         if error or not resolved_server:
             return "请先绑定账号设置默认区服，或使用 pjsk update <cn|jp|tw> 显式指定区服"
@@ -587,7 +587,7 @@ class MoeSekaiApplication:
             platform,
             user_id,
             explicit_server=server,
-            fallback_jp=False,
+            fallback_jp=True,
         )
         if error or not resolved_server:
             return "请先绑定账号或使用区服前缀指定查询区服"
@@ -1032,7 +1032,7 @@ class MoeSekaiApplication:
             platform,
             user_id,
             explicit_server=server,
-            fallback_jp=False,
+            fallback_jp=True,
         )
         if error or not resolved_server:
             return "请先绑定账号或显式指定区服"
@@ -1074,7 +1074,7 @@ class MoeSekaiApplication:
             platform,
             user_id,
             explicit_server=server,
-            fallback_jp=False,
+            fallback_jp=True,
         )
         if error or not resolved_server:
             return "请先绑定账号或显式指定区服"
@@ -1112,7 +1112,7 @@ class MoeSekaiApplication:
             platform,
             user_id,
             explicit_server=server,
-            fallback_jp=False,
+            fallback_jp=True,
         )
         if error or not resolved_server:
             return "请先绑定账号或显式指定区服"
@@ -1177,7 +1177,7 @@ class MoeSekaiApplication:
             platform,
             user_id,
             explicit_server=server,
-            fallback_jp=False,
+            fallback_jp=True,
         )
         if error or not resolved_server:
             return "请先绑定账号或显式指定区服"
@@ -1389,7 +1389,7 @@ class MoeSekaiApplication:
             platform,
             user_id,
             explicit_server=server,
-            fallback_jp=False,
+            fallback_jp=True,
         )
         if error or not resolved_server:
             return "请先绑定账号或显式指定区服"

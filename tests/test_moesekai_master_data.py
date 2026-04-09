@@ -3,13 +3,14 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
-import nonebot
 import httpx
+import nonebot
 import pytest
 
 nonebot.init()
 
 from zhenxun.plugins.moesekai.config import (
+    MASTER_DATASET_KEYS,
     MasterSourceConfig,
     _merge_master_sources_config,
 )
@@ -102,53 +103,70 @@ def test_merge_master_sources_config_uses_new_default_order():
 async def test_select_source_prefers_config_order_on_equal_versions(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    default_datasets = {key: f"{key}.json" for key in MASTER_DATASET_KEYS}
     settings = SimpleNamespace(
+        master_source_order=["8823", "haruki", "sekai-viewer"],
         master_sources=[
             MasterSourceConfig(
                 name="8823-jp",
                 region="jp",
                 base_url="https://example.com/8823",
                 version_path="versions.json",
-                events_path="events.json",
                 version_field="data_version",
+                datasets=default_datasets,
             ),
             MasterSourceConfig(
                 name="haruki-jp",
                 region="jp",
                 base_url="https://example.com/haruki",
                 version_path="versions/current_version.json",
-                events_path="master/events.json",
                 version_field="dataVersion",
+                datasets={key: f"master/{key}.json" for key in MASTER_DATASET_KEYS},
             ),
             MasterSourceConfig(
                 name="sekai-viewer-jp",
                 region="jp",
                 base_url="https://example.com/viewer",
                 version_path="versions.json",
-                events_path="events.json",
                 version_field="dataVersion",
+                datasets=default_datasets,
+                auto_probe=False,
             ),
-        ]
+        ],
     )
 
-    async def fake_fetch_source_revision(
+    async def fake_fetch_source_snapshot(
         _cls: type[MasterDataService], source: MasterSourceConfig
     ) -> SourceVersionInfo:
         return SourceVersionInfo(
             source=source,
-            revision="abc123",
             version="6.0.0.1",
             success=True,
         )
 
+    async def fake_fetch_selected_revision(
+        _cls: type[MasterDataService], source: MasterSourceConfig
+    ) -> str:
+        assert source.name == "8823-jp"
+        return "abc123"
+
     monkeypatch.setattr(masterdata_module, "get_settings", lambda: settings)
     monkeypatch.setattr(
         MasterDataService,
-        "_fetch_source_revision",
-        classmethod(fake_fetch_source_revision),
+        "_fetch_source_snapshot",
+        classmethod(fake_fetch_source_snapshot),
+    )
+    monkeypatch.setattr(
+        MasterDataService,
+        "_fetch_selected_revision",
+        classmethod(fake_fetch_selected_revision),
     )
 
-    selected_source, source_versions = await MasterDataService._select_source("jp")
+    selected_source, source_versions = await MasterDataService._select_source(
+        "jp",
+        include_lazy=True,
+    )
+
     assert selected_source is not None
     assert selected_source.name == "8823-jp"
     assert [item.source.name for item in source_versions] == [
@@ -158,7 +176,7 @@ async def test_select_source_prefers_config_order_on_equal_versions(
     ]
 
 
-def test_probe_interval_seconds_uses_full_cycle(monkeypatch: pytest.MonkeyPatch):
+def test_probe_interval_seconds_uses_full_interval(monkeypatch: pytest.MonkeyPatch):
     settings = SimpleNamespace(
         master_check_interval_seconds=600,
         master_source_order=["8823", "haruki", "sekai-viewer"],
@@ -166,11 +184,11 @@ def test_probe_interval_seconds_uses_full_cycle(monkeypatch: pytest.MonkeyPatch)
     )
     monkeypatch.setattr(masterdata_module, "get_settings", lambda: settings)
 
-    assert master_data_service.get_probe_interval_seconds() == 200
+    assert master_data_service.get_probe_interval_seconds() == 600
 
 
 @pytest.mark.asyncio
-async def test_fetch_source_revision_uses_github_token_and_etag(
+async def test_fetch_selected_revision_uses_github_token(
     monkeypatch: pytest.MonkeyPatch,
 ):
     source = MasterSourceConfig(
@@ -184,12 +202,9 @@ async def test_fetch_source_revision_uses_github_token_and_etag(
         datasets={"events": "master/events.json"},
     )
 
-    settings = SimpleNamespace(
-        master_check_mode="revision",
-        github_token="ghp_test_token",
-    )
-
+    settings = SimpleNamespace(github_token="ghp_test_token")
     requests: list[dict[str, str]] = []
+    updated_states: list[dict[str, str | None]] = []
 
     class FakeClient:
         async def __aenter__(self):
@@ -201,19 +216,13 @@ async def test_fetch_source_revision_uses_github_token_and_etag(
         async def get(self, url: str, headers: dict[str, str]):
             requests.append({"url": url, **headers})
             return httpx.Response(
-                304,
+                200,
                 request=httpx.Request("GET", url),
-                headers={"etag": '"etag-123"'},
+                json={"sha": "new-sha"},
             )
 
     async def fake_get_probe_source_state(_cls, _name: str):
-        return {
-            "etag": '"etag-123"',
-            "last_revision": "old-sha",
-            "last_version": "6.3.5.11",
-        }
-
-    updated_states: list[dict[str, str]] = []
+        return {"last_revision": "old-sha"}
 
     async def fake_update_probe_source_state(_cls, _name: str, **updates):
         updated_states.append(updates)
@@ -232,16 +241,168 @@ async def test_fetch_source_revision_uses_github_token_and_etag(
         classmethod(fake_update_probe_source_state),
     )
 
-    info = await MasterDataService._fetch_source_revision(source)
+    revision = await MasterDataService._fetch_selected_revision(source)
 
-    assert info.success is True
-    assert info.revision == "old-sha"
-    assert info.version == "6.3.5.11"
+    assert revision == "new-sha"
     assert requests
     assert requests[0]["Authorization"] == "Bearer ghp_test_token"
-    assert requests[0]["If-None-Match"] == '"etag-123"'
     assert requests[0]["Accept"] == "application/vnd.github+json"
+    assert requests[0]["X-GitHub-Api-Version"] == "2022-11-28"
     assert updated_states
+
+
+@pytest.mark.asyncio
+async def test_get_dataset_does_not_cache_missing_payload_on_failed_update(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    update_calls = 0
+    original_cache = MasterDataService._cache
+    MasterDataService._cache = {}
+
+    def fake_dataset_path(_cls: type[MasterDataService], server: str, dataset: str):
+        path = tmp_path / server / f"{dataset}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    async def fake_update_region(
+        _cls: type[MasterDataService],
+        server: str,
+        *,
+        force: bool = False,
+    ):
+        nonlocal update_calls
+        assert force is False
+        update_calls += 1
+        return RegionUpdateResult(server=server, error="下载失败")
+
+    monkeypatch.setattr(
+        MasterDataService,
+        "_dataset_path",
+        classmethod(fake_dataset_path),
+    )
+    monkeypatch.setattr(
+        MasterDataService,
+        "update_region",
+        classmethod(fake_update_region),
+    )
+
+    try:
+        first = await MasterDataService.get_dataset("jp", "events")
+        second = await MasterDataService.get_dataset("jp", "events")
+    finally:
+        MasterDataService._cache = original_cache
+
+    assert first == []
+    assert second == []
+    assert update_calls == 2
+    assert ("jp", "events") not in MasterDataService._cache
+
+
+@pytest.mark.asyncio
+async def test_update_region_skips_auto_downgrade_when_local_file_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    source = MasterSourceConfig(
+        name="8823-jp",
+        region="jp",
+        base_url="https://example.com/8823",
+        version_path="versions.json",
+        version_field="dataVersion",
+        datasets={key: f"{key}.json" for key in MASTER_DATASET_KEYS},
+    )
+    original_cache = MasterDataService._cache
+    MasterDataService._cache = {}
+    saved_state: dict[str, dict[str, str]] = {}
+
+    def fake_dataset_path(_cls: type[MasterDataService], server: str, dataset: str):
+        path = tmp_path / server / f"{dataset}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    async def fake_select_source(
+        _cls: type[MasterDataService],
+        server: str,
+        *,
+        include_lazy: bool,
+    ):
+        assert server == "jp"
+        assert include_lazy is False
+        return source, [
+            SourceVersionInfo(
+                source=source,
+                revision="older-rev",
+                version="6.0.0.1",
+                success=True,
+            )
+        ]
+
+    async def fail_fetch_selected_payloads(*_args, **_kwargs):
+        raise AssertionError("自动路径遇到更低版本时不应因为缺文件而回退下载")
+
+    for dataset in MASTER_DATASET_KEYS:
+        if dataset == "events":
+            continue
+        fake_dataset_path(MasterDataService, "jp", dataset).write_text("[]", encoding="utf-8")
+
+    monkeypatch.setattr(
+        MasterDataService,
+        "_dataset_path",
+        classmethod(fake_dataset_path),
+    )
+    monkeypatch.setattr(
+        MasterDataService,
+        "_select_source",
+        classmethod(fake_select_source),
+    )
+    monkeypatch.setattr(
+        MasterDataService,
+        "_fetch_selected_payloads",
+        classmethod(fail_fetch_selected_payloads),
+    )
+    monkeypatch.setattr(
+        MasterDataService,
+        "_load_state",
+        classmethod(
+            lambda _cls: {
+                "jp": {
+                    "source_name": "sekai-viewer-jp",
+                    "revision": "newer-rev",
+                    "version": "6.0.0.2",
+                }
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        MasterDataService,
+        "_save_state",
+        classmethod(lambda _cls, payload: saved_state.update(payload)),
+    )
+    monkeypatch.setattr(
+        masterdata_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            master_check_mode="version",
+            master_source_order=["8823", "haruki", "sekai-viewer"],
+            master_sources=[source],
+            github_token="",
+            master_check_interval_seconds=180,
+        ),
+    )
+
+    try:
+        result = await MasterDataService.update_region("jp", force=False)
+    finally:
+        MasterDataService._cache = original_cache
+
+    assert result.updated is False
+    assert result.download_success is True
+    assert result.current_version == "6.0.0.1"
+    assert result.previous_version == "6.0.0.2"
+    assert result.selection_note == "候选版本低于当前已落地版本，已跳过自动回退"
+    assert not saved_state
+    assert not fake_dataset_path(MasterDataService, "jp", "events").exists()
 
 
 def test_region_update_result_message_includes_all_sources():
@@ -260,8 +421,8 @@ def test_region_update_result_message_includes_all_sources():
                     region="jp",
                     base_url="https://example.com/8823",
                     version_path="versions.json",
-                    events_path="events.json",
                     version_field="data_version",
+                    datasets={"events": "events.json"},
                 ),
                 version="6.3.5.11",
                 success=True,
@@ -272,8 +433,8 @@ def test_region_update_result_message_includes_all_sources():
                     region="jp",
                     base_url="https://example.com/haruki",
                     version_path="versions/current_version.json",
-                    events_path="master/events.json",
                     version_field="dataVersion",
+                    datasets={"events": "master/events.json"},
                 ),
                 version="6.3.5.11",
                 success=True,

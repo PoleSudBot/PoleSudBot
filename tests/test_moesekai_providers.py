@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import importlib
 import os
 import time
+from types import SimpleNamespace
 
 import nonebot
 import pytest
@@ -11,6 +12,7 @@ import httpx
 
 nonebot.init()
 
+from zhenxun.plugins.moesekai.providers.aliases import AliasProvider
 from zhenxun.plugins.moesekai.providers.assets import AssetProvider
 from zhenxun.plugins.moesekai.providers.asset_cache import AssetCacheProvider
 from zhenxun.plugins.moesekai.providers.asset_fetcher import asset_fetcher
@@ -20,6 +22,7 @@ from zhenxun.plugins.moesekai.providers.ranking import RankingSnapshot, ranking_
 from zhenxun.plugins.moesekai.providers.story_cache import StoryCacheProvider
 from zhenxun.plugins.moesekai.storage import BinaryFileCacheStore, PathBinaryFileStore
 from zhenxun.plugins.moesekai.storage.state import JsonStateStore
+from zhenxun.plugins.moesekai.constants import SCOPE_GLOBAL
 
 
 @pytest.mark.asyncio
@@ -89,6 +92,233 @@ async def test_hub_provider_can_get_manga_by_id(
         "image_url": "https://example.com/manga/351.png",
         "url": "https://www.bilibili.com/opus/1183974551994761216",
     }
+
+
+@pytest.mark.asyncio
+async def test_hub_provider_treats_empty_cache_as_cache_hit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_cache_get(_key: str):
+        return []
+
+    async def fail_get_json(*_args, **_kwargs):
+        raise AssertionError("空列表缓存命中时不应再次请求远端")
+
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.providers.hub.MoeSekaiCache.get",
+        fake_cache_get,
+    )
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.providers.hub.AsyncHttpx.get_json",
+        fail_get_json,
+    )
+
+    assert await hub_provider.get_music_alias_index() == []
+
+
+@pytest.mark.asyncio
+async def test_alias_provider_merges_system_and_group_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    provider = AliasProvider(
+        seed_path=tmp_path / "character_alias.sql",
+        music_snapshot_store=JsonStateStore(tmp_path / "music_alias_snapshot.json"),
+        master_state_store=JsonStateStore(tmp_path / "master_state.json"),
+    )
+    provider.refresh_music_alias_snapshot(
+        [
+            {
+                "music_id": 277,
+                "title": "フォニイ",
+                "aliases": ["phony", "伪物"],
+            }
+        ]
+    )
+    provider._master_state_store.save({"jp": {"version": "6.0.0.1", "updated_at": "2026-04-07T00:00:00"}})
+
+    async def fake_get_musics(_server: str):
+        return [
+            {
+                "id": 277,
+                "title": "フォニイ",
+                "pronunciation": "ふぉにい",
+            }
+        ]
+
+    async def fake_list_alias_entries(**_kwargs):
+        return [
+            SimpleNamespace(scope=SCOPE_GLOBAL, alias="phony", created_by="system"),
+            SimpleNamespace(scope=SCOPE_GLOBAL, alias="凤梨", created_by="tester"),
+            SimpleNamespace(scope="qq:123", alias="火泥", created_by="tester"),
+            SimpleNamespace(scope="qq:999", alias="外群别名", created_by="tester"),
+        ]
+
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.providers.aliases.master_data_provider.get_musics",
+        fake_get_musics,
+    )
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.providers.aliases.list_alias_entries",
+        fake_list_alias_entries,
+    )
+
+    profile = await provider.get_music_profile("277", platform="qq", group_id="123")
+
+    assert profile is not None
+    assert profile.display_title == "277. フォニイ"
+    assert profile.merged_aliases == ["phony", "伪物", "凤梨"]
+    assert profile.group_aliases == ["火泥"]
+
+
+@pytest.mark.asyncio
+async def test_alias_provider_resolve_prefers_group_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    provider = AliasProvider(
+        seed_path=tmp_path / "character_alias.sql",
+        music_snapshot_store=JsonStateStore(tmp_path / "music_alias_snapshot.json"),
+        master_state_store=JsonStateStore(tmp_path / "master_state.json"),
+    )
+    provider._master_state_store.save({"jp": {"version": "6.0.0.1", "updated_at": "2026-04-07T00:00:00"}})
+
+    async def fake_get_musics(_server: str):
+        return [{"id": 277, "title": "フォニイ", "pronunciation": "ふぉにい"}]
+
+    async def fake_resolve_alias(**_kwargs):
+        return SimpleNamespace(
+            target_value="277",
+            alias="phony",
+            scope="qq:123",
+            created_by="tester",
+        )
+
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.providers.aliases.master_data_provider.get_musics",
+        fake_get_musics,
+    )
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.providers.aliases.resolve_alias",
+        fake_resolve_alias,
+    )
+
+    result = await provider.resolve_music("phony", platform="qq", group_id="123")
+
+    assert result is not None
+    assert result.target_id == "277"
+    assert result.canonical_name == "フォニイ"
+    assert result.matched_source == "group"
+
+
+@pytest.mark.asyncio
+async def test_alias_provider_remove_reports_system_for_snapshot_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    provider = AliasProvider(
+        seed_path=tmp_path / "character_alias.sql",
+        music_snapshot_store=JsonStateStore(tmp_path / "music_alias_snapshot.json"),
+        master_state_store=JsonStateStore(tmp_path / "master_state.json"),
+    )
+    provider.refresh_music_alias_snapshot(
+        [{"music_id": 277, "title": "フォニイ", "aliases": ["phony"]}]
+    )
+    async def fake_get_alias_entry(**_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.providers.aliases.get_alias_entry",
+        fake_get_alias_entry,
+    )
+
+    result = await provider.remove_managed_alias(
+        target_type="music",
+        alias="phony",
+        scope=SCOPE_GLOBAL,
+    )
+
+    assert result == "system"
+
+
+@pytest.mark.asyncio
+async def test_alias_provider_remove_reports_system_for_group_scope_snapshot_alias(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    provider = AliasProvider(
+        seed_path=tmp_path / "character_alias.sql",
+        music_snapshot_store=JsonStateStore(tmp_path / "music_alias_snapshot.json"),
+        master_state_store=JsonStateStore(tmp_path / "master_state.json"),
+    )
+    provider.refresh_music_alias_snapshot(
+        [{"music_id": 277, "title": "フォニイ", "aliases": ["phony"]}]
+    )
+
+    async def fake_get_alias_entry(**kwargs):
+        if kwargs["scope"] == SCOPE_GLOBAL:
+            return None
+        return None
+
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.providers.aliases.get_alias_entry",
+        fake_get_alias_entry,
+    )
+
+    result = await provider.remove_managed_alias(
+        target_type="music",
+        alias="phony",
+        scope="qq:123",
+    )
+
+    assert result == "system"
+
+
+@pytest.mark.asyncio
+async def test_alias_provider_character_profile_uses_lazy_seed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    seed_path = tmp_path / "character_alias.sql"
+    seed_path.write_text(
+        "INSERT INTO pjsk.character_alias (id, alias, character_id) VALUES (1, '一歌', 1);\n",
+        encoding="utf-8",
+    )
+    provider = AliasProvider(
+        seed_path=seed_path,
+        music_snapshot_store=JsonStateStore(tmp_path / "music_alias_snapshot.json"),
+        master_state_store=JsonStateStore(tmp_path / "master_state.json"),
+    )
+    provider._master_state_store.save({"jp": {"version": "6.0.0.1", "updated_at": "2026-04-07T00:00:00"}})
+
+    async def fake_get_game_characters(_server: str):
+        return [
+            {
+                "id": 1,
+                "firstName": "星乃",
+                "givenName": "一歌",
+                "firstNameEnglish": "Hoshino",
+                "givenNameEnglish": "Ichika",
+            }
+        ]
+
+    async def fake_list_alias_entries(**_kwargs):
+        return []
+
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.providers.aliases.master_data_provider.get_game_characters",
+        fake_get_game_characters,
+    )
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.providers.aliases.list_alias_entries",
+        fake_list_alias_entries,
+    )
+
+    profile = await provider.get_character_profile("1", platform="qq", group_id="123")
+
+    assert profile is not None
+    assert profile.display_title == "1. 星乃一歌"
+    assert profile.merged_aliases == ["一歌"]
 
 
 def test_character_cache_provider_respects_ttl_and_refresh_signature(
@@ -201,6 +431,7 @@ def test_asset_cache_provider_supports_positive_and_negative_cache(
 
     class FakeSettings:
         asset_miss_cache_ttl_seconds = 60
+        audio_format_priority = ["mp3"]
 
     monkeypatch.setattr(
         "zhenxun.plugins.moesekai.providers.asset_cache.get_settings",
@@ -234,6 +465,47 @@ def test_asset_cache_provider_supports_positive_and_negative_cache(
     assert provider.is_known_missing(missing_url) is False
     provider.record_missing(missing_url)
     assert provider.is_known_missing(missing_url) is True
+
+
+def test_asset_cache_provider_reuses_in_memory_miss_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    class FakeMissStore:
+        def __init__(self) -> None:
+            self.payload: dict[str, float] = {}
+            self.load_calls = 0
+            self.save_calls = 0
+
+        def load(self, default):
+            self.load_calls += 1
+            return self.payload.copy() if self.payload else default
+
+        def save(self, payload) -> None:
+            self.save_calls += 1
+            self.payload = dict(payload)
+
+    miss_store = FakeMissStore()
+    provider = AssetCacheProvider(
+        PathBinaryFileStore(tmp_path / "assets"),
+        JsonStateStore(tmp_path / "asset_index.json"),
+        miss_store,
+    )
+
+    class FakeSettings:
+        asset_miss_cache_ttl_seconds = 60
+        audio_format_priority = ["mp3"]
+
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.providers.asset_cache.get_settings",
+        lambda: FakeSettings(),
+    )
+
+    missing_url = "https://example.com/missing.png"
+    assert provider.is_known_missing(missing_url) is False
+    provider.record_missing(missing_url)
+    assert provider.is_known_missing(missing_url) is True
+    assert miss_store.load_calls == 1
 
 
 @pytest.mark.asyncio
@@ -326,3 +598,25 @@ async def test_ranking_provider_get_snapshot_does_not_fallback_to_legacy(
     assert snapshot is expected_snapshot
     assert event_meta == {"event_id": 199}
     assert used_previous_event is False
+
+
+@pytest.mark.asyncio
+async def test_ranking_provider_treats_empty_cache_as_cache_hit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_cache_get(_key: str):
+        return []
+
+    async def fail_get_json(*_args, **_kwargs):
+        raise AssertionError("空列表缓存命中时不应再次请求远端")
+
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.providers.ranking.MoeSekaiCache.get",
+        fake_cache_get,
+    )
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.providers.ranking.AsyncHttpx.get_json",
+        fail_get_json,
+    )
+
+    assert await ranking_provider.list_events("jp") == []

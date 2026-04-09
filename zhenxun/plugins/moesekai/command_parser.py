@@ -56,27 +56,34 @@ def extract_at_targets(event: MessageEvent) -> list[str]:
 
 
 def _match_command(
-    text: str, names: tuple[str, ...]
+    text: str,
+    names: tuple[str, ...],
+    *,
+    allow_prefix: bool = True,
 ) -> tuple[str | None, str] | None:
-    for name in names:
-        matched = re.fullmatch(
-            rf"(?:(?P<prefix>cn|jp|tw)\s*)?{re.escape(name)}(?:\s+(?P<rest>.*))?",
-            text,
-        )
-        if matched:
-            return matched.group("prefix"), matched.group("rest") or ""
-    return None
+    name_pattern = "|".join(
+        re.escape(name) for name in sorted(names, key=len, reverse=True)
+    )
+    prefix_pattern = r"(?:(?P<prefix>cn|jp|tw)\s*)?" if allow_prefix else ""
+    matched = re.fullmatch(
+        rf"{prefix_pattern}(?:{name_pattern})(?P<rest>.*)",
+        text,
+    )
+    if not matched:
+        return None
+    return matched.groupdict().get("prefix"), matched.group("rest") or ""
 
 
 def _consume_server(prefix: str | None, rest: str) -> tuple[str | None, str]:
     if prefix:
         return prefix, rest.strip()
+    rest = rest.strip()
     if not rest:
         return None, ""
     parts = rest.split(" ", 1)
     if parts[0] in SERVER_SET:
         return parts[0], parts[1].strip() if len(parts) > 1 else ""
-    return None, rest.strip()
+    return None, rest
 
 
 def _normalize_qq(value: str | None, at_targets: list[str]) -> str | None:
@@ -144,10 +151,11 @@ def _parse_live_subscription(text: str) -> ParsedCommand | None:
 
 
 def _parse_story(text: str) -> ParsedCommand | None:
-    matched = re.fullmatch(r"活动剧情(?:\s+(?P<rest>.*))?", text)
+    matched = _match_command(text, ("活动剧情",), allow_prefix=False)
     if not matched:
         return None
-    rest = (matched.group("rest") or "").strip()
+    _, rest = matched
+    rest = rest.strip()
     if not rest:
         return ParsedCommand("story", text, error="用法: 活动剧情 <活动ID> [强制刷新]")
     parts = rest.split()
@@ -178,29 +186,34 @@ def _parse_story(text: str) -> ParsedCommand | None:
 
 
 def _parse_manga_by_id(text: str) -> ParsedCommand | None:
-    matched = re.fullmatch(r"四格\s+(?P<manga_id>\d+)", text)
+    matched = _match_command(text, ("四格",), allow_prefix=False)
     if not matched:
         return None
-    return ParsedCommand("manga_by_id", text, manga_id=int(matched.group("manga_id")))
+    _, rest = matched
+    manga_id = rest.strip()
+    if not manga_id.isdigit():
+        return None
+    return ParsedCommand("manga_by_id", text, manga_id=int(manga_id))
 
 
 def _parse_multiplier(text: str) -> ParsedCommand | None:
-    matched = re.fullmatch(r"倍率(?:\s+(?P<rest>.*))?", text)
+    matched = _match_command(text, ("倍率计算", "倍率"), allow_prefix=False)
     if not matched:
         return None
-    rest = (matched.group("rest") or "").strip()
+    _, rest = matched
+    rest = rest.strip()
     if not rest:
         return ParsedCommand(
             "multiplier",
             text,
-            error="用法: 倍率 <a> <b> <c> <d> <e>",
+            error="用法: 倍率计算 <a> <b> <c> <d> <e>",
         )
     parts = rest.split()
     if len(parts) != 5 or any(not part.isdigit() for part in parts):
         return ParsedCommand(
             "multiplier",
             text,
-            error="用法: 倍率 <a> <b> <c> <d> <e>",
+            error="用法: 倍率计算 <a> <b> <c> <d> <e>",
         )
     return ParsedCommand(
         "multiplier",
@@ -210,10 +223,11 @@ def _parse_multiplier(text: str) -> ParsedCommand | None:
 
 
 def _parse_character(text: str) -> ParsedCommand | None:
-    matched = re.fullmatch(r"查角色(?:\s+(?P<query>.*))?", text)
+    matched = _match_command(text, ("查角色",), allow_prefix=False)
     if not matched:
         return None
-    query = (matched.group("query") or "").strip()
+    _, query = matched
+    query = query.strip()
     if not query:
         return ParsedCommand("character", text, error="用法: 查角色 <角色ID|名称|别名>")
     parts = query.split()
@@ -245,10 +259,11 @@ def _parse_character(text: str) -> ParsedCommand | None:
 
 def _parse_alias(text: str) -> ParsedCommand | None:
     for name, target_type in (("角色别名", "character"), ("歌曲别名", "music")):
-        matched = re.fullmatch(rf"{re.escape(name)}(?:\s+(?P<rest>.*))?", text)
+        matched = _match_command(text, (name,), allow_prefix=False)
         if not matched:
             continue
-        rest = (matched.group("rest") or "").strip()
+        _, rest = matched
+        rest = rest.strip()
         if not rest:
             return ParsedCommand(
                 "alias",
