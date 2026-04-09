@@ -13,11 +13,11 @@ from ..adapters.results import MoeForwardMessage, MoeImageTextMessage, build_ima
 from ..adapters.runtime import MessageUtils, PlatformUtils, logger
 from ..command_parser import ParsedCommand, parse_command
 from ..services import (
-    handle_activity_deck,
     handle_admin_blacklist,
     handle_admin_query_binding,
     handle_alias_command,
     handle_bind,
+    handle_deck,
     handle_default_server,
     handle_live_subscription,
     handle_live_toggle,
@@ -169,18 +169,17 @@ async def _(
             parsed.event_id,
             is_superuser=is_superuser,
         )
-    elif parsed.action == "activity_deck":
-        result = await handle_activity_deck(
-            platform,
-            user_id,
-            server=parsed.server,
-            target_user_id=parsed.target_user_id,
-            event_id=parsed.event_id,
-            music_id=parsed.music_id,
-            difficulty=parsed.difficulty,
-            live_type=parsed.live_type,
-            is_superuser=is_superuser,
-        )
+    elif parsed.action == "deck":
+        if not parsed.deck_request:
+            result = "组卡参数解析失败"
+        else:
+            result = await handle_deck(
+                platform,
+                user_id,
+                request=parsed.deck_request,
+                group_id=group_id,
+                is_superuser=is_superuser,
+            )
     elif parsed.action == "update":
         result = await handle_update(
             platform,

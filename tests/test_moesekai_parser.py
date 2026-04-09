@@ -7,6 +7,7 @@ import nonebot
 nonebot.init()
 
 from zhenxun.plugins.moesekai.command_parser import parse_command
+from zhenxun.plugins.moesekai.deck import DeckCommandRequest, parse_deck_command_request
 
 
 @dataclass
@@ -65,21 +66,25 @@ def test_parse_activity_deck_with_optional_flags():
         FakeEvent("活动组卡 195 --music 226 --difficulty hard --live-type multi")  # type: ignore[arg-type]
     )
     assert parsed is not None
-    assert parsed.action == "activity_deck"
-    assert parsed.event_id == 195
-    assert parsed.music_id == 226
-    assert parsed.difficulty == "hard"
-    assert parsed.live_type == "multi"
+    assert parsed.action == "deck"
+    assert isinstance(parsed.deck_request, DeckCommandRequest)
+    assert parsed.deck_request.mode == "event"
+    assert parsed.deck_request.event_id == 195
+    assert parsed.deck_request.music_query == "226"
+    assert parsed.deck_request.difficulty == "hard"
+    assert parsed.deck_request.live_type == "multi"
 
 
 def test_parse_activity_deck_with_position_args_and_aliases():
     parsed = parse_command(FakeEvent("活动组卡 195 226 hd cheerful"))  # type: ignore[arg-type]
     assert parsed is not None
-    assert parsed.action == "activity_deck"
-    assert parsed.event_id == 195
-    assert parsed.music_id == 226
-    assert parsed.difficulty == "hard"
-    assert parsed.live_type == "cheerful"
+    assert parsed.action == "deck"
+    assert isinstance(parsed.deck_request, DeckCommandRequest)
+    assert parsed.deck_request.mode == "event"
+    assert parsed.deck_request.event_id == 195
+    assert parsed.deck_request.music_query == "226"
+    assert parsed.deck_request.difficulty == "hard"
+    assert parsed.deck_request.live_type == "cheerful"
 
 
 def test_parse_activity_deck_duplicate_music_arg_errors():
@@ -87,16 +92,159 @@ def test_parse_activity_deck_duplicate_music_arg_errors():
         FakeEvent("活动组卡 195 226 --music 227")  # type: ignore[arg-type]
     )
     assert parsed is not None
-    assert parsed.action == "activity_deck"
+    assert parsed.action == "deck"
     assert parsed.error == "歌曲ID参数重复"
 
 
 def test_parse_activity_deck_without_space_before_event_id():
     parsed = parse_command(FakeEvent("活动组卡195 --music 226"))  # type: ignore[arg-type]
     assert parsed is not None
-    assert parsed.action == "activity_deck"
-    assert parsed.event_id == 195
-    assert parsed.music_id == 226
+    assert parsed.action == "deck"
+    assert isinstance(parsed.deck_request, DeckCommandRequest)
+    assert parsed.deck_request.mode == "event"
+    assert parsed.deck_request.event_id == 195
+    assert parsed.deck_request.music_query == "226"
+
+
+def test_parse_activity_deck_with_music_alias_text():
+    parsed = parse_command(FakeEvent("活动组卡 tell your world master"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "deck"
+    assert isinstance(parsed.deck_request, DeckCommandRequest)
+    assert parsed.deck_request.mode == "event"
+    assert parsed.deck_request.event_id is None
+    assert parsed.deck_request.music_query == "tell your world"
+    assert parsed.deck_request.difficulty == "master"
+
+
+def test_parse_custom_deck_command_is_hidden():
+    parsed = parse_command(FakeEvent("组卡 绿 vbs"))  # type: ignore[arg-type]
+    assert parsed is None
+
+
+def test_parse_custom_deck_request_unit_bonus():
+    request, error = parse_deck_command_request(
+        raw_text="组卡 绿 vbs",
+        mode="custom",
+        server=None,
+        rest="绿 vbs",
+        at_targets=[],
+    )
+    assert error is None
+    assert isinstance(request, DeckCommandRequest)
+    assert request.mode == "custom"
+    assert request.custom_bonus is not None
+    assert request.custom_bonus.kind == "unit"
+    assert request.custom_bonus.attr == "pure"
+    assert request.custom_bonus.unit == "vivid_bad_squad"
+    assert request.music_query is None
+
+
+def test_parse_custom_deck_request_unit_bonus_reverse_order():
+    request, error = parse_deck_command_request(
+        raw_text="组卡 vbs 绿",
+        mode="custom",
+        server=None,
+        rest="vbs 绿",
+        at_targets=[],
+    )
+    assert error is None
+    assert isinstance(request, DeckCommandRequest)
+    assert request.custom_bonus is not None
+    assert request.custom_bonus.kind == "unit"
+    assert request.custom_bonus.attr == "pure"
+    assert request.custom_bonus.unit == "vivid_bad_squad"
+
+
+def test_parse_custom_deck_request_mixed_bonus():
+    request, error = parse_deck_command_request(
+        raw_text="组卡 %miku rin @绿",
+        mode="custom",
+        server=None,
+        rest="%miku rin @绿",
+        at_targets=[],
+    )
+    assert error is None
+    assert isinstance(request, DeckCommandRequest)
+    assert request.mode == "custom"
+    assert request.custom_bonus is not None
+    assert request.custom_bonus.kind == "mixed"
+    assert request.custom_bonus.attr == "pure"
+    assert [item.query for item in request.custom_bonus.characters] == [
+        "miku",
+        "rin",
+    ]
+
+
+def test_parse_custom_deck_request_with_vs_support_prefix():
+    request, error = parse_deck_command_request(
+        raw_text="组卡 %lnmiku vbsrin @绿",
+        mode="custom",
+        server=None,
+        rest="%lnmiku vbsrin @绿",
+        at_targets=[],
+    )
+    assert error is None
+    assert isinstance(request, DeckCommandRequest)
+    assert request.custom_bonus is not None
+    assert [item.support_unit for item in request.custom_bonus.characters] == [
+        "leo_need",
+        "vivid_bad_squad",
+    ]
+
+
+def test_parse_mysekai_deck():
+    parsed = parse_command(FakeEvent("烤森组卡 201"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert isinstance(parsed.deck_request, DeckCommandRequest)
+    assert parsed.deck_request.mode == "mysekai"
+    assert parsed.deck_request.event_id == 201
+
+
+def test_parse_strongest_deck_defaults_to_power():
+    parsed = parse_command(FakeEvent("最强组卡"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert isinstance(parsed.deck_request, DeckCommandRequest)
+    assert parsed.deck_request.mode == "strongest"
+    assert parsed.deck_request.strongest_target is None
+    assert parsed.deck_request.music_query is None
+
+
+def test_parse_strongest_deck_skill_target_and_music():
+    parsed = parse_command(FakeEvent("最强组卡 Tell Your World 实效"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert isinstance(parsed.deck_request, DeckCommandRequest)
+    assert parsed.deck_request.mode == "strongest"
+    assert parsed.deck_request.strongest_target == "skill"
+    assert parsed.deck_request.music_query == "tell your world"
+
+
+def test_parse_challenge_deck():
+    parsed = parse_command(FakeEvent("挑战组卡 初音未来 Tell Your World master"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert isinstance(parsed.deck_request, DeckCommandRequest)
+    assert parsed.deck_request.mode == "challenge"
+    assert parsed.deck_request.free_text_query == "初音未来 tell your world"
+    assert parsed.deck_request.difficulty == "master"
+
+
+def test_parse_challenge_deck_requires_character():
+    parsed = parse_command(FakeEvent("挑战组卡"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "deck"
+    assert parsed.error == "用法: 挑战组卡 <角色> [歌曲] [难度]"
+
+
+def test_parse_custom_deck_request_rejects_missing_bonus_pair():
+    request, error = parse_deck_command_request(
+        raw_text="组卡 绿",
+        mode="custom",
+        server=None,
+        rest="绿",
+        at_targets=[],
+    )
+    assert isinstance(request, DeckCommandRequest)
+    assert error == "箱活组卡需要同时提供颜色和团体，例如：组卡 绿 vbs"
 
 
 def test_parse_update_with_prefix_server():

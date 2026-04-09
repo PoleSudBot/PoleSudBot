@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal
@@ -38,10 +39,9 @@ from ..constants import (
     STATE_DIR,
     YCX_SUPPORTED_SERVERS,
     make_scope_key,
-    normalize_deck_difficulty,
-    normalize_live_type,
     server_label,
 )
+from ..deck import DeckCommandRequest, DeckResolvedRequest, deck_mode_label, to_backend_request
 from ..master_data import RegionUpdateResult
 from ..providers import (
     alias_provider,
@@ -615,60 +615,334 @@ class MoeSekaiApplication:
             )
             return "\n".join(lines).replace("<strong>", "").replace("</strong>", "")
 
-    async def handle_activity_deck(
+    async def _resolve_music_query(
+        self,
+        query: str,
+        *,
+        platform: str | None = None,
+        group_id: str | None = None,
+    ) -> tuple[int | None, str | None]:
+        music_id = await self._resolve_music_id(
+            query,
+            platform=platform,
+            group_id=group_id,
+        )
+        if not music_id:
+            return None, f"未找到歌曲：{query}"
+        return int(music_id), None
+
+    async def _resolve_character_query(
+        self,
+        query: str,
+        *,
+        platform: str | None = None,
+        group_id: str | None = None,
+    ) -> tuple[int | None, str | None]:
+        character_id = await self._resolve_character_id(
+            query,
+            platform=platform,
+            group_id=group_id,
+        )
+        if not character_id:
+            return None, f"未找到角色：{query}"
+        return int(character_id), None
+
+    async def _resolve_deck_event_id(
+        self,
+        server: str,
+        *,
+        event_id: int | None,
+        not_found_message: str,
+    ) -> tuple[int | None, str | None]:
+        if event_id is not None:
+            event = await self._get_event_by_id(server, event_id)
+            if not event:
+                return None, f"{server_label(server)}不存在活动 {event_id}"
+            return event_id, None
+        current_event = await master_data_provider.get_current_event(
+            server,
+            fallback="next_first",
+        )
+        if not current_event:
+            return None, not_found_message
+        return int(current_event["id"]), None
+
+    async def _split_challenge_queries(
+        self,
+        query: str,
+        *,
+        platform: str | None = None,
+        group_id: str | None = None,
+    ) -> tuple[str | None, str | None, str | None]:
+        tokens = [segment for segment in str(query).split() if segment]
+        if not tokens:
+            return None, None, "挑战组卡需要至少提供一个角色"
+
+        fallback_character_query: str | None = None
+        fallback_music_query: str | None = None
+        for index in range(len(tokens), 0, -1):
+            character_query = " ".join(tokens[:index])
+            character_id = await self._resolve_character_id(
+                character_query,
+                platform=platform,
+                group_id=group_id,
+            )
+            if not character_id:
+                continue
+            if index == len(tokens):
+                return character_query, None, None
+            music_query = " ".join(tokens[index:])
+            if await self._resolve_music_id(
+                music_query,
+                platform=platform,
+                group_id=group_id,
+            ):
+                return character_query, music_query, None
+            if fallback_character_query is None:
+                fallback_character_query = character_query
+                fallback_music_query = music_query
+
+        if fallback_music_query:
+            return None, None, f"未找到歌曲：{fallback_music_query}"
+        return None, None, f"未找到角色：{query}"
+
+    async def _resolve_deck_request(
+        self,
+        request: DeckCommandRequest,
+        *,
+        server: str,
+        game_id: str,
+        platform: str | None = None,
+        group_id: str | None = None,
+    ) -> tuple[DeckResolvedRequest | None, str | None]:
+        settings = get_settings()
+        mode = request.mode
+        kind_label = deck_mode_label(mode)
+
+        if mode == "event":
+            event_id, error = await self._resolve_deck_event_id(
+                server,
+                event_id=request.event_id,
+                not_found_message="当前和下一期活动都不可用，请手动指定活动ID",
+            )
+            if error:
+                return None, error
+            music_id = settings.deck_default_music_id
+            if request.explicit_music and request.music_query:
+                music_id, error = await self._resolve_music_query(
+                    request.music_query,
+                    platform=platform,
+                    group_id=group_id,
+                )
+                if error:
+                    return None, error
+            return (
+                DeckResolvedRequest(
+                    mode=mode,
+                    kind_label=kind_label,
+                    server=server,
+                    game_id=game_id,
+                    event_id=event_id,
+                    music_id=music_id,
+                    difficulty=request.difficulty or settings.deck_default_difficulty,
+                    live_type=request.live_type or settings.deck_default_live_type,
+                ),
+                None,
+            )
+
+        if mode == "custom":
+            if request.custom_bonus is None:
+                return None, "组卡需要指定箱活加成或混活加成"
+            music_id = settings.deck_default_music_id
+            if request.explicit_music and request.music_query:
+                music_id, error = await self._resolve_music_query(
+                    request.music_query,
+                    platform=platform,
+                    group_id=group_id,
+                )
+                if error:
+                    return None, error
+            difficulty = (
+                request.difficulty
+                or ("master" if request.explicit_music else settings.deck_default_difficulty)
+            )
+            live_type = request.live_type or settings.deck_default_live_type
+
+            resolved_request = DeckResolvedRequest(
+                mode=mode,
+                kind_label=kind_label,
+                server=server,
+                game_id=game_id,
+                music_id=music_id,
+                difficulty=difficulty,
+                live_type=live_type,
+            )
+            if request.custom_bonus.kind == "unit":
+                return (
+                    replace(
+                        resolved_request,
+                        custom_attr=request.custom_bonus.attr,
+                        custom_unit=request.custom_bonus.unit,
+                    ),
+                    None,
+                )
+
+            character_ids: list[int] = []
+            character_units: dict[int, str] = {}
+            seen_ids: set[int] = set()
+            for character in request.custom_bonus.characters:
+                character_id, error = await self._resolve_character_query(
+                    character.query,
+                    platform=platform,
+                    group_id=group_id,
+                )
+                if error:
+                    return None, error
+                if character_id not in seen_ids:
+                    seen_ids.add(character_id)
+                    character_ids.append(character_id)
+                if character.support_unit:
+                    existing_unit = character_units.get(character_id)
+                    if existing_unit and existing_unit != character.support_unit:
+                        return None, f"同一虚拟歌手不能同时指定多个团体：{character.query}"
+                    character_units[character_id] = character.support_unit
+
+            return (
+                replace(
+                    resolved_request,
+                    custom_attr=request.custom_bonus.attr,
+                    custom_character_ids=tuple(character_ids),
+                    custom_character_units=character_units,
+                ),
+                None,
+            )
+
+        if mode == "mysekai":
+            event_id, error = await self._resolve_deck_event_id(
+                server,
+                event_id=request.event_id,
+                not_found_message="当前和下一期活动都不可用，请手动指定活动ID",
+            )
+            if error:
+                return None, error
+            return (
+                DeckResolvedRequest(
+                    mode=mode,
+                    kind_label=kind_label,
+                    server=server,
+                    game_id=game_id,
+                    event_id=event_id,
+                ),
+                None,
+            )
+
+        if mode == "strongest":
+            music_id = settings.deck_strongest_default_music_id
+            if request.explicit_music and request.music_query:
+                music_id, error = await self._resolve_music_query(
+                    request.music_query,
+                    platform=platform,
+                    group_id=group_id,
+                )
+                if error:
+                    return None, error
+            difficulty = (
+                request.difficulty
+                or (
+                    "master"
+                    if request.explicit_music
+                    else settings.deck_strongest_default_difficulty
+                )
+            )
+            return (
+                DeckResolvedRequest(
+                    mode=mode,
+                    kind_label=kind_label,
+                    server=server,
+                    game_id=game_id,
+                    music_id=music_id,
+                    difficulty=difficulty,
+                    live_type=request.live_type or settings.deck_default_live_type,
+                    strongest_target=request.strongest_target or "power",
+                ),
+                None,
+            )
+
+        if mode == "challenge":
+            character_query, music_query, error = await self._split_challenge_queries(
+                request.free_text_query or request.character_query or "",
+                platform=platform,
+                group_id=group_id,
+            )
+            if error:
+                return None, error
+            if not character_query:
+                return None, "挑战组卡需要至少提供一个角色"
+            character_id, error = await self._resolve_character_query(
+                character_query,
+                platform=platform,
+                group_id=group_id,
+            )
+            if error:
+                return None, error
+            music_id = settings.deck_challenge_default_music_id
+            if music_query:
+                music_id, error = await self._resolve_music_query(
+                    music_query,
+                    platform=platform,
+                    group_id=group_id,
+                )
+                if error:
+                    return None, error
+            return (
+                DeckResolvedRequest(
+                    mode=mode,
+                    kind_label=kind_label,
+                    server=server,
+                    game_id=game_id,
+                    character_id=character_id,
+                    music_id=music_id,
+                    difficulty=request.difficulty
+                    or settings.deck_challenge_default_difficulty,
+                ),
+                None,
+            )
+
+        return None, f"暂不支持的组卡模式：{mode}"
+
+    async def handle_deck(
         self,
         platform: str,
         requester_user_id: str,
         *,
-        server: str | None,
-        target_user_id: str | None,
-        event_id: int | None,
-        music_id: int | None,
-        difficulty: str | None,
-        live_type: str | None,
+        request: DeckCommandRequest,
+        group_id: str | None = None,
         is_superuser: bool,
     ) -> bytes | str:
         if error := await self._is_qq_blacklisted(platform, requester_user_id, is_superuser):
             return error
-        target_user_id = target_user_id or requester_user_id
+        target_user_id = request.target_user_id or requester_user_id
         binding, error = await self._resolve_binding_for_user(
             platform,
             is_superuser,
             target_user_id,
-            server,
+            request.server,
             ignore_share=target_user_id == requester_user_id,
         )
         if error:
             return error
-        resolved_event = event_id
-        if resolved_event is None:
-            current_event = await master_data_provider.get_current_event(
-                binding.server,
-                fallback="next_first",
-            )
-            if not current_event:
-                return "当前和下一期活动都不可用，请手动指定活动ID"
-            resolved_event = int(current_event["id"])
-
-        settings = get_settings()
-        resolved_difficulty = normalize_deck_difficulty(
-            difficulty or settings.deck_default_difficulty
+        resolved_request, error = await self._resolve_deck_request(
+            request,
+            server=binding.server,
+            game_id=binding.game_id,
+            platform=platform,
+            group_id=group_id,
         )
-        if not resolved_difficulty:
-            return "难度仅支持 easy/normal/hard/expert/master/append 及其缩写"
-        resolved_live_type = normalize_live_type(
-            live_type or settings.deck_default_live_type
-        )
-        if not resolved_live_type:
-            return "模式仅支持 multi/solo/auto/cheerful 及中文别名"
+        if error or not resolved_request:
+            return error or "组卡参数解析失败"
         try:
             return await screenshot_service.capture_deck(
-                server=binding.server,
-                game_id=binding.game_id,
-                event_id=resolved_event,
-                music_id=music_id or settings.deck_default_music_id,
-                difficulty=resolved_difficulty,
-                live_type=resolved_live_type,
+                request=to_backend_request(resolved_request),
             )
         except ScreenshotError as exc:
             return exc.to_user_message()

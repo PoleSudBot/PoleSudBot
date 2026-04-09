@@ -6,11 +6,10 @@ import shlex
 
 from nonebot.adapters.onebot.v11 import MessageEvent
 
+from .deck import DECK_COMMAND_SPECS, DeckCommandRequest, parse_deck_command_request
 from .constants import (
     ALL_SERVERS_KEYWORD,
     SERVER_SET,
-    normalize_deck_difficulty,
-    normalize_live_type,
 )
 
 
@@ -37,6 +36,7 @@ class ParsedCommand:
     manga_id: int | None = None
     multiplier_values: list[int] = field(default_factory=list)
     force_refresh: bool = False
+    deck_request: DeckCommandRequest | None = None
     error: str | None = None
 
 
@@ -325,218 +325,29 @@ def _parse_alias(text: str) -> ParsedCommand | None:
     return None
 
 
-def _parse_activity_deck(
-    text: str, at_targets: list[str]
-) -> ParsedCommand | None:
-    matched = _match_command(text, ("活动组卡",))
-    if not matched:
-        return None
-    prefix, rest = matched
-    server, rest = _consume_server(prefix, rest)
-    try:
-        tokens = shlex.split(rest)
-    except ValueError as exc:
+def _parse_deck_command(text: str, at_targets: list[str]) -> ParsedCommand | None:
+    for spec in DECK_COMMAND_SPECS:
+        matched = _match_command(text, spec.command_names)
+        if not matched:
+            continue
+        prefix, rest = matched
+        server, rest = _consume_server(prefix, rest)
+        deck_request, error = parse_deck_command_request(
+            raw_text=text,
+            mode=spec.mode,
+            server=server,
+            rest=rest,
+            at_targets=at_targets,
+        )
         return ParsedCommand(
-            action="activity_deck",
+            action="deck",
             raw_text=text,
             server=server,
-            error=f"参数解析失败: {exc}",
+            target_user_id=deck_request.target_user_id if deck_request else None,
+            deck_request=deck_request,
+            error=error,
         )
-
-    event_id = None
-    music_id = None
-    difficulty = None
-    live_type = None
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if token in {"--music", "--music-id"}:
-            if index + 1 >= len(tokens) or not tokens[index + 1].isdigit():
-                return ParsedCommand(
-                    action="activity_deck",
-                    raw_text=text,
-                    server=server,
-                    error="--music 需要一个数字参数",
-                )
-            if music_id is not None:
-                return ParsedCommand(
-                    action="activity_deck",
-                    raw_text=text,
-                    server=server,
-                    error="歌曲ID参数重复",
-                )
-            music_id = int(tokens[index + 1])
-            index += 2
-            continue
-        if token.startswith("--music="):
-            value = token.partition("=")[2]
-            if not value.isdigit():
-                return ParsedCommand(
-                    action="activity_deck",
-                    raw_text=text,
-                    server=server,
-                    error="--music 需要一个数字参数",
-                )
-            if music_id is not None:
-                return ParsedCommand(
-                    action="activity_deck",
-                    raw_text=text,
-                    server=server,
-                    error="歌曲ID参数重复",
-                )
-            music_id = int(value)
-            index += 1
-            continue
-        if token == "--difficulty":
-            if index + 1 >= len(tokens):
-                return ParsedCommand(
-                    action="activity_deck",
-                    raw_text=text,
-                    server=server,
-                    error="--difficulty 需要一个参数",
-                )
-            if difficulty is not None:
-                return ParsedCommand(
-                    action="activity_deck",
-                    raw_text=text,
-                    server=server,
-                    error="难度参数重复",
-                )
-            difficulty = normalize_deck_difficulty(tokens[index + 1])
-            if not difficulty:
-                return ParsedCommand(
-                    action="activity_deck",
-                    raw_text=text,
-                    server=server,
-                    error="难度仅支持 easy/normal/hard/expert/master/append 及其缩写",
-                )
-            index += 2
-            continue
-        if token.startswith("--difficulty="):
-            if difficulty is not None:
-                return ParsedCommand(
-                    action="activity_deck",
-                    raw_text=text,
-                    server=server,
-                    error="难度参数重复",
-                )
-            difficulty = normalize_deck_difficulty(token.partition("=")[2])
-            if not difficulty:
-                return ParsedCommand(
-                    action="activity_deck",
-                    raw_text=text,
-                    server=server,
-                    error="难度仅支持 easy/normal/hard/expert/master/append 及其缩写",
-                )
-            index += 1
-            continue
-        if token in {"--live-type", "--live_type"}:
-            if index + 1 >= len(tokens):
-                return ParsedCommand(
-                    action="activity_deck",
-                    raw_text=text,
-                    server=server,
-                    error="--live-type 需要一个参数",
-                )
-            if live_type is not None:
-                return ParsedCommand(
-                    action="activity_deck",
-                    raw_text=text,
-                    server=server,
-                    error="模式参数重复",
-                )
-            live_type = normalize_live_type(tokens[index + 1])
-            if not live_type:
-                return ParsedCommand(
-                    action="activity_deck",
-                    raw_text=text,
-                    server=server,
-                    error="模式仅支持 multi/solo/auto/cheerful 及中文别名",
-                )
-            index += 2
-            continue
-        if token.startswith("--live-type=") or token.startswith("--live_type="):
-            if live_type is not None:
-                return ParsedCommand(
-                    action="activity_deck",
-                    raw_text=text,
-                    server=server,
-                    error="模式参数重复",
-                )
-            live_type = normalize_live_type(token.partition("=")[2])
-            if not live_type:
-                return ParsedCommand(
-                    action="activity_deck",
-                    raw_text=text,
-                    server=server,
-                    error="模式仅支持 multi/solo/auto/cheerful 及中文别名",
-                )
-            index += 1
-            continue
-        if token.isdigit():
-            if event_id is None:
-                event_id = int(token)
-                index += 1
-                continue
-            if music_id is None:
-                music_id = int(token)
-                index += 1
-                continue
-            return ParsedCommand(
-                action="activity_deck",
-                raw_text=text,
-                server=server,
-                error="活动组卡最多只能提供一个活动ID和一个歌曲ID",
-            )
-        normalized_difficulty = normalize_deck_difficulty(token)
-        if normalized_difficulty:
-            if difficulty is not None:
-                return ParsedCommand(
-                    action="activity_deck",
-                    raw_text=text,
-                    server=server,
-                    error="难度参数重复",
-                )
-            difficulty = normalized_difficulty
-            index += 1
-            continue
-        normalized_live_type = normalize_live_type(token)
-        if normalized_live_type:
-            if live_type is not None:
-                return ParsedCommand(
-                    action="activity_deck",
-                    raw_text=text,
-                    server=server,
-                    error="模式参数重复",
-                )
-            live_type = normalized_live_type
-            index += 1
-            continue
-        return ParsedCommand(
-            action="activity_deck",
-            raw_text=text,
-            server=server,
-            error=f"无法识别的参数: {token}",
-        )
-
-    if len(at_targets) > 1:
-        return ParsedCommand(
-            action="activity_deck",
-            raw_text=text,
-            server=server,
-            error="活动组卡最多只能指定一个 @ 用户",
-        )
-
-    return ParsedCommand(
-        action="activity_deck",
-        raw_text=text,
-        server=server,
-        target_user_id=at_targets[0] if at_targets else None,
-        event_id=event_id,
-        music_id=music_id,
-        difficulty=difficulty,
-        live_type=live_type,
-    )
+    return None
 
 
 def _parse_admin(text: str, at_targets: list[str]) -> ParsedCommand | None:
@@ -774,4 +585,4 @@ def parse_command(event: MessageEvent) -> ParsedCommand | None:
     if ycx:
         return ycx
 
-    return _parse_activity_deck(text, at_targets)
+    return _parse_deck_command(text, at_targets)

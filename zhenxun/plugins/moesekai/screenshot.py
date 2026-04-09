@@ -14,6 +14,7 @@ from PIL import Image
 from .adapters.runtime import logger
 from .config import get_settings
 from .constants import MODULE_NAME, server_path_prefix
+from .deck import DeckBackendRequest, moesekai_deck_screenshot_adapter
 
 _DEFAULT_VIEWPORT_HEIGHT = 932
 _MOBILE_USER_AGENT = (
@@ -923,23 +924,13 @@ async () => {
     async def capture_deck(
         self,
         *,
-        server: str,
-        game_id: str,
-        event_id: int,
-        music_id: int,
-        difficulty: str,
-        live_type: str,
+        request: DeckBackendRequest,
     ) -> bytes:
         settings = get_settings()
-        urls = [
-            (
-                f"{base.rstrip('/')}/deck-recommend/?mode=screenshot"
-                f"&userId={game_id}&server={server}&deckMode=event"
-                f"&eventId={event_id}&musicId={music_id}"
-                f"&difficulty={difficulty}&liveType={live_type}"
-            )
-            for base in settings.site_bases
-        ]
+        urls = moesekai_deck_screenshot_adapter.build_urls(
+            request,
+            site_bases=settings.site_bases,
+        )
         prepare_script = """
 () => {
   const nav = document.querySelector('body > main > nav');
@@ -1059,7 +1050,7 @@ async () => {
 }
         """.strip()
         job = ScreenshotJob(
-            kind="活动组卡",
+            kind=request.kind_label,
             urls=urls,
             viewport=_build_viewport(settings.deck_viewport_width),
             device_scale_factor=self._quality_scale_factor(settings.screenshot_quality),

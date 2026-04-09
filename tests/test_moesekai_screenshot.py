@@ -10,6 +10,10 @@ import pytest
 nonebot.init()
 
 from zhenxun.plugins.moesekai.config import MoeSekaiSettings
+from zhenxun.plugins.moesekai.deck import (
+    DeckBackendRequest,
+    moesekai_deck_screenshot_adapter,
+)
 from zhenxun.plugins.moesekai.screenshot import (
     ScreenshotJob,
     _redact_url_secrets,
@@ -168,14 +172,121 @@ async def test_capture_deck_uses_crop_config(
 
     monkeypatch.setattr(screenshot_service, "capture", fake_capture)
     result = await screenshot_service.capture_deck(
-        server="cn",
-        game_id="1234567890123",
-        event_id=195,
-        music_id=226,
-        difficulty="hard",
-        live_type="multi",
+        request=DeckBackendRequest(
+            mode="event",
+            kind_label="活动组卡",
+            server="cn",
+            game_id="1234567890123",
+            event_id=195,
+            music_id=226,
+            difficulty="hard",
+            live_type="multi",
+        ),
     )
     assert result == b"deck"
+
+
+def test_moesekai_deck_adapter_builds_event_query():
+    urls = moesekai_deck_screenshot_adapter.build_urls(
+        DeckBackendRequest(
+            mode="event",
+            kind_label="活动组卡",
+            server="jp",
+            game_id="1234567890123",
+            event_id=195,
+            music_id=226,
+            difficulty="hard",
+            live_type="multi",
+        ),
+        site_bases=["https://example.com"],
+    )
+
+    assert (
+        urls[0]
+        == "https://example.com/deck-recommend/?mode=screenshot&userId=1234567890123&server=jp&deckMode=event&eventId=195&musicId=226&difficulty=hard&liveType=multi"
+    )
+
+
+def test_moesekai_deck_adapter_builds_strongest_query_with_internal_live_type():
+    urls = moesekai_deck_screenshot_adapter.build_urls(
+        DeckBackendRequest(
+            mode="strongest",
+            kind_label="最强组卡",
+            server="jp",
+            game_id="1234567890123",
+            music_id=141,
+            difficulty="append",
+            live_type="multi",
+            strongest_target="power",
+        ),
+        site_bases=["https://example.com"],
+    )
+
+    assert (
+        urls[0]
+        == "https://example.com/deck-recommend/?mode=screenshot&userId=1234567890123&server=jp&deckMode=strongest&musicId=141&difficulty=append&liveType=multi&strongestTarget=power"
+    )
+
+
+def test_moesekai_deck_adapter_builds_challenge_query():
+    urls = moesekai_deck_screenshot_adapter.build_urls(
+        DeckBackendRequest(
+            mode="challenge",
+            kind_label="挑战组卡",
+            server="jp",
+            game_id="1234567890123",
+            character_id=21,
+            music_id=540,
+            difficulty="master",
+        ),
+        site_bases=["https://example.com"],
+    )
+
+    assert (
+        urls[0]
+        == "https://example.com/deck-recommend/?mode=screenshot&userId=1234567890123&server=jp&deckMode=challenge&characterId=21&musicId=540&difficulty=master"
+    )
+
+
+def test_moesekai_deck_adapter_builds_mysekai_query_without_music():
+    urls = moesekai_deck_screenshot_adapter.build_urls(
+        DeckBackendRequest(
+            mode="mysekai",
+            kind_label="烤森组卡",
+            server="jp",
+            game_id="1234567890123",
+            event_id=201,
+        ),
+        site_bases=["https://example.com"],
+    )
+
+    assert (
+        urls[0]
+        == "https://example.com/deck-recommend/?mode=screenshot&userId=1234567890123&server=jp&deckMode=mysekai&eventId=201"
+    )
+
+
+def test_moesekai_deck_adapter_builds_custom_query_with_character_units():
+    urls = moesekai_deck_screenshot_adapter.build_urls(
+        DeckBackendRequest(
+            mode="custom",
+            kind_label="组卡",
+            server="jp",
+            game_id="1234567890123",
+            music_id=74,
+            difficulty="expert",
+            live_type="multi",
+            custom_attr="pure",
+            custom_character_ids=(21, 22),
+            custom_character_units={21: "leo_need"},
+        ),
+        site_bases=["https://example.com"],
+    )
+
+    assert (
+        urls[0]
+        == "https://example.com/deck-recommend/?mode=screenshot&userId=1234567890123&server=jp&deckMode=custom&musicId=74&difficulty=expert&liveType=multi&customAttr=pure&customCharacterIds=21%2C22&customCharacterUnits=%7B%2221%22%3A%22leo_need%22%7D"
+    )
 
 
 @pytest.mark.asyncio

@@ -318,6 +318,10 @@ class MoeSekaiSettings(BaseModel):
     deck_default_music_id: int = 74
     deck_default_difficulty: str = "expert"
     deck_default_live_type: str = "multi"
+    deck_strongest_default_music_id: int = 141
+    deck_strongest_default_difficulty: str = "append"
+    deck_challenge_default_music_id: int = 540
+    deck_challenge_default_difficulty: str = "master"
     cache_mode: str = "REDIS"
     cache_ttl_seconds: int = 600
     character_cache_ttl_seconds: int = 1_209_600
@@ -410,7 +414,11 @@ class MoeSekaiSettings(BaseModel):
     def _normalize_master_interval(cls, value: int) -> int:
         return max(1, value)
 
-    @field_validator("deck_default_difficulty")
+    @field_validator(
+        "deck_default_difficulty",
+        "deck_strongest_default_difficulty",
+        "deck_challenge_default_difficulty",
+    )
     @classmethod
     def _normalize_difficulty(cls, value: str) -> str:
         return normalize_deck_difficulty(value) or "hard"
@@ -528,7 +536,7 @@ REGISTER_CONFIGS = [
         key="MOESEKAI_DECK_VIEWPORT_WIDTH",
         value=REGISTER_DEFAULTS.deck_viewport_width,
         default_value=REGISTER_DEFAULTS.deck_viewport_width,
-        help="活动组卡截图宽度（CSS viewport width）",
+        help="组卡截图宽度（CSS viewport width）",
         type=int,
     ),
     RegisterConfig(
@@ -536,7 +544,7 @@ REGISTER_CONFIGS = [
         key="MOESEKAI_DECK_TOP_CROP",
         value=REGISTER_DEFAULTS.deck_top_crop,
         default_value=REGISTER_DEFAULTS.deck_top_crop,
-        help="活动组卡截图顶部裁剪高度（CSS 像素）",
+        help="组卡截图顶部裁剪高度（CSS 像素）",
         type=int,
     ),
     RegisterConfig(
@@ -584,7 +592,7 @@ REGISTER_CONFIGS = [
         key="MOESEKAI_DECK_WAIT_TIMEOUT_SECONDS",
         value=REGISTER_DEFAULTS.deck_wait_timeout_seconds,
         default_value=REGISTER_DEFAULTS.deck_wait_timeout_seconds,
-        help="活动组卡等待网页计算完成的超时秒数",
+        help="组卡等待网页计算完成的超时秒数",
         type=int,
     ),
     RegisterConfig(
@@ -609,6 +617,38 @@ REGISTER_CONFIGS = [
         value=REGISTER_DEFAULTS.deck_default_live_type,
         default_value=REGISTER_DEFAULTS.deck_default_live_type,
         help="活动组卡默认 Live 类型",
+        type=str,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MOESEKAI_DECK_STRONGEST_DEFAULT_MUSIC_ID",
+        value=REGISTER_DEFAULTS.deck_strongest_default_music_id,
+        default_value=REGISTER_DEFAULTS.deck_strongest_default_music_id,
+        help="最强组卡默认歌曲 ID",
+        type=int,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MOESEKAI_DECK_STRONGEST_DEFAULT_DIFFICULTY",
+        value=REGISTER_DEFAULTS.deck_strongest_default_difficulty,
+        default_value=REGISTER_DEFAULTS.deck_strongest_default_difficulty,
+        help="最强组卡默认难度",
+        type=str,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MOESEKAI_DECK_CHALLENGE_DEFAULT_MUSIC_ID",
+        value=REGISTER_DEFAULTS.deck_challenge_default_music_id,
+        default_value=REGISTER_DEFAULTS.deck_challenge_default_music_id,
+        help="挑战组卡默认歌曲 ID",
+        type=int,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MOESEKAI_DECK_CHALLENGE_DEFAULT_DIFFICULTY",
+        value=REGISTER_DEFAULTS.deck_challenge_default_difficulty,
+        default_value=REGISTER_DEFAULTS.deck_challenge_default_difficulty,
+        help="挑战组卡默认难度",
         type=str,
     ),
     RegisterConfig(
@@ -888,6 +928,22 @@ def get_settings() -> MoeSekaiSettings:
         "deck_default_live_type": _get_compat_config(
             "MOESEKAI_DECK_DEFAULT_LIVE_TYPE",
             defaults.deck_default_live_type,
+        ),
+        "deck_strongest_default_music_id": _get_compat_config(
+            "MOESEKAI_DECK_STRONGEST_DEFAULT_MUSIC_ID",
+            defaults.deck_strongest_default_music_id,
+        ),
+        "deck_strongest_default_difficulty": _get_compat_config(
+            "MOESEKAI_DECK_STRONGEST_DEFAULT_DIFFICULTY",
+            defaults.deck_strongest_default_difficulty,
+        ),
+        "deck_challenge_default_music_id": _get_compat_config(
+            "MOESEKAI_DECK_CHALLENGE_DEFAULT_MUSIC_ID",
+            defaults.deck_challenge_default_music_id,
+        ),
+        "deck_challenge_default_difficulty": _get_compat_config(
+            "MOESEKAI_DECK_CHALLENGE_DEFAULT_DIFFICULTY",
+            defaults.deck_challenge_default_difficulty,
         ),
         "cache_mode": _get_compat_config(
             "MOESEKAI_CACHE_MODE",

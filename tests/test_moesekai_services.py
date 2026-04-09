@@ -19,6 +19,11 @@ from zhenxun.plugins.moesekai.adapters.results import (
     build_alias_profile_image,
 )
 from zhenxun.plugins.moesekai.application import service as service_module
+from zhenxun.plugins.moesekai.deck import (
+    CustomBonusSpec,
+    CustomCharacterQuery,
+    DeckCommandRequest,
+)
 from zhenxun.plugins.moesekai.providers.aliases import (
     AliasProfile,
     AliasResolveResult,
@@ -479,7 +484,7 @@ async def test_handle_default_server_still_requires_binding(
 
 
 @pytest.mark.asyncio
-async def test_handle_activity_deck_still_requires_binding(
+async def test_handle_deck_still_requires_binding(
     monkeypatch: pytest.MonkeyPatch,
 ):
     async def fake_is_qq_blacklisted(*_args, **_kwargs):
@@ -499,19 +504,245 @@ async def test_handle_activity_deck_still_requires_binding(
         fake_resolve_binding_for_user,
     )
 
-    result = await service_module.moesekai_app.handle_activity_deck(
+    result = await service_module.moesekai_app.handle_deck(
         platform="qq",
         requester_user_id="123456",
-        server=None,
-        target_user_id=None,
-        event_id=None,
-        music_id=None,
-        difficulty=None,
-        live_type=None,
+        request=DeckCommandRequest(mode="event", server=None),
         is_superuser=False,
     )
 
     assert result == "未绑定"
+
+
+@pytest.mark.asyncio
+async def test_resolve_event_deck_without_current_event_requires_manual_event_id(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_get_current_event(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        service_module.master_data_provider,
+        "get_current_event",
+        fake_get_current_event,
+    )
+
+    resolved, error = await service_module.moesekai_app._resolve_deck_request(
+        DeckCommandRequest(mode="event", server=None),
+        server="jp",
+        game_id="1234567890123",
+    )
+
+    assert resolved is None
+    assert error == "当前和下一期活动都不可用，请手动指定活动ID"
+
+
+@pytest.mark.asyncio
+async def test_resolve_custom_deck_uses_default_song_and_difficulty():
+    resolved, error = await service_module.moesekai_app._resolve_deck_request(
+        DeckCommandRequest(
+            mode="custom",
+            server=None,
+            custom_bonus=CustomBonusSpec(
+                kind="unit",
+                attr="pure",
+                unit="vivid_bad_squad",
+            ),
+        ),
+        server="jp",
+        game_id="1234567890123",
+    )
+
+    assert error is None
+    assert resolved is not None
+    assert resolved.music_id == 74
+    assert resolved.difficulty == "expert"
+    assert resolved.live_type == "multi"
+    assert resolved.custom_attr == "pure"
+    assert resolved.custom_unit == "vivid_bad_squad"
+
+
+@pytest.mark.asyncio
+async def test_resolve_custom_deck_explicit_song_defaults_to_master(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_resolve_music_query(*_args, **_kwargs):
+        return 277, None
+
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_resolve_music_query",
+        fake_resolve_music_query,
+    )
+
+    resolved, error = await service_module.moesekai_app._resolve_deck_request(
+        DeckCommandRequest(
+            mode="custom",
+            server=None,
+            music_query="phony",
+            custom_bonus=CustomBonusSpec(
+                kind="unit",
+                attr="pure",
+                unit="vivid_bad_squad",
+            ),
+            explicit_music=True,
+        ),
+        server="jp",
+        game_id="1234567890123",
+    )
+
+    assert error is None
+    assert resolved is not None
+    assert resolved.music_id == 277
+    assert resolved.difficulty == "master"
+
+
+@pytest.mark.asyncio
+async def test_resolve_strongest_deck_uses_strongest_defaults():
+    resolved, error = await service_module.moesekai_app._resolve_deck_request(
+        DeckCommandRequest(mode="strongest", server=None),
+        server="jp",
+        game_id="1234567890123",
+    )
+
+    assert error is None
+    assert resolved is not None
+    assert resolved.music_id == 141
+    assert resolved.difficulty == "append"
+    assert resolved.live_type == "multi"
+    assert resolved.strongest_target == "power"
+
+
+@pytest.mark.asyncio
+async def test_resolve_strongest_deck_explicit_song_defaults_to_master_and_skill(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_resolve_music_query(*_args, **_kwargs):
+        return 1, None
+
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_resolve_music_query",
+        fake_resolve_music_query,
+    )
+
+    resolved, error = await service_module.moesekai_app._resolve_deck_request(
+        DeckCommandRequest(
+            mode="strongest",
+            server=None,
+            music_query="tell your world",
+            strongest_target="skill",
+            explicit_music=True,
+        ),
+        server="jp",
+        game_id="1234567890123",
+    )
+
+    assert error is None
+    assert resolved is not None
+    assert resolved.music_id == 1
+    assert resolved.difficulty == "master"
+    assert resolved.strongest_target == "skill"
+    assert resolved.live_type == "multi"
+
+
+@pytest.mark.asyncio
+async def test_resolve_challenge_deck_uses_default_song_and_difficulty(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_split(*_args, **_kwargs):
+        return "初音未来", None, None
+
+    async def fake_resolve_character_query(*_args, **_kwargs):
+        return 1, None
+
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_split_challenge_queries",
+        fake_split,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_resolve_character_query",
+        fake_resolve_character_query,
+    )
+
+    resolved, error = await service_module.moesekai_app._resolve_deck_request(
+        DeckCommandRequest(
+            mode="challenge",
+            server=None,
+            free_text_query="初音未来",
+        ),
+        server="jp",
+        game_id="1234567890123",
+    )
+
+    assert error is None
+    assert resolved is not None
+    assert resolved.character_id == 1
+    assert resolved.music_id == 540
+    assert resolved.difficulty == "master"
+
+
+@pytest.mark.asyncio
+async def test_resolve_custom_mixed_deck_character_units(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_resolve_character_query(query: str, **_kwargs):
+        mapping = {"miku": (21, None), "rin": (22, None)}
+        return mapping[query]
+
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_resolve_character_query",
+        fake_resolve_character_query,
+    )
+
+    resolved, error = await service_module.moesekai_app._resolve_deck_request(
+        DeckCommandRequest(
+            mode="custom",
+            server=None,
+            custom_bonus=CustomBonusSpec(
+                kind="mixed",
+                attr="pure",
+                characters=(
+                    CustomCharacterQuery(query="miku", support_unit="leo_need"),
+                    CustomCharacterQuery(query="rin", support_unit=None),
+                ),
+            ),
+        ),
+        server="jp",
+        game_id="1234567890123",
+    )
+
+    assert error is None
+    assert resolved is not None
+    assert resolved.custom_attr == "pure"
+    assert resolved.custom_character_ids == (21, 22)
+    assert resolved.custom_character_units == {21: "leo_need"}
+
+
+@pytest.mark.asyncio
+async def test_resolve_mysekai_deck_requires_event_when_no_current_event(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_get_current_event(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        service_module.master_data_provider,
+        "get_current_event",
+        fake_get_current_event,
+    )
+
+    resolved, error = await service_module.moesekai_app._resolve_deck_request(
+        DeckCommandRequest(mode="mysekai", server=None),
+        server="jp",
+        game_id="1234567890123",
+    )
+
+    assert resolved is None
+    assert error == "当前和下一期活动都不可用，请手动指定活动ID"
 
 
 @pytest.mark.asyncio
