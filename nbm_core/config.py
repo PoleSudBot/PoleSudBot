@@ -26,6 +26,14 @@ class ManagerSettings(BaseModel):
 
     plugins_src_dir: str = "plugins"
     plugins_list_file: str = "plugins.txt"
+    bridge_vendor_repo: str = (
+        "https://github.com/Genshin-bots/nonebot-plugin-genshinuid.git"
+    )
+    bridge_vendor_ref: str = ""
+    sidecar_core_repo: str = "https://github.com/Genshin-bots/gsuid_core.git"
+    sidecar_core_ref: str = ""
+    sidecar_runtime_dir: str = "sidecar/.runtime"
+    sidecar_plugins_file: str = "sidecar/plugins.toml"
     requirements_file: str = "requirements.txt"
     lock_file: str = "uv.lock"
     sync_state_file: str = ".manage_sync_state.json"
@@ -65,6 +73,13 @@ def load_settings() -> ManagerSettings:
                     "⚠️ `manage.toml` 中的 `dev_branch` 已作为兼容配置读取。"
                     "建议迁移到 `plugin_branch`。"
                 )
+        if settings.sidecar_runtime_dir != "sidecar/.runtime":
+            logger.warning(
+                "⚠️ `sidecar_runtime_dir` 当前必须与 "
+                "pyproject 中的本地路径依赖保持一致。"
+                "已强制回退到 'sidecar/.runtime'。"
+            )
+            settings.sidecar_runtime_dir = "sidecar/.runtime"
         return settings
     except (ValidationError, Exception) as e:
         logger.error(f"❌ Failed to parse 'manage.toml': {e}\nUsing defaults.")
@@ -80,6 +95,15 @@ settings = load_settings()
 # Path constants derived from PROJECT_ROOT and loaded settings
 PLUGINS_SRC_DIR = PROJECT_ROOT / settings.plugins_src_dir
 PLUGINS_LIST_FILE = PROJECT_ROOT / settings.plugins_list_file
+SIDECAR_RUNTIME_DIR = PROJECT_ROOT / settings.sidecar_runtime_dir
+SIDECAR_DIR = SIDECAR_RUNTIME_DIR.parent
+SIDECAR_PLUGINS_FILE = PROJECT_ROOT / settings.sidecar_plugins_file
+SIDECAR_COMPOSE_FILE = SIDECAR_DIR / "docker-compose.yml"
+SIDECAR_ENV_FILE = SIDECAR_DIR / ".env"
+SIDECAR_ENV_EXAMPLE_FILE = SIDECAR_DIR / ".env.example"
+BRIDGE_VENDOR_DIR = SIDECAR_RUNTIME_DIR / "vendors" / "nonebot-plugin-genshinuid"
+SIDECAR_CORE_DIR = SIDECAR_RUNTIME_DIR / "gsuid_core"
+SIDECAR_PLUGIN_DEPENDENCIES_FILE = SIDECAR_RUNTIME_DIR / "sidecar_dependencies.json"
 REQUIREMENTS_FILE = PROJECT_ROOT / settings.requirements_file
 LOCK_FILE = PROJECT_ROOT / settings.lock_file
 SYNC_STATE_FILE = PROJECT_ROOT / settings.sync_state_file
@@ -94,5 +118,9 @@ PROJECT_BRANCH = settings.project_branch
 RESOURCES_BRANCH = settings.resources_branch
 PLUGIN_BRANCH = settings.plugin_branch or settings.dev_branch
 RESOURCES_REPO = settings.resources_repo
+BRIDGE_VENDOR_REPO = settings.bridge_vendor_repo
+BRIDGE_VENDOR_REF = settings.bridge_vendor_ref.strip()
+SIDECAR_CORE_REPO = settings.sidecar_core_repo
+SIDECAR_CORE_REF = settings.sidecar_core_ref.strip()
 PROD_SYNC_EXTRAS = tuple(settings.prod_sync_extras)
 DEFAULT_SCOPE = settings.default_scope

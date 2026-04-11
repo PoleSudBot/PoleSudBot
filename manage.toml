@@ -23,6 +23,24 @@ plugins_src_dir = "plugins"
 # [可选] 记录插件仓库地址列表的文件名
 plugins_list_file = "plugins.txt"
 
+# [可选] 真寻桥接依赖仓库地址
+bridge_vendor_repo = "https://github.com/Genshin-bots/nonebot-plugin-genshinuid.git"
+
+# [可选] 真寻桥接依赖固定版本；留空时跟随默认分支最新提交
+bridge_vendor_ref = ""
+
+# [可选] sidecar Core 仓库地址
+sidecar_core_repo = "https://github.com/Genshin-bots/gsuid_core.git"
+
+# [可选] sidecar Core 固定版本；留空时跟随默认分支最新提交
+sidecar_core_ref = ""
+
+# [可选] sidecar 运行时目录
+sidecar_runtime_dir = "sidecar/.runtime"
+
+# [可选] sidecar 插件清单文件
+sidecar_plugins_file = "sidecar/plugins.toml"
+
 # [可选] 生产部署时额外安装的 extras 列表
 prod_sync_extras = []
 

@@ -13,6 +13,16 @@ from tomlkit.items import Array, Item, Table
 from . import config, git, process
 from .exceptions import CommandError
 
+SIDECAR_BASE_IMAGE = (
+    "docker.cnb.cool/gscore-mirror/docker-sync/astral-uv:"
+    "python3.12-bookworm-slim"
+)
+SIDECAR_PYTHON_INDEX = "https://pypi.org/simple"
+SIDECAR_NO_PROXY = (
+    "localhost,127.0.0.1,.local,cnb.cool,mirrors.aliyun.com,"
+    "pypi.tuna.tsinghua.edu.cn,mirrors.volces.com"
+)
+
 MANAGE_TOML_TEMPLATE = """# nbm (NoneBot Manager) 配置文件
 # 请根据你的实际情况修改此文件
 
@@ -41,6 +51,24 @@ plugins_src_dir = "plugins"
 # [可选] 记录插件仓库地址列表的文件名
 plugins_list_file = "plugins.txt"
 
+# [可选] 真寻桥接依赖仓库地址
+bridge_vendor_repo = "https://github.com/Genshin-bots/nonebot-plugin-genshinuid.git"
+
+# [可选] 真寻桥接依赖固定版本；留空时跟随默认分支最新提交
+bridge_vendor_ref = ""
+
+# [可选] sidecar Core 仓库地址
+sidecar_core_repo = "https://github.com/Genshin-bots/gsuid_core.git"
+
+# [可选] sidecar Core 固定版本；留空时跟随默认分支最新提交
+sidecar_core_ref = ""
+
+# [可选] sidecar 运行时目录
+sidecar_runtime_dir = "sidecar/.runtime"
+
+# [可选] sidecar 插件清单文件
+sidecar_plugins_file = "sidecar/plugins.toml"
+
 # [可选] 生产部署时额外安装的 extras 列表
 prod_sync_extras = []
 
@@ -51,6 +79,252 @@ max_workers = 8
 command_timeout = 1200
 """
 PLUGINS_TXT_TEMPLATE = "# 请在此处逐行输入插件的 GitHub 仓库地址\n"
+SIDECAR_ENV_TEMPLATE = """# Sidecar 容器环境配置
+SIDECAR_BIND_HOST=127.0.0.1
+SIDECAR_PORT=8765
+
+# 如需代理，可取消注释并填写
+# GSCORE_HTTP_PROXY=http://127.0.0.1:7890
+# GSCORE_HTTPS_PROXY=http://127.0.0.1:7890
+"""
+SIDECAR_PLUGINS_TEMPLATE = """# Sidecar 插件清单
+# ref 可选；留空或删除时将跟随默认分支最新提交
+# packages / playwright_browsers 可选；用于 sidecar 容器额外依赖
+
+[[plugins]]
+repo = "https://github.com/jiluoQAQ/RocomUID.git"
+
+[[plugins]]
+repo = "https://github.com/Loping151/XutheringWavesUID.git"
+packages = ["playwright", "opencv-python", "fonttools"]
+playwright_browsers = ["chromium"]
+"""
+SIDECAR_COMPOSE_TEMPLATE = """services:
+  external-bot-sidecar:
+    build:
+      context: ./.runtime/gsuid_core
+      target: ${GSCORE_BUILD_TARGET:-runtime}
+      args:
+        GSCORE_BASE_IMAGE: ${GSCORE_BASE_IMAGE:-""" + SIDECAR_BASE_IMAGE + """}
+        GSCORE_PYTHON_INDEX: ${GSCORE_PYTHON_INDEX:-""" + SIDECAR_PYTHON_INDEX + """}
+    image: external-bot-sidecar:${GSCORE_BUILD_TARGET:-runtime}
+    container_name: external-bot-sidecar
+    ports:
+      - "${SIDECAR_BIND_HOST:-127.0.0.1}:${SIDECAR_PORT:-8765}:8765"
+    volumes:
+      - ./.runtime/gsuid_core:/gsuid_core
+      - sidecar-venv:/venv
+      - ./.runtime/sidecar_dependencies.json:/sidecar_dependencies.json:ro
+      - ./start_sidecar.py:/start_sidecar.py:ro
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PLAYWRIGHT_BROWSERS_PATH: /venv/ms-playwright
+      UV_INDEX: ${GSCORE_PYTHON_INDEX:-}
+      UV_NO_CONFIG: ${UV_NO_CONFIG:-0}
+      http_proxy: ${GSCORE_HTTP_PROXY:-}
+      https_proxy: ${GSCORE_HTTPS_PROXY:-}
+      no_proxy: ${GSCORE_NO_PROXY:-""" + SIDECAR_NO_PROXY + """}
+    command:
+      - /venv/bin/python
+      - /start_sidecar.py
+
+volumes:
+  sidecar-venv:
+"""
+SIDECAR_README_TEMPLATE = """# Sidecar
+
+该目录承载 gsuid_core sidecar 的部署文件与插件清单。
+
+常用命令：
+
+```bash
+uv run --no-project nbm.py init --install
+uv run --no-project nbm.py docker install
+```
+"""
+SIDECAR_STARTER_TEMPLATE = """from __future__ import annotations
+
+import importlib.metadata as metadata
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from typing import Any
+
+
+CONFIG_PATH = Path("/gsuid_core/data/config.json")
+DEPENDENCIES_PATH = Path("/sidecar_dependencies.json")
+DEFAULT_TRUSTED_IPS = ["localhost", "::1", "127.0.0.1"]
+PLAYWRIGHT_BROWSERS_PATH = Path(
+    os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/venv/ms-playwright")
+)
+
+
+def _load_json_dict(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text("utf-8"))
+
+
+def _resolve_default_gateway() -> str | None:
+    route_path = Path("/proc/net/route")
+    if not route_path.exists():
+        return None
+
+    for line in route_path.read_text("utf-8").splitlines()[1:]:
+        fields = line.split()
+        if len(fields) <= 2 or fields[1] != "00000000":
+            continue
+        gateway = fields[2]
+        return ".".join(str(int(gateway[i : i + 2], 16)) for i in range(6, -2, -2))
+    return None
+
+
+def _prepare_config() -> None:
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    config = _load_json_dict(CONFIG_PATH)
+
+    trusted_ips = config.get("TRUSTED_IPS")
+    if not isinstance(trusted_ips, list):
+        trusted_ips = []
+
+    merged_ips = list(dict.fromkeys([*DEFAULT_TRUSTED_IPS, *trusted_ips]))
+    if gateway_ip := _resolve_default_gateway():
+        merged_ips = list(dict.fromkeys([*merged_ips, gateway_ip]))
+
+    config["TRUSTED_IPS"] = merged_ips
+    CONFIG_PATH.write_text(
+        json.dumps(config, ensure_ascii=False, indent=4),
+        "utf-8",
+    )
+
+
+def _load_dependency_manifest() -> dict[str, Any]:
+    manifest = _load_json_dict(DEPENDENCIES_PATH)
+    plugins = manifest.get("plugins", [])
+    if not isinstance(plugins, list):
+        raise RuntimeError("sidecar dependency manifest is malformed: plugins must be a list")
+    return {"plugins": plugins}
+
+
+def _collect_string_values(data: Any, field_name: str) -> list[str]:
+    if data is None:
+        return []
+    if not isinstance(data, list):
+        raise RuntimeError(
+            f"sidecar dependency manifest is malformed: {field_name} must be a list"
+        )
+    values: list[str] = []
+    for item in data:
+        if not isinstance(item, str):
+            raise RuntimeError(
+                f"sidecar dependency manifest is malformed: {field_name} items must be strings"
+            )
+        value = item.strip()
+        if value:
+            values.append(value)
+    return list(dict.fromkeys(values))
+
+
+def _collect_runtime_dependencies() -> tuple[list[str], list[str]]:
+    manifest = _load_dependency_manifest()
+    packages: list[str] = []
+    browsers: list[str] = []
+    for plugin in manifest["plugins"]:
+        if not isinstance(plugin, dict):
+            raise RuntimeError(
+                "sidecar dependency manifest is malformed: plugin entries must be objects"
+            )
+        packages.extend(_collect_string_values(plugin.get("packages"), "packages"))
+        browsers.extend(
+            _collect_string_values(
+                plugin.get("playwright_browsers"),
+                "playwright_browsers",
+            )
+        )
+    return list(dict.fromkeys(packages)), list(dict.fromkeys(browsers))
+
+
+def _is_package_installed(package: str) -> bool:
+    try:
+        metadata.distribution(package)
+    except metadata.PackageNotFoundError:
+        return False
+    return True
+
+
+def _run_command(command: list[str]) -> None:
+    subprocess.run(command, check=True, env=os.environ.copy())
+
+
+def _ensure_python_packages(packages: list[str]) -> None:
+    missing = [package for package in packages if not _is_package_installed(package)]
+    if not missing:
+        return
+    print(
+        "[sidecar] installing python packages: " + ", ".join(missing),
+        flush=True,
+    )
+    _run_command(["uv", "pip", "install", "--python", sys.executable, *missing])
+
+
+def _is_playwright_browser_installed(browser: str) -> bool:
+    if not PLAYWRIGHT_BROWSERS_PATH.exists():
+        return False
+    return any(
+        path.is_dir() and path.name.startswith(f"{browser}-")
+        for path in PLAYWRIGHT_BROWSERS_PATH.iterdir()
+    )
+
+
+def _ensure_playwright_browsers(browsers: list[str]) -> None:
+    if not browsers:
+        return
+    if not _is_package_installed("playwright"):
+        raise RuntimeError(
+            "playwright browsers requested but the playwright package is not installed"
+        )
+
+    missing = [browser for browser in browsers if not _is_playwright_browser_installed(browser)]
+    if not missing:
+        return
+
+    PLAYWRIGHT_BROWSERS_PATH.mkdir(parents=True, exist_ok=True)
+    for browser in missing:
+        print(f"[sidecar] installing playwright browser: {browser}", flush=True)
+        _run_command([sys.executable, "-m", "playwright", "install", browser])
+
+
+def _prepare_runtime_dependencies() -> None:
+    packages, browsers = _collect_runtime_dependencies()
+    _ensure_python_packages(packages)
+    _ensure_playwright_browsers(browsers)
+
+
+def main() -> None:
+    _prepare_config()
+    _prepare_runtime_dependencies()
+    os.execvp(
+        "uv",
+        [
+            "uv",
+            "run",
+            "--python",
+            "/venv/bin/python",
+            "core",
+            "--host",
+            "0.0.0.0",
+        ],
+    )
+
+
+if __name__ == "__main__":
+    main()
+"""
 
 
 def _get_package_name_from_plugin_dir(plugin_path: Path) -> str | None:
@@ -85,10 +359,25 @@ def check_and_setup_configs() -> None:
         path = config.PROJECT_ROOT / filename
         if not path.exists():
             path.write_text(content.strip() + "\n", "utf-8")
+
+    sidecar_files = {
+        config.SIDECAR_ENV_EXAMPLE_FILE: SIDECAR_ENV_TEMPLATE,
+        config.SIDECAR_PLUGINS_FILE: SIDECAR_PLUGINS_TEMPLATE,
+        config.SIDECAR_COMPOSE_FILE: SIDECAR_COMPOSE_TEMPLATE,
+        config.SIDECAR_DIR / "start_sidecar.py": SIDECAR_STARTER_TEMPLATE,
+        config.SIDECAR_DIR / "README.md": SIDECAR_README_TEMPLATE,
+    }
+    for path, content in sidecar_files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text(content.strip() + "\n", "utf-8")
+
     if is_first_run:
         config.logger.info("⚠️  检测到首次运行，已为您创建模板配置文件。")
         config.logger.info("👉 请打开并修改 'manage.toml'（特别是 'github_org'），")
-        config.logger.info("   并编辑 'plugins.txt'，然后重新运行。")
+        config.logger.info(
+            "   并编辑 'plugins.txt' / 'sidecar/plugins.toml'，然后重新运行。"
+        )
 
 
 def setup_plugin_repo(
@@ -229,12 +518,14 @@ def remove_dependency(pkg_name: str) -> bool:
             real_pkg_name = project_section.get("name", pkg_name)
             pkg_name_to_remove = str(real_pkg_name).replace("_", "-")
             config.logger.info(
-                f"Detected package name '{pkg_name_to_remove}' from plugin's pyproject.toml."
+                "Detected package name "
+                f"'{pkg_name_to_remove}' from plugin's pyproject.toml."
             )
         except Exception:
             pkg_name_to_remove = pkg_name.replace("_", "-")
             config.logger.warning(
-                f"Could not parse package name. Falling back to folder name '{pkg_name}'."
+                "Could not parse package name. "
+                f"Falling back to folder name '{pkg_name}'."
             )
     else:
         pkg_name_to_remove = pkg_name.replace("_", "-")
@@ -245,7 +536,8 @@ def remove_dependency(pkg_name: str) -> bool:
     except CommandError as e:
         if "not found in dependencies" in str(e):
             config.logger.warning(
-                f"⚠️ Dependency '{pkg_name_to_remove}' not found in project dependencies."
+                f"⚠️ Dependency '{pkg_name_to_remove}' "
+                "not found in project dependencies."
             )
             # We continue, as we still might need to clean up the workspace.
         else:
@@ -323,11 +615,13 @@ def update_plugins_list(
         ]
         if len(lines) < original_count:
             config.logger.info(
-                f"✅ Removed entry for '{plugin_name}' from {config.PLUGINS_LIST_FILE.name}."
+                f"✅ Removed entry for '{plugin_name}' "
+                f"from {config.PLUGINS_LIST_FILE.name}."
             )
         else:
             config.logger.warning(
-                f"⚠️ Could not find an entry for '{plugin_name}' in {config.PLUGINS_LIST_FILE.name}."
+                f"⚠️ Could not find an entry for '{plugin_name}' "
+                f"in {config.PLUGINS_LIST_FILE.name}."
             )
 
     content = "\n".join(line for line in lines if line.strip()) + "\n"
@@ -408,7 +702,8 @@ def create_production_package(target_branch: str) -> None:
                     return f"{pkg_name_from_str} @ git+{git_url}@{target_branch}"
                 else:
                     config.logger.warning(
-                        f"Could not find repo for local package '{pkg_name_from_str}'. Skipping."
+                        "Could not find repo for local package "
+                        f"'{pkg_name_from_str}'. Skipping."
                     )
                     return None
 
@@ -429,7 +724,8 @@ def create_production_package(target_branch: str) -> None:
             # poetry 的 [tool.poetry].dependencies 可能是 Array
             elif isinstance(dependencies, Array):
                 for item in dependencies:
-                    # 简化处理：假设 poetry 的 array 里是简单的 "pkg-name==version" 字符串
+                    # 简化处理：假设 poetry 的 array 里是简单的
+                    # "pkg-name==version" 字符串
                     if processed := process_dependency(str(item).split(" @ ")[0], item):
                         prod_deps_set.add(processed)
 
@@ -450,7 +746,7 @@ def create_production_package(target_branch: str) -> None:
             return
 
         # 步骤 3: 写入文件并编译
-        sorted_deps = sorted(list(prod_deps_set))
+        sorted_deps = sorted(prod_deps_set)
         config.logger.info(
             f"Generated {len(sorted_deps)} unique production dependency entries."
         )

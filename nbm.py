@@ -14,6 +14,7 @@ Powered by uv and a modular, robust core library.
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -26,6 +27,7 @@ import time
 from typing import Any
 
 try:
+    import tomlkit
     from tqdm import tqdm
 
     from nbm_core import config, git, process, project
@@ -33,17 +35,23 @@ try:
     from nbm_core.state import StateManager
 except ModuleNotFoundError as exc:
     missing = exc.name or "unknown dependency"
-    print(f"❌ 缺少运行 nbm 所需依赖：{missing}", file=sys.stderr)
-    print(
-        "👉 请改用 `uv run --no-project nbm.py <command>` 运行该脚本。",
-        file=sys.stderr,
-    )
+    sys.stderr.write(f"❌ 缺少运行 nbm 所需依赖：{missing}\n")
+    sys.stderr.write("👉 请改用 `uv run --no-project nbm.py <command>` 运行该脚本。\n")
     raise SystemExit(1) from None
 
 
 SYNC_STATE_MANAGER = StateManager(config.SYNC_STATE_FILE)
 PROD_SETUP_STATE_KEY = "prod_setup"
 RESOURCES_DIR = config.PROJECT_ROOT / "resources"
+
+
+@dataclass(frozen=True)
+class SidecarPluginSpec:
+    name: str
+    repo: str
+    ref: str | None = None
+    packages: tuple[str, ...] = ()
+    playwright_browsers: tuple[str, ...] = ()
 
 
 def ensure_venv_exists() -> None:
@@ -81,15 +89,268 @@ def _read_plugin_urls() -> list[str]:
     ]
 
 
+def _parse_sidecar_string_list_field(entry: Any, field_name: str) -> tuple[str, ...]:
+    raw = entry.get(field_name)
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        values = [raw]
+    elif isinstance(raw, dict):
+        raise CommandError(
+            "Invalid sidecar plugin entry in "
+            f"{config.SIDECAR_PLUGINS_FILE}: {field_name} must be a list of strings"
+        )
+    else:
+        try:
+            values = list(raw)
+        except TypeError as exc:
+            raise CommandError(
+                "Invalid sidecar plugin entry in "
+                f"{config.SIDECAR_PLUGINS_FILE}: {field_name} must be a list of strings"
+            ) from exc
+
+    normalized: list[str] = []
+    for value in values:
+        item = str(value).strip()
+        if not item:
+            continue
+        normalized.append(item)
+    return tuple(dict.fromkeys(normalized))
+
+
+def _read_sidecar_plugin_specs() -> list[SidecarPluginSpec]:
+    if not config.SIDECAR_PLUGINS_FILE.exists():
+        raise CommandError(
+            f"'{config.SIDECAR_PLUGINS_FILE.as_posix()}' not found. "
+            "Aborting deployment."
+        )
+
+    try:
+        data = tomlkit.parse(config.SIDECAR_PLUGINS_FILE.read_text("utf-8"))
+    except Exception as exc:
+        raise CommandError(
+            f"Failed to parse sidecar plugin manifest: {config.SIDECAR_PLUGINS_FILE}"
+        ) from exc
+
+    specs: list[SidecarPluginSpec] = []
+    plugin_entries = data.get("plugins", [])
+    for entry in plugin_entries:
+        repo = str(entry.get("repo", "")).strip()
+        if not repo:
+            raise CommandError(
+                "Invalid sidecar plugin entry in "
+                f"{config.SIDECAR_PLUGINS_FILE}: missing repo"
+            )
+        repo_name = git.get_repo_name_from_url(repo)
+        if not repo_name:
+            raise CommandError(f"Invalid GitHub URL in sidecar plugin manifest: {repo}")
+        ref = str(entry.get("ref", "")).strip() or None
+        specs.append(
+            SidecarPluginSpec(
+                name=repo_name.split("/")[-1],
+                repo=repo,
+                ref=ref,
+                packages=_parse_sidecar_string_list_field(entry, "packages"),
+                playwright_browsers=_parse_sidecar_string_list_field(
+                    entry, "playwright_browsers"
+                ),
+            )
+        )
+    return specs
+
+
+def _get_origin_default_branch(cwd: Path) -> str:
+    ref = process.git(
+        ["symbolic-ref", "refs/remotes/origin/HEAD"],
+        cwd,
+        check=False,
+        quiet=True,
+    )
+    prefix = "refs/remotes/origin/"
+    if ref.startswith(prefix):
+        return ref[len(prefix) :]
+
+    remote_show = process.git(
+        ["remote", "show", "origin"],
+        cwd,
+        check=False,
+        quiet=True,
+    )
+    for line in remote_show.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("HEAD branch:"):
+            return stripped.split(":", 1)[1].strip()
+    return "main"
+
+
+def _sync_repo_ref(local_path: Path, repo_ref: str | None, label: str) -> str:
+    if not repo_ref:
+        branch = _get_origin_default_branch(local_path)
+        return _update_existing_repo(local_path, branch, label)
+
+    process.git(["fetch", "origin", "--prune", "--tags"], local_path, quiet=True)
+    if git.remote_branch_exists(local_path, "origin", repo_ref):
+        return _update_existing_repo(local_path, repo_ref, label)
+
+    process.git(["fetch", "origin", repo_ref], local_path, check=False, quiet=True)
+    process.git(["checkout", "--detach", repo_ref], local_path)
+    return git.get_head_commit(local_path)
+
+
+def _sync_managed_repo_ref(
+    *,
+    local_path: Path,
+    clone_url: str,
+    repo_ref: str | None,
+    label: str,
+) -> str:
+    if local_path.exists():
+        config.logger.info(f"  - Updating {label}: {local_path.name}")
+        if not (local_path / ".git").is_dir():
+            raise CommandError(f"{label} 路径存在，但不是独立 Git 仓库：{local_path}")
+        _ensure_tracked_clean(local_path, label)
+        return _sync_repo_ref(local_path, repo_ref, label)
+
+    config.logger.info(f"  - Cloning {label}: {local_path.name}")
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    process.git(["clone", clone_url, str(local_path)], config.PROJECT_ROOT)
+    return _sync_repo_ref(local_path, repo_ref, label)
+
+
+def _sync_sidecar_plugin_repositories(
+    specs: list[SidecarPluginSpec],
+) -> dict[str, str]:
+    plugin_dir = config.SIDECAR_CORE_DIR / "gsuid_core" / "plugins"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    plugin_heads: dict[str, str] = {}
+
+    for spec in specs:
+        plugin_heads[spec.name] = _sync_managed_repo_ref(
+            local_path=plugin_dir / spec.name,
+            clone_url=spec.repo,
+            repo_ref=spec.ref,
+            label=f"sidecar 插件 {spec.name}",
+        )
+    return plugin_heads
+
+
+def _write_sidecar_dependency_manifest(specs: list[SidecarPluginSpec]) -> None:
+    config.SIDECAR_PLUGIN_DEPENDENCIES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "plugins": [
+            {
+                "name": spec.name,
+                "packages": list(spec.packages),
+                "playwright_browsers": list(spec.playwright_browsers),
+            }
+            for spec in specs
+        ]
+    }
+    config.SIDECAR_PLUGIN_DEPENDENCIES_FILE.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        "utf-8",
+    )
+
+
+def _sync_sidecar_runtime() -> tuple[str, str, dict[str, str]]:
+    config.SIDECAR_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+
+    config.logger.info("🔌 Preparing bridge vendor...")
+    bridge_vendor_head = _sync_managed_repo_ref(
+        local_path=config.BRIDGE_VENDOR_DIR,
+        clone_url=config.BRIDGE_VENDOR_REPO,
+        repo_ref=config.BRIDGE_VENDOR_REF or None,
+        label="桥接依赖 nonebot-plugin-genshinuid",
+    )
+
+    config.logger.info("🛰️ Preparing sidecar core...")
+    sidecar_core_head = _sync_managed_repo_ref(
+        local_path=config.SIDECAR_CORE_DIR,
+        clone_url=config.SIDECAR_CORE_REPO,
+        repo_ref=config.SIDECAR_CORE_REF or None,
+        label="sidecar Core",
+    )
+
+    specs = _read_sidecar_plugin_specs()
+    if specs:
+        config.logger.info(f"🎮 Syncing {len(specs)} sidecar plugins...")
+    sidecar_plugin_heads = _sync_sidecar_plugin_repositories(specs)
+    _write_sidecar_dependency_manifest(specs)
+    return bridge_vendor_head, sidecar_core_head, sidecar_plugin_heads
+
+
+def _ensure_sidecar_env_file() -> None:
+    if config.SIDECAR_ENV_FILE.exists():
+        return
+    if not config.SIDECAR_ENV_EXAMPLE_FILE.exists():
+        raise CommandError(
+            f"Missing sidecar env template: {config.SIDECAR_ENV_EXAMPLE_FILE}"
+        )
+    config.SIDECAR_ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    config.SIDECAR_ENV_FILE.write_text(
+        config.SIDECAR_ENV_EXAMPLE_FILE.read_text("utf-8"),
+        "utf-8",
+    )
+    config.logger.info(f"📝 Created sidecar env file: {config.SIDECAR_ENV_FILE}")
+
+
 def _tracked_status_output(cwd: Path) -> str:
     return process.git(["status", "--short", "-uno"], cwd, check=False, quiet=True)
 
 
-def _ensure_tracked_clean(cwd: Path, label: str) -> None:
-    if status_output := _tracked_status_output(cwd):
+def _parse_tracked_status(cwd: Path) -> list[tuple[str, str]]:
+    entries: list[tuple[str, str]] = []
+    if not (status_output := _tracked_status_output(cwd)):
+        return entries
+
+    for line in status_output.splitlines():
+        if len(line) < 4:
+            continue
+        path_text = line[3:].strip()
+        if " -> " in path_text:
+            path_text = path_text.split(" -> ", 1)[1].strip()
+        entries.append((line[:2], path_text))
+    return entries
+
+
+def _discard_tracked_paths(cwd: Path, paths: list[str]) -> None:
+    if not paths:
+        return
+    process.git(
+        ["restore", "--source=HEAD", "--staged", "--worktree", "--", *paths],
+        cwd,
+    )
+
+
+def _ensure_tracked_clean(
+    cwd: Path,
+    label: str,
+    *,
+    ignored_paths: set[str] | None = None,
+) -> None:
+    ignored_paths = ignored_paths or set()
+    entries = _parse_tracked_status(cwd)
+    if not entries:
+        return
+
+    ignored_entries = [path for _, path in entries if path in ignored_paths]
+    blocking_entries = [
+        f"{status} {path}" for status, path in entries if path not in ignored_paths
+    ]
+
+    if blocking_entries:
         raise CommandError(
-            f"{label} 存在未提交的已跟踪修改，已停止更新：\n{status_output}"
+            f"{label} 存在未提交的已跟踪修改，已停止更新：\n"
+            + "\n".join(blocking_entries)
         )
+
+    if ignored_entries:
+        ignored_list = ", ".join(sorted(ignored_entries))
+        config.logger.warning(
+            f"⚠️ {label} 检测到可自动忽略的部署产物改动：{ignored_list}。"
+            "将恢复到当前 HEAD 后继续更新。"
+        )
+        _discard_tracked_paths(cwd, sorted(ignored_entries))
 
 
 def _ensure_upstream_remote(cwd: Path, upstream_url: str | None) -> None:
@@ -111,10 +372,16 @@ def _checkout_target_branch(cwd: Path, branch: str, label: str) -> None:
         process.git(["checkout", "-b", branch, f"origin/{branch}"], cwd)
 
 
-def _update_existing_repo(cwd: Path, branch: str, label: str) -> str:
+def _update_existing_repo(
+    cwd: Path,
+    branch: str,
+    label: str,
+    *,
+    ignored_paths: set[str] | None = None,
+) -> str:
     if not (cwd / ".git").is_dir():
         raise CommandError(f"{label} 路径存在，但不是独立 Git 仓库：{cwd}")
-    _ensure_tracked_clean(cwd, label)
+    _ensure_tracked_clean(cwd, label, ignored_paths=ignored_paths)
     process.git(["fetch", "origin", "--prune"], cwd, quiet=True)
     _checkout_target_branch(cwd, branch, label)
     process.git(["pull", "--ff-only", "origin", branch], cwd)
@@ -180,7 +447,10 @@ def _file_sha256(path: Path) -> str:
 
 
 def _build_lock_fingerprint(
-    *, plugin_heads: dict[str, str], resources_head: str
+    *,
+    plugin_heads: dict[str, str],
+    resources_head: str,
+    bridge_vendor_head: str,
 ) -> tuple[str, dict[str, Any]]:
     material = {
         "pyproject_sha256": _file_sha256(config.PROJECT_ROOT / "pyproject.toml"),
@@ -190,11 +460,17 @@ def _build_lock_fingerprint(
             "resources_branch": config.RESOURCES_BRANCH,
             "plugin_branch": config.PLUGIN_BRANCH,
             "resources_repo": config.RESOURCES_REPO,
+            "bridge_vendor_repo": config.BRIDGE_VENDOR_REPO,
+            "bridge_vendor_ref": config.BRIDGE_VENDOR_REF,
             "prod_sync_extras": list(config.PROD_SYNC_EXTRAS),
         },
         "resources": {
             "path": RESOURCES_DIR.name,
             "head": resources_head,
+        },
+        "bridge_vendor": {
+            "path": config.BRIDGE_VENDOR_DIR.as_posix(),
+            "head": bridge_vendor_head,
         },
         "plugins": dict(sorted(plugin_heads.items())),
     }
@@ -216,6 +492,7 @@ def _save_prod_setup_state(
     fingerprint_material: dict[str, Any],
     plugin_heads: dict[str, str],
     resources_head: str,
+    bridge_vendor_head: str,
 ) -> None:
     state = SYNC_STATE_MANAGER.read()
     state[PROD_SETUP_STATE_KEY] = {
@@ -223,6 +500,7 @@ def _save_prod_setup_state(
         "fingerprint_material": fingerprint_material,
         "plugin_heads": dict(sorted(plugin_heads.items())),
         "resources_head": resources_head,
+        "bridge_vendor_head": bridge_vendor_head,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     SYNC_STATE_MANAGER.write(state)
@@ -233,7 +511,9 @@ def _should_regenerate_lock(lock_fingerprint: str) -> tuple[bool, str]:
     if not config.LOCK_FILE.exists():
         return True, f"'{config.LOCK_FILE.name}' 不存在"
     if current_state.get("lock_fingerprint") != lock_fingerprint:
-        return True, "检测到 pyproject / manage.toml / resources / 插件提交发生变化"
+        return True, (
+            "检测到 pyproject / manage.toml / resources / bridge vendor 发生变化"
+        )
     return False, "部署输入未变化，直接复用现有锁文件"
 
 
@@ -245,7 +525,9 @@ def _build_prod_sync_args() -> list[str]:
 
 
 def _managed_branch_for_path(path: Path) -> str:
-    return config.PROJECT_BRANCH if path == config.PROJECT_ROOT else config.PLUGIN_BRANCH
+    if path == config.PROJECT_ROOT:
+        return config.PROJECT_BRANCH
+    return config.PLUGIN_BRANCH
 
 
 def _reexec_latest_nbm(
@@ -307,7 +589,9 @@ class ConcurrentCommand(CommandBase):
 
     def execute(self) -> dict:
         config.logger.info(
-            f"🚀 {self.description} (Scope: {self.scope}, Concurrency: {config.MAX_WORKERS})"
+            "🚀 "
+            f"{self.description} "
+            f"(Scope: {self.scope}, Concurrency: {config.MAX_WORKERS})"
         )
         if not self.target_paths:
             config.logger.info("🤷‍♀️ No Git repositories found in the specified scope.")
@@ -344,41 +628,51 @@ class InitCommand(CommandBase):
     description = "【项目初始化】根据 plugins.txt 构建整个项目"
 
     def execute(self) -> None:
+        project.check_and_setup_configs()
         ensure_venv_exists()
 
         urls = _read_plugin_urls()
 
         successful_paths: list[Path] = []
         with ThreadPoolExecutor(max_workers=config.MAX_WORKERS) as ex:
-            future_map = {ex.submit(project.setup_plugin_repo, url): url for url in urls}
+            future_map = {
+                ex.submit(project.setup_plugin_repo, url): url for url in urls
+            }
             for future in tqdm(
-                as_completed(future_map), total=len(urls), desc="Setting up repositories"
+                as_completed(future_map),
+                total=len(urls),
+                desc="Setting up repositories",
             ):
                 status, path = future.result()
                 if path and status in ["success", "exists"]:
                     successful_paths.append(path)
 
         if not successful_paths:
-            config.logger.error(
-                "❌ No plugin repositories were successfully set up. Aborting dependency phase."
+            config.logger.warning(
+                "⚠️ No plugin repositories were successfully set up. "
+                "Continuing with sidecar/runtime initialization only."
             )
-            return
+        else:
+            config.logger.info(
+                "\n📦 Adding downloaded plugins as editable dependencies..."
+            )
+            for path in tqdm(successful_paths, desc="Adding dependencies"):
+                try:
+                    project.add_local_dependency(path)
+                except CommandError as e:
+                    config.logger.error(
+                        f"\n❌ Failed to add dependency for '{path.name}': {e}"
+                    )
+                    config.logger.info(
+                        "Aborting. Please fix the issue and run 'init' again."
+                    )
+                    sys.exit(1)
 
-        config.logger.info("\n📦 Adding downloaded plugins as editable dependencies...")
-        for path in tqdm(successful_paths, desc="Adding dependencies"):
-            try:
-                project.add_local_dependency(path)
-            except CommandError as e:
-                config.logger.error(
-                    f"\n❌ Failed to add dependency for '{path.name}': {e}"
-                )
-                config.logger.info(
-                    "Aborting. Please fix the issue and run 'init' again."
-                )
-                sys.exit(1)
+        _sync_sidecar_runtime()
 
         config.logger.info(
-            f"\n⚡️ All dependencies added. Generating lock file '{config.LOCK_FILE.name}'..."
+            "\n⚡️ All dependencies added. "
+            f"Generating lock file '{config.LOCK_FILE.name}'..."
         )
         try:
             process.uv_streamed(["lock"], config.PROJECT_ROOT)
@@ -411,7 +705,9 @@ class AddCommand(CommandBase):
         except FileNotFoundError as e:
             config.logger.error(f"❌ Validation failed for '{path.name}':\n{e}")
             config.logger.info(
-                "💡 Tip: The plugin folder was cloned, but you need to fix the packaging issue then run 'nbm init' to add it as a dependency."
+                "💡 Tip: The plugin folder was cloned, "
+                "but you need to fix the packaging issue "
+                "then run 'nbm init' to add it as a dependency."
             )
             return
         except CommandError as e:
@@ -436,11 +732,14 @@ class AddCommand(CommandBase):
             except CommandError as e:
                 config.logger.error(f"\n❌ Environment update failed: {e}")
                 config.logger.info(
-                    "💡 Please try running 'nbm init --install' to fix potential issues."
+                    "💡 Please try running 'nbm init --install' "
+                    "to fix potential issues."
                 )
         else:
             config.logger.info(
-                f"\n🎉 Plugin '{path.name}' added successfully! Run 'nbm init --install' or 'uv sync' to update your environment."
+                f"\n🎉 Plugin '{path.name}' added successfully! "
+                "Run 'nbm init --install' or 'uv sync' "
+                "to update your environment."
             )
 
 
@@ -570,7 +869,8 @@ class SyncCommand(ConcurrentCommand):
         except CommandError as e:
             config.logger.error(f"  - ❌ Failed to sync {repo_name}:\n{e}")
             config.logger.info(
-                f"  💡 To resolve, go to '{path}' and manually run 'git rebase --abort' or fix conflicts."
+                f"  💡 To resolve, go to '{path}' and manually run "
+                "'git rebase --abort' or fix conflicts."
             )
             return {"status": "failed"}
 
@@ -679,6 +979,7 @@ class ProdSetupCommand(CommandBase):
     description = "【生产部署】同步 resources / 插件源码并准备环境"
 
     def execute(self) -> None:
+        project.check_and_setup_configs()
         ensure_venv_exists()
 
         urls = _read_plugin_urls()
@@ -692,10 +993,12 @@ class ProdSetupCommand(CommandBase):
             f"🚀 Syncing {len(urls)} plugin repositories on '{config.PLUGIN_BRANCH}'..."
         )
         plugin_heads = _sync_plugin_repositories(urls)
+        bridge_vendor_head, _, _ = _sync_sidecar_runtime()
 
         lock_fingerprint, fingerprint_material = _build_lock_fingerprint(
             plugin_heads=plugin_heads,
             resources_head=resources_head,
+            bridge_vendor_head=bridge_vendor_head,
         )
         should_relock, reason = _should_regenerate_lock(lock_fingerprint)
 
@@ -714,9 +1017,34 @@ class ProdSetupCommand(CommandBase):
             fingerprint_material=fingerprint_material,
             plugin_heads=plugin_heads,
             resources_head=resources_head,
+            bridge_vendor_head=bridge_vendor_head,
         )
 
         config.logger.info("\n🎉 Production setup complete! Environment is ready.")
+
+
+class DockerInstallCommand(CommandBase):
+    description = "【Sidecar部署】同步 sidecar 源码并启动 Docker 容器"
+
+    def execute(self) -> None:
+        project.check_and_setup_configs()
+        _sync_sidecar_runtime()
+        _ensure_sidecar_env_file()
+
+        compose_args = [
+            "docker",
+            "compose",
+            "--env-file",
+            config.SIDECAR_ENV_FILE.relative_to(config.PROJECT_ROOT).as_posix(),
+            "-f",
+            config.SIDECAR_COMPOSE_FILE.relative_to(config.PROJECT_ROOT).as_posix(),
+            "up",
+            "-d",
+            "--build",
+        ]
+        config.logger.info(f"🐳 Starting sidecar with: {' '.join(compose_args)}")
+        process.run_and_stream(compose_args, config.PROJECT_ROOT)
+        config.logger.info("\n🎉 Sidecar is ready.")
 
 
 class UpdateCommand(CommandBase):
@@ -731,7 +1059,12 @@ class UpdateCommand(CommandBase):
         config.logger.info(
             f"🔄 Updating root project from origin/{config.PROJECT_BRANCH}..."
         )
-        _update_existing_repo(config.PROJECT_ROOT, config.PROJECT_BRANCH, "主仓库")
+        _update_existing_repo(
+            config.PROJECT_ROOT,
+            config.PROJECT_BRANCH,
+            "主仓库",
+            ignored_paths={"uv.lock"},
+        )
 
         _reexec_latest_nbm(
             command="update",
@@ -805,7 +1138,10 @@ def main() -> None:
         elif name == "package":
             subparser.add_argument(
                 "--branch",
-                help=f"Git branch to use for dependencies (default: {config.PLUGIN_BRANCH})",
+                help=(
+                    "Git branch to use for dependencies "
+                    f"(default: {config.PLUGIN_BRANCH})"
+                ),
             )
         elif name == "update":
             subparser.add_argument(
@@ -814,7 +1150,12 @@ def main() -> None:
                 help=argparse.SUPPRESS,
             )
         elif name == "commit":
-            subparser.add_argument("-m", "--message", required=True, help="Commit message")
+            subparser.add_argument(
+                "-m",
+                "--message",
+                required=True,
+                help="Commit message",
+            )
         elif name == "sync":
             subparser.add_argument(
                 "--push", action="store_true", help="Push after successful rebase"
@@ -829,20 +1170,42 @@ def main() -> None:
                 "-b", "--create-new", action="store_true", help="Create if not exists"
             )
         elif name == "cleanup-branches":
-            subparser.add_argument("branch_name", help="Remote branch to delete from forks")
+            subparser.add_argument(
+                "branch_name",
+                help="Remote branch to delete from forks",
+            )
+
+    docker_parser = subparsers.add_parser(
+        "docker", help="Manage sidecar Docker lifecycle"
+    )
+    docker_subparsers = docker_parser.add_subparsers(
+        dest="docker_command",
+        required=True,
+        help="Docker commands",
+    )
+    docker_subparsers.add_parser(
+        "install",
+        help=DockerInstallCommand.description,
+    )
 
     args = parser.parse_args()
+    command_key = args.command
+    display_command = args.command
+    if args.command == "docker":
+        command_key = f"docker:{args.docker_command}"
+        display_command = f"docker {args.docker_command}"
+        command_map[command_key] = DockerInstallCommand
 
     if args.verbose >= 1:
         for handler in config.logger.handlers:
             if isinstance(handler, logging.StreamHandler):
                 handler.setLevel(logging.DEBUG)
     try:
-        command_instance = command_map[args.command](args)
+        command_instance = command_map[command_key](args)
         line = "=" * 20
-        config.logger.info(f"\n{line} Executing: {args.command} {line}")
+        config.logger.info(f"\n{line} Executing: {display_command} {line}")
         command_instance.execute()
-        config.logger.info(f"\n{line} Finished: {args.command} {line}")
+        config.logger.info(f"\n{line} Finished: {display_command} {line}")
     except CommandError as e:
         config.logger.error(f"\n💥 A command failed to execute:\n{e}")
         sys.exit(1)
