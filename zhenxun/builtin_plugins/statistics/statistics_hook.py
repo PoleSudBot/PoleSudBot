@@ -50,6 +50,8 @@ async def _(
     session: Uninfo,
     event: Event,
 ):
+    if matcher.state.get("_statistics_skip"):
+        return
     if not matcher.state.get("_statistics_has_sent"):
         return
     if matcher.type == "notice" and not isinstance(event, PokeNotifyEvent):
