@@ -16,6 +16,7 @@ from nonebot.log import logger
 from nonebot.permission import SUPERUSER
 from nonebot.plugin import PluginMetadata
 
+from zhenxun.services.avatar_service import avatar_service
 from zhenxun.services.group_settings_service import group_settings_service
 from zhenxun.utils.platform import PlatformUtils
 
@@ -27,7 +28,7 @@ require("nonebot_plugin_localstore")
 from nonebot_plugin_htmlrender import template_to_pic
 
 # 本地模块（在 require() 之后 import）
-from .config import Config, GroupSettings, MODULE_NAME, get_proxy
+from .config import Config, GroupSettings, MODULE_NAME, get_proxy, get_storage_backend
 from .roast_manager import roast_manager
 from .runtime import (
     is_daily_summary_push_enabled,
@@ -83,8 +84,9 @@ __plugin_meta__ = PluginMetadata(
     开启猪圈日报 / 关闭猪圈日报 - 开关当前群的猪圈日报推送
     
     📊 统计指令：
-    我的猪圈 - 查看解锁进度
-    猪王争霸榜 / 猪猪榜 - 查看当前群图鉴排行
+    我的猪圈 / 我的小猪 - 查看解锁进度
+    猪王争霸榜 / 猪猪榜 / 猪猪排行 / 小猪榜 / 小猪排行 [数量] - 查看当前群图鉴排行
+    猪猪总榜 / 猪猪总排行 [数量] - 查看本地账本总排行
     本周小猪 - 生成本周猪猪总结长图
     """,
     type="application",
@@ -198,6 +200,10 @@ def load_resource_json(path, default):
 
 PIG_LIST = load_resource_json(PIGINFO_PATH, [])
 RANKING_CONCURRENCY_LIMIT = 8
+PANEL_AVATAR_CONCURRENCY_LIMIT = 8
+DEFAULT_RANK_LIMIT = 5
+MAX_RANK_LIMIT = 50
+LOCAL_RANKING_UNSUPPORTED_TEXT = "当前存储后端不支持猪猪榜，请切换为本地账本后再试。"
 
 
 @dataclass(slots=True)
@@ -256,23 +262,18 @@ def detect_force_roast_mode(raw_text: str, user_id: str) -> Optional[str]:
 def pick_backfire_text(attacker_name: str, target_name: str, attacker_pig: Optional[dict]) -> str:
     if not attacker_pig:
         pool = BACKFIRE_NO_PIG_TEXTS
-        shape = "未抽形态"
     elif is_human_pig(attacker_pig):
         pool = BACKFIRE_HUMAN_TEXTS
-        shape = "人类"
     elif is_food_pig(attacker_pig):
         pool = BACKFIRE_FOOD_TEXTS
-        shape = attacker_pig.get("name", "熟食")
     else:
         pool = BACKFIRE_GENERIC_TEXTS
-        shape = attacker_pig.get("name", "未知形态")
 
-    return random.choice(pool).format(attacker=attacker_name, target=target_name, shape=shape)
+    return random.choice(pool).format(attacker=attacker_name, target=target_name)
 
 
 def pick_escape_text(attacker_name: str, target_name: str, target_pig: Optional[dict]) -> str:
-    shape = target_pig.get("name", "未知形态") if target_pig else "未知形态"
-    return random.choice(ESCAPE_TEXTS).format(attacker=attacker_name, target=target_name, shape=shape)
+    return random.choice(ESCAPE_TEXTS).format(attacker=attacker_name, target=target_name)
 
 
 def pick_force_prefix_text(target_name: str, is_super_mode: bool) -> str:
@@ -302,6 +303,78 @@ def normalize_user_sort_key(user_id: str) -> tuple[int, int | str]:
 def sanitize_display_name(name: str, user_id: str) -> str:
     cleaned = (name or "").replace("\n", " ").strip()
     return cleaned or user_id
+
+
+def parse_rank_limit(raw_text: str, default: int = DEFAULT_RANK_LIMIT) -> int | None:
+    text = raw_text.strip()
+    if not text:
+        return default
+    try:
+        value = int(text)
+    except ValueError:
+        return None
+    return max(1, min(value, MAX_RANK_LIMIT))
+
+
+def get_rank_usage(command_name: str) -> str:
+    return f"用法：{command_name} [数量]，数量需为 1-{MAX_RANK_LIMIT} 的整数。"
+
+
+def get_shape_label(pig_data: Optional[dict]) -> str:
+    if not pig_data:
+        return "未抽形态"
+    if is_human_pig(pig_data):
+        return "人类"
+    return pig_data.get("name", "未知形态")
+
+
+def format_roast_actor_display(name: str, user_id: str = "") -> str:
+    safe_user_id = user_id or "未知用户"
+    display_name = sanitize_display_name(name, safe_user_id)
+    return f"【{display_name}】"
+
+
+def format_roast_subject_display(
+    name: str,
+    pig_data: Optional[dict],
+    user_id: str = "",
+) -> str:
+    safe_user_id = user_id or "未知用户"
+    display_name = sanitize_display_name(name, safe_user_id)
+    return f"【{display_name}】（{get_shape_label(pig_data)}）"
+
+
+async def get_avatar_uri(user_id: str) -> str:
+    avatar_path = await avatar_service.get_avatar_path("qq", user_id)
+    return avatar_path.as_uri() if avatar_path else ""
+
+
+async def build_avatar_uri_map(user_ids: list[str]) -> dict[str, str]:
+    unique_user_ids = list(dict.fromkeys(uid for uid in user_ids if uid))
+    if not unique_user_ids:
+        return {}
+
+    semaphore = asyncio.Semaphore(
+        min(PANEL_AVATAR_CONCURRENCY_LIMIT, len(unique_user_ids))
+    )
+
+    async def _fetch_avatar(user_id: str) -> tuple[str, str]:
+        async with semaphore:
+            return user_id, await get_avatar_uri(user_id)
+
+    results = await asyncio.gather(
+        *[_fetch_avatar(user_id) for user_id in unique_user_ids],
+        return_exceptions=True,
+    )
+
+    avatar_map: dict[str, str] = {}
+    for result in results:
+        if isinstance(result, Exception):
+            logger.warning(f"rollpig 头像获取失败: {result}")
+            continue
+        user_id, avatar_uri = result
+        avatar_map[user_id] = avatar_uri
+    return avatar_map
 
 
 async def is_group_admin_or_superuser(bot: Bot, event: GroupMessageEvent) -> bool:
@@ -364,6 +437,41 @@ async def build_group_pig_rankings(bot: Bot, group_id: str) -> list[PigKingEntry
     return rankings
 
 
+async def build_global_pig_rankings(
+    bot: Bot | None = None,
+    context_group_id: str = "",
+) -> list[PigKingEntry]:
+    from .data_manager import get_data_manager
+
+    manager = get_data_manager()
+    recent_names = manager.get_recent_user_names()
+
+    if bot and context_group_id:
+        members = await PlatformUtils.get_group_member_list(bot, context_group_id)
+        for member in members:
+            member_id = str(member.user_id or "").strip()
+            if not member_id:
+                continue
+            recent_names[member_id] = sanitize_display_name(
+                member.card or member.name or "",
+                member_id,
+            )
+
+    rankings = [
+        PigKingEntry(
+            user_id=user_id,
+            display_name=sanitize_display_name(recent_names.get(user_id, ""), user_id),
+            collection_count=len(collection),
+        )
+        for user_id, collection in manager.get_all_collections().items()
+        if len(collection) > 0
+    ]
+    rankings.sort(
+        key=lambda entry: (-entry.collection_count, normalize_user_sort_key(entry.user_id))
+    )
+    return rankings
+
+
 def get_group_rank_position(rankings: list[PigKingEntry], user_id: str) -> int | None:
     for index, entry in enumerate(rankings, start=1):
         if entry.user_id == user_id:
@@ -374,18 +482,58 @@ def get_group_rank_position(rankings: list[PigKingEntry], user_id: str) -> int |
 def build_pig_king_board_text(
     rankings: list[PigKingEntry],
     trigger_user_id: str,
+    *,
+    title: str = "猪王争霸榜",
+    limit: int = DEFAULT_RANK_LIMIT,
+    empty_text: str = "本群还没人收集到猪图鉴",
 ) -> str:
     if not rankings:
-        return "本群还没人收集到猪图鉴"
+        return f"【{title}】\n{empty_text}\n━━━━━━━━━━━━━━\n你的名次：未上榜"
 
-    lines = ["【猪王争霸榜】"]
-    for index, entry in enumerate(rankings[:5], start=1):
+    lines = [f"【{title}】"]
+    for index, entry in enumerate(rankings[:limit], start=1):
         lines.append(f"{index}. {entry.display_name} - {entry.collection_count} 只")
 
     rank = get_group_rank_position(rankings, trigger_user_id)
     lines.append("━━━━━━━━━━━━━━")
     lines.append(f"你的名次：第 {rank} 位" if rank else "你的名次：未上榜")
     return "\n".join(lines)
+
+
+def build_my_pigsty_text(
+    owner_name: str,
+    user_count: int,
+    total_pigs: int,
+    percent: int,
+    ranking_note: str = "",
+) -> str:
+    lines = [
+        "【我的猪圈】",
+        f"猪圈主人：{owner_name}",
+        f"已收集：{user_count} / {total_pigs} 只",
+        f"收藏率：{percent}%",
+    ]
+    if ranking_note:
+        lines.append(ranking_note)
+    lines.append("继续加油，争取成为猪王！" if user_count > 0 else "今天先去抽一只小猪，猪圈就热闹起来了。")
+    return "\n".join(lines)
+
+
+def build_my_pigsty_ranking_note(
+    *,
+    group_rank: int | None = None,
+    total_rank: int | None = None,
+    include_group_rank: bool = False,
+    include_total_rank: bool = False,
+) -> str:
+    parts: list[str] = []
+    if include_group_rank:
+        parts.append(
+            f"当前群第 {group_rank} 位" if group_rank else "当前群未上榜"
+        )
+    if include_total_rank:
+        parts.append(f"总第 {total_rank} 位" if total_rank else "总未上榜")
+    return f"猪王争霸榜：{' / '.join(parts)}" if parts else ""
 
 
 async def get_group_roll_candidates(bot: Bot, group_id: int, exclude_ids: set[str]) -> list[str]:
@@ -511,6 +659,142 @@ def build_pighub_image_url(pig_item: dict) -> Optional[str]:
     return PIGHUB_IMAGE_BASE_URL + thumbnail.split("/")[-1]
 
 # ================= 辅助渲染函数 =================
+async def build_panel_picture(
+    *,
+    title: str,
+    subtitle: str = "",
+    hero_avatar: str = "",
+    show_hero_avatar: bool = False,
+    stats: Optional[list[dict[str, str]]] = None,
+    notes: Optional[list[str]] = None,
+    rankings: Optional[list[dict[str, str]]] = None,
+    footer: str = "",
+) -> bytes:
+    return await template_to_pic(
+        template_path=RES_DIR,
+        template_name="panel.html",
+        templates={
+            "title": title,
+            "subtitle": subtitle,
+            "hero_avatar": hero_avatar,
+            "show_hero_avatar": show_hero_avatar,
+            "stats": stats or [],
+            "notes": notes or [],
+            "rankings": rankings or [],
+            "footer": footer,
+        },
+        pages={"viewport": {"width": 980, "height": 10}},
+        wait=80,
+    )
+
+
+async def send_rendered_panel(
+    matcher,
+    event: Event,
+    *,
+    fallback_text: str,
+    title: str,
+    subtitle: str = "",
+    hero_avatar: str = "",
+    show_hero_avatar: bool = False,
+    stats: Optional[list[dict[str, str]]] = None,
+    notes: Optional[list[str]] = None,
+    rankings: Optional[list[dict[str, str]]] = None,
+    footer: str = "",
+):
+    try:
+        pic = await build_panel_picture(
+            title=title,
+            subtitle=subtitle,
+            hero_avatar=hero_avatar,
+            show_hero_avatar=show_hero_avatar,
+            stats=stats,
+            notes=notes,
+            rankings=rankings,
+            footer=footer,
+        )
+    except Exception as error:
+        logger.warning(f"rollpig 面板渲染失败: title={title} error={error}")
+        await matcher.finish(MessageSegment.reply(event.message_id) + fallback_text)
+        return
+
+    await matcher.finish(
+        MessageSegment.reply(event.message_id) + MessageSegment.image(pic)
+    )
+
+
+async def build_ranking_panel_items(
+    rankings: list[PigKingEntry],
+    limit: int,
+) -> list[dict[str, str]]:
+    shown_rankings = rankings[:limit]
+    avatar_map = await build_avatar_uri_map([entry.user_id for entry in shown_rankings])
+    return [
+        {
+            "rank": str(index),
+            "name": entry.display_name,
+            "meta": "",
+            "value": f"{entry.collection_count} 只",
+            "avatar": avatar_map.get(entry.user_id, ""),
+        }
+        for index, entry in enumerate(shown_rankings, start=1)
+    ]
+
+
+def build_daily_summary_panel(summary: dict) -> dict[str, object]:
+    roll_count = summary.get("roll_count", 0)
+    roast_total = summary.get("total", 0)
+    stats = [
+        {"label": "今日抽猪", "value": f"{roll_count} 人"},
+        {"label": "烧烤事件", "value": f"{roast_total} 场"},
+    ]
+
+    notes: list[str] = []
+    if roll_count == 0 and roast_total == 0:
+        notes.append(random.choice(DAILY_SUMMARY_EMPTY_TEXTS))
+    else:
+        top_pig_id = summary.get("top_pig_id")
+        if top_pig_id:
+            pig_data = get_pig_by_id(top_pig_id)
+            pig_name = pig_data["name"] if pig_data else top_pig_id
+            notes.append(f"最热门形态：{pig_name}（共 {summary.get('top_pig_count', 0)} 人抽到）")
+
+        human_count = summary.get("human_count", 0)
+        if human_count > 0:
+            stats.append({"label": "人类形态", "value": f"{human_count} 人"})
+
+        if roast_total > 0:
+            if summary.get("most_active_id"):
+                notes.append(
+                    f"烧烤狂人：{summary['most_active_name']}（发起 {summary['most_active_count']} 次）"
+                )
+            if summary.get("most_roasted_id"):
+                notes.append(
+                    f"最惨食材：{summary['most_roasted_name']}（被烤 {summary['most_roasted_count']} 次）"
+                )
+            if summary.get("escape_king_id") and summary.get("escape_king_count", 0) > 0:
+                notes.append(
+                    f"逃脱大师：{summary['escape_king_name']}（成功逃脱 {summary['escape_king_count']} 次）"
+                )
+            if summary.get("backfire_king_id") and summary.get("backfire_king_count", 0) > 0:
+                notes.append(
+                    f"反噬之王：{summary['backfire_king_name']}（自爆 {summary['backfire_king_count']} 次）"
+                )
+            if summary.get("most_roasted_id") and summary.get("most_roasted_count", 0) >= 2:
+                notes.append(
+                    f"{summary['most_roasted_name']} 明天将获得猪圈保护协议，免受一切烧烤。"
+                )
+        else:
+            notes.append("今天无人烧烤，猪们度过了平静的一天。")
+
+    return {
+        "title": "今日猪圈日报",
+        "subtitle": datetime.date.today().isoformat(),
+        "stats": stats,
+        "notes": notes,
+        "footer": "明天继续，猪圈永不打烊。",
+    }
+
 
 async def send_rendered_pig(
     matcher, event, pig_data: dict, extra_text: str = "", is_new: bool = False
@@ -793,10 +1077,19 @@ cmd_roast_member = on_command("烤群友", block=True)
 @guard_store_errors(cmd_roast_member)
 async def _(bot: Bot, event: GroupMessageEvent):
     attacker_id = str(event.user_id)
-    attacker_name = event.sender.card or event.sender.nickname
+    attacker_name = sanitize_display_name(
+        event.sender.card or event.sender.nickname or "",
+        attacker_id,
+    )
     group_id = str(event.group_id)
     force_mode = detect_force_roast_mode(event.get_plaintext(), attacker_id)
     attacker_pig = get_pig_by_id(await store.get_daily_roll(attacker_id))
+    attacker_actor_display = format_roast_actor_display(attacker_name, attacker_id)
+    attacker_full_display = format_roast_subject_display(
+        attacker_name,
+        attacker_pig,
+        attacker_id,
+    )
 
     if attacker_pig:
         await store.mark_group_roll_seen(attacker_id, attacker_pig["id"], group_id)
@@ -813,7 +1106,10 @@ async def _(bot: Bot, event: GroupMessageEvent):
 
     if event.reply:
         target_id = str(event.reply.sender.user_id)
-        target_name = event.reply.sender.card or event.reply.sender.nickname
+        target_name = sanitize_display_name(
+            event.reply.sender.card or event.reply.sender.nickname or "",
+            target_id,
+        )
     else:
         for seg in event.message:
             if seg.type == "at":
@@ -829,7 +1125,10 @@ async def _(bot: Bot, event: GroupMessageEvent):
     if target_id:
         try:
             member_info = await bot.get_group_member_info(group_id=event.group_id, user_id=int(target_id))
-            target_name = member_info.get("card") or member_info.get("nickname")
+            target_name = sanitize_display_name(
+                member_info.get("card") or member_info.get("nickname") or "",
+                target_id,
+            )
         except Exception as e:
             logger.debug(f"获取群成员信息失败: group={event.group_id} user={target_id} error={e}")
 
@@ -846,7 +1145,10 @@ async def _(bot: Bot, event: GroupMessageEvent):
         food_id = random.choice(FOOD_PIG_IDS)
         food_pig = get_pig_by_id(food_id)
         food_name = food_pig["name"] if food_pig else "美食"
-        bot_text = random.choice(ROAST_BOT_TEXTS).format(attacker=attacker_name, food=food_name)
+        bot_text = random.choice(ROAST_BOT_TEXTS).format(
+            attacker=attacker_name,
+            food=food_name,
+        )
         logger.info(f"[烤群友→Bot] 特殊反噬 | 凶手={attacker_name}({attacker_id}) 变成={food_name}")
         await store.append_roast_event(
             RoastEvent(
@@ -863,44 +1165,60 @@ async def _(bot: Bot, event: GroupMessageEvent):
         return
     # 读取目标形态（后门模式也不绕过此检查）
     target_pig = get_pig_by_id(await store.get_daily_roll(target_id))
+    target_full_display = format_roast_subject_display(
+        target_name,
+        target_pig,
+        target_id,
+    )
     if not target_pig:
         await cmd_roast_member.finish(
-            MessageSegment.reply(event.message_id) + f"【{target_name}】今天还没抽猪，没法下嘴！"
+            MessageSegment.reply(event.message_id)
+            + f"{target_full_display}今天还没抽猪，没法下嘴！"
         )
         return
     await store.mark_group_roll_seen(target_id, target_pig["id"], group_id)
+    target_full_display = format_roast_subject_display(
+        target_name,
+        target_pig,
+        target_id,
+    )
 
     # 保护检查：被烤最多的用户次日受保护（后门可突破）
     if await store.is_protected(group_id, target_id):
         if force_mode in {"normal", "super"}:
-            break_text = random.choice(PROTECTION_BREAK_TEXTS).format(target=target_name)
+            break_text = random.choice(PROTECTION_BREAK_TEXTS).format(
+                target=target_full_display
+            )
             logger.info(f"[烤群友] 保护被突破 | 凶手={attacker_name}({attacker_id}) 目标={target_name}({target_id})")
             await cmd_roast_member.send(MessageSegment.reply(event.message_id) + break_text)
         else:
-            prot_text = random.choice(PROTECTION_BLOCK_TEXTS).format(target=target_name)
+            prot_text = random.choice(PROTECTION_BLOCK_TEXTS).format(
+                target=target_full_display
+            )
             await cmd_roast_member.finish(MessageSegment.reply(event.message_id) + prot_text)
             return
 
     if is_human_pig(target_pig):
         await cmd_roast_member.finish(
             MessageSegment.reply(event.message_id)
-            + random.choice(TARGET_HUMAN_BLOCK_TEXTS).format(target=target_name)
+            + random.choice(TARGET_HUMAN_BLOCK_TEXTS).format(target=target_full_display)
         )
         return
 
     if is_food_pig(target_pig):
         await cmd_roast_member.finish(
             MessageSegment.reply(event.message_id)
-            + random.choice(TARGET_FOOD_BLOCK_TEXTS).format(
-                target=target_name, shape=target_pig.get("name", "熟食")
-            )
+            + random.choice(TARGET_FOOD_BLOCK_TEXTS).format(target=target_full_display)
         )
         return
 
     # 模式化限制/计数
     if force_mode == "normal":
         if not await store.consume_force_usage(attacker_id):
-            reject_text = pick_force_limit_text(attacker_name, target_name)
+            reject_text = pick_force_limit_text(
+                attacker_actor_display,
+                target_full_display,
+            )
             await cmd_roast_member.finish(MessageSegment.reply(event.message_id) + reject_text)
             return
     elif force_mode is None:
@@ -925,9 +1243,13 @@ async def _(bot: Bot, event: GroupMessageEvent):
 
         text = await roast_manager.get_roast_text(
             target_pig, food_pig_template,
-            operator_name=attacker_name, target_name=target_name,
+            operator_name=attacker_actor_display,
+            target_name=target_full_display,
         )
-        prefix_text = pick_force_prefix_text(target_name, is_super_mode=(force_mode == "super"))
+        prefix_text = pick_force_prefix_text(
+            target_full_display,
+            is_super_mode=(force_mode == "super"),
+        )
 
         logger.info(
             f"[烤群友] 后门成功 | 凶手={attacker_name}({attacker_id}) "
@@ -962,7 +1284,8 @@ async def _(bot: Bot, event: GroupMessageEvent):
 
         text = await roast_manager.get_roast_text(
             target_pig, food_pig_template,
-            operator_name=attacker_name, target_name=target_name,
+            operator_name=attacker_actor_display,
+            target_name=target_full_display,
         )
         logger.info(
             f"[烤群友] 成功 | 凶手={attacker_name}({attacker_id}) "
@@ -985,7 +1308,11 @@ async def _(bot: Bot, event: GroupMessageEvent):
 
     # === 逃脱 (30%) ===
     elif roll <= 90:
-        escape_text = pick_escape_text(attacker_name, target_name, target_pig)
+        escape_text = pick_escape_text(
+            attacker_actor_display,
+            target_full_display,
+            target_pig,
+        )
         logger.info(
             f"[烤群友] 逃脱 | 凶手={attacker_name}({attacker_id}) 目标={target_name}({target_id})"
         )
@@ -1011,7 +1338,11 @@ async def _(bot: Bot, event: GroupMessageEvent):
                 return
 
             text = await roast_manager.get_roast_text(attacker_pig, food_pig_template)
-            fail_intro = pick_backfire_text(attacker_name, target_name, attacker_pig)
+            fail_intro = pick_backfire_text(
+                attacker_full_display,
+                target_full_display,
+                attacker_pig,
+            )
             fail_text = fail_intro + "\n\n" + text
 
             logger.info(
@@ -1033,7 +1364,11 @@ async def _(bot: Bot, event: GroupMessageEvent):
             roasted_data["analysis"] = fail_text
             await send_rendered_pig(cmd_roast_member, event, roasted_data)
         else:
-            fail_text = pick_backfire_text(attacker_name, target_name, attacker_pig)
+            fail_text = pick_backfire_text(
+                attacker_full_display,
+                target_full_display,
+                attacker_pig,
+            )
             logger.info(
                 f"[烤群友] 反噬(文字) | 凶手={attacker_name}({attacker_id}) "
                 f"目标={target_name}({target_id})"
@@ -1059,9 +1394,18 @@ cmd_random_roast = on_command("随机烤群友", aliases={"随机烤猪", "抽�
 @guard_store_errors(cmd_random_roast)
 async def _(bot: Bot, event: GroupMessageEvent):
     attacker_id = str(event.user_id)
-    attacker_name = event.sender.card or event.sender.nickname
+    attacker_name = sanitize_display_name(
+        event.sender.card or event.sender.nickname or "",
+        attacker_id,
+    )
     group_id = str(event.group_id)
     attacker_pig = get_pig_by_id(await store.get_daily_roll(attacker_id))
+    attacker_actor_display = format_roast_actor_display(attacker_name, attacker_id)
+    attacker_full_display = format_roast_subject_display(
+        attacker_name,
+        attacker_pig,
+        attacker_id,
+    )
 
     if attacker_pig:
         await store.mark_group_roll_seen(attacker_id, attacker_pig["id"], group_id)
@@ -1081,7 +1425,10 @@ async def _(bot: Bot, event: GroupMessageEvent):
     target_name = "群友"
     try:
         member_info = await bot.get_group_member_info(group_id=event.group_id, user_id=int(target_id))
-        target_name = member_info.get("card") or member_info.get("nickname") or "群友"
+        target_name = sanitize_display_name(
+            member_info.get("card") or member_info.get("nickname") or "",
+            target_id,
+        )
     except Exception:
         pass
 
@@ -1098,19 +1445,32 @@ async def _(bot: Bot, event: GroupMessageEvent):
 
     # 读取目标形态
     target_pig = get_pig_by_id(await store.get_daily_roll(target_id))
+    target_full_display = format_roast_subject_display(
+        target_name,
+        target_pig,
+        target_id,
+    )
     if not target_pig:
         await cmd_random_roast.finish(
-            MessageSegment.reply(event.message_id) + f"系统随机选中了【{target_name}】，但对方的猪数据异常。"
+            MessageSegment.reply(event.message_id)
+            + f"系统随机选中了{target_full_display}，但对方的猪数据异常。"
         )
         return
     await store.mark_group_roll_seen(target_id, target_pig["id"], group_id)
+    target_full_display = format_roast_subject_display(
+        target_name,
+        target_pig,
+        target_id,
+    )
 
     # 保护检查
     if await store.is_protected(group_id, target_id):
-        prot_text = random.choice(PROTECTION_BLOCK_TEXTS).format(target=target_name)
+        prot_text = random.choice(PROTECTION_BLOCK_TEXTS).format(
+            target=target_full_display
+        )
         await cmd_random_roast.finish(
             MessageSegment.reply(event.message_id)
-            + f"系统随机选中了【{target_name}】——\n{prot_text}"
+            + f"系统随机选中了{target_full_display}。\n{prot_text}"
         )
         return
 
@@ -1118,19 +1478,22 @@ async def _(bot: Bot, event: GroupMessageEvent):
     if is_human_pig(target_pig):
         await cmd_random_roast.finish(
             MessageSegment.reply(event.message_id)
-            + f"系统随机选中了【{target_name}】，但对方是人类形态，烤架拒绝处理。换一次试试？"
+            + f"系统随机选中了{target_full_display}，但烤架拒绝处理活体高智商单位。换一次试试？"
         )
         return
 
     if is_food_pig(target_pig):
         await cmd_random_roast.finish(
             MessageSegment.reply(event.message_id)
-            + f"系统随机选中了【{target_name}】，但对方已经是【{target_pig.get('name', '熟食')}】了，别鞭尸了。"
+            + f"系统随机选中了{target_full_display}，但对方已经是熟食了，别鞭尸了。"
         )
         return
 
     # 正常概率判定
-    intro = random.choice(RANDOM_ROAST_INTRO_TEXTS).format(target=target_name) + "\n\n"
+    intro = (
+        random.choice(RANDOM_ROAST_INTRO_TEXTS).format(target=target_full_display)
+        + "\n\n"
+    )
     roll = random.randint(1, 100)
 
     # 成功 (60%)
@@ -1143,7 +1506,8 @@ async def _(bot: Bot, event: GroupMessageEvent):
 
         text = await roast_manager.get_roast_text(
             target_pig, food_pig_template,
-            operator_name=attacker_name, target_name=target_name,
+            operator_name=attacker_actor_display,
+            target_name=target_full_display,
         )
         logger.info(
             f"[随机烤群友] 成功 | 凶手={attacker_name}({attacker_id}) "
@@ -1166,7 +1530,11 @@ async def _(bot: Bot, event: GroupMessageEvent):
 
     # 逃脱 (30%)
     elif roll <= 90:
-        escape_text = pick_escape_text(attacker_name, target_name, target_pig)
+        escape_text = pick_escape_text(
+            attacker_actor_display,
+            target_full_display,
+            target_pig,
+        )
         logger.info(
             f"[随机烤群友] 逃脱 | 凶手={attacker_name}({attacker_id}) 目标={target_name}({target_id})"
         )
@@ -1191,7 +1559,11 @@ async def _(bot: Bot, event: GroupMessageEvent):
                 await cmd_random_roast.finish("食材配置缺失。")
                 return
             text = await roast_manager.get_roast_text(attacker_pig, food_pig_template)
-            fail_intro = pick_backfire_text(attacker_name, target_name, attacker_pig)
+            fail_intro = pick_backfire_text(
+                attacker_full_display,
+                target_full_display,
+                attacker_pig,
+            )
             fail_text = fail_intro + "\n\n" + text
             logger.info(
                 f"[随机烤群友] 反噬 | 凶手={attacker_name}({attacker_id}) "
@@ -1212,7 +1584,11 @@ async def _(bot: Bot, event: GroupMessageEvent):
             roasted_data["analysis"] = fail_text
             await send_rendered_pig(cmd_random_roast, event, roasted_data, extra_text=intro)
         else:
-            fail_text = pick_backfire_text(attacker_name, target_name, attacker_pig)
+            fail_text = pick_backfire_text(
+                attacker_full_display,
+                target_full_display,
+                attacker_pig,
+            )
             logger.info(
                 f"[随机烤群友] 反噬(文字) | 凶手={attacker_name}({attacker_id}) "
                 f"目标={target_name}({target_id})"
@@ -1293,45 +1669,143 @@ async def _(bot: Bot, event: Event):
         await cmd_sty.finish(MessageSegment.reply(event.message_id) + "猪图鉴为空，请先检查资源文件。")
         return
 
-    if user_count == 0:
-        await cmd_sty.finish(MessageSegment.reply(event.message_id) + "你的猪圈空空如也！")
-        return
-
     percent = int((user_count / total_pigs) * 100)
-    ranking_line = ""
+    group_rank: int | None = None
+    total_rank: int | None = None
     if isinstance(event, GroupMessageEvent):
         rankings = await build_group_pig_rankings(bot, str(event.group_id))
-        rank = get_group_rank_position(rankings, user_id)
-        if rank:
-            ranking_line = f"🐷 猪王争霸榜：当前群第 {rank} 位\n"
-
-    msg = (
-        f"【我的猪圈统计】\n"
-        f"👑 猪圈主人：{event.sender.card or event.sender.nickname}\n"
-        f"📦 已收集：{user_count} / {total_pigs} 只\n"
-        f"📈 收藏率：{percent}%\n"
-        f"{ranking_line}"
-        f"━━━━━━━━━━━━━━\n"
-        f"继续加油，争取成为猪王！"
+        group_rank = get_group_rank_position(rankings, user_id)
+    if get_storage_backend() == "local":
+        global_rankings = await build_global_pig_rankings(
+            bot,
+            context_group_id=str(event.group_id) if isinstance(event, GroupMessageEvent) else "",
+        )
+        total_rank = get_group_rank_position(global_rankings, user_id)
+    ranking_note = build_my_pigsty_ranking_note(
+        group_rank=group_rank,
+        total_rank=total_rank,
+        include_group_rank=isinstance(event, GroupMessageEvent),
+        include_total_rank=get_storage_backend() == "local",
     )
-    await cmd_sty.finish(MessageSegment.reply(event.message_id) + msg)
+
+    owner_name = sanitize_display_name(get_event_user_name(event), user_id)
+    avatar_uri = await get_avatar_uri(user_id)
+    fallback_text = build_my_pigsty_text(
+        owner_name=owner_name,
+        user_count=user_count,
+        total_pigs=total_pigs,
+        percent=percent,
+        ranking_note=ranking_note,
+    )
+    stats = [
+        {"label": "已收集", "value": f"{user_count} / {total_pigs}"},
+        {"label": "收藏率", "value": f"{percent}%"},
+    ]
+    notes = [ranking_note] if ranking_note else []
+    footer = "继续加油，争取成为猪王！" if user_count > 0 else "今天先去抽一只小猪，猪圈就热闹起来了。"
+    await send_rendered_panel(
+        cmd_sty,
+        event,
+        fallback_text=fallback_text,
+        title="我的猪圈",
+        subtitle=owner_name,
+        hero_avatar=avatar_uri,
+        show_hero_avatar=True,
+        stats=stats,
+        notes=notes,
+        footer=footer,
+    )
 
 
 # 6.5 猪王争霸榜
-cmd_pig_king = on_command("猪王争霸榜", aliases={"猪猪榜"}, block=True)
+cmd_pig_king = on_command(
+    "猪王争霸榜",
+    aliases={"猪猪榜", "猪猪排行", "小猪榜", "小猪排行"},
+    block=True,
+)
+cmd_pig_global = on_command("猪猪总榜", aliases={"猪猪总排行"}, block=True)
 
 
 @cmd_pig_king.handle()
 @guard_group_enabled(cmd_pig_king)
 @guard_store_errors(cmd_pig_king)
-async def _(bot: Bot, event: Event):
+async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     if not isinstance(event, GroupMessageEvent):
         await cmd_pig_king.finish("请在群聊中查看猪王争霸榜。")
         return
+    if get_storage_backend() != "local":
+        await cmd_pig_king.finish(MessageSegment.reply(event.message_id) + LOCAL_RANKING_UNSUPPORTED_TEXT)
+        return
+
+    limit = parse_rank_limit(args.extract_plain_text())
+    if limit is None:
+        await cmd_pig_king.finish(
+            MessageSegment.reply(event.message_id) + get_rank_usage("猪猪榜")
+        )
+        return
 
     rankings = await build_group_pig_rankings(bot, str(event.group_id))
-    text = build_pig_king_board_text(rankings, str(event.user_id))
-    await cmd_pig_king.finish(MessageSegment.reply(event.message_id) + text)
+    fallback_text = build_pig_king_board_text(
+        rankings,
+        str(event.user_id),
+        limit=limit,
+    )
+    notes = [] if rankings else ["本群还没人收集到猪图鉴"]
+    footer_rank = get_group_rank_position(rankings, str(event.user_id))
+    footer = f"你的名次：第 {footer_rank} 位" if footer_rank else "你的名次：未上榜"
+    ranking_items = await build_ranking_panel_items(rankings, limit) if rankings else []
+    await send_rendered_panel(
+        cmd_pig_king,
+        event,
+        fallback_text=fallback_text,
+        title="猪王争霸榜",
+        subtitle="当前群实时图鉴排行",
+        notes=notes,
+        rankings=ranking_items,
+        footer=footer,
+    )
+
+
+@cmd_pig_global.handle()
+@guard_group_enabled(cmd_pig_global)
+@guard_store_errors(cmd_pig_global)
+async def _(bot: Bot, event: Event, args: Message = CommandArg()):
+    if get_storage_backend() != "local":
+        await cmd_pig_global.finish(
+            MessageSegment.reply(event.message_id) + LOCAL_RANKING_UNSUPPORTED_TEXT
+        )
+        return
+
+    limit = parse_rank_limit(args.extract_plain_text())
+    if limit is None:
+        await cmd_pig_global.finish(
+            MessageSegment.reply(event.message_id) + get_rank_usage("猪猪总榜")
+        )
+        return
+
+    context_group_id = str(event.group_id) if isinstance(event, GroupMessageEvent) else ""
+    rankings = await build_global_pig_rankings(bot, context_group_id=context_group_id)
+    fallback_text = build_pig_king_board_text(
+        rankings,
+        str(event.user_id),
+        title="猪猪总榜",
+        limit=limit,
+        empty_text="当前账本还没人收集到猪图鉴",
+    )
+    notes = [] if rankings else ["当前账本还没人收集到猪图鉴"]
+    footer_rank = get_group_rank_position(rankings, str(event.user_id))
+    footer = f"你的名次：第 {footer_rank} 位" if footer_rank else "你的名次：未上榜"
+    ranking_items = await build_ranking_panel_items(rankings, limit) if rankings else []
+    await send_rendered_panel(
+        cmd_pig_global,
+        event,
+        fallback_text=fallback_text,
+        title="猪猪总榜",
+        subtitle="本地账本全范围排行",
+        notes=notes,
+        rankings=ranking_items,
+        footer=footer,
+    )
 
 
 # 7. 本周小猪
@@ -1503,10 +1977,16 @@ async def daily_summary_job():
 
         for group_id in summary_push_groups:
             try:
-                text = build_daily_summary_text(group_summaries[group_id])
-                await bot.send_group_msg(group_id=int(group_id), message=text)
-            except Exception as e:
-                logger.warning(f"[每日总结] 推送失败: group={group_id} error={e}")
+                panel_kwargs = build_daily_summary_panel(group_summaries[group_id])
+                pic = await build_panel_picture(**panel_kwargs)
+                message = MessageSegment.image(pic)
+            except Exception as render_error:
+                logger.warning(f"[每日总结] 图片渲染失败，回退文本: group={group_id} error={render_error}")
+                message = build_daily_summary_text(group_summaries[group_id])
+            try:
+                await bot.send_group_msg(group_id=int(group_id), message=message)
+            except Exception as send_error:
+                logger.warning(f"[每日总结] 推送失败: group={group_id} error={send_error}")
 
         logger.info(f"[每日总结] 推送完成, 共 {len(summary_push_groups)} 个群")
     except CloudStoreError as e:

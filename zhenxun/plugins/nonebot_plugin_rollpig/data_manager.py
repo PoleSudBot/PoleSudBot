@@ -233,6 +233,39 @@ class PigDataManager:
     def get_user_collection(self, user_id: str) -> List[str]:
         return self.data.get("collection", {}).get(user_id, [])
 
+    def get_all_collections(self) -> dict[str, List[str]]:
+        collection = self.data.get("collection", {})
+        if not isinstance(collection, dict):
+            return {}
+        return {
+            str(user_id): list(pig_ids)
+            for user_id, pig_ids in collection.items()
+            if isinstance(pig_ids, list)
+        }
+
+    def get_recent_user_names(self) -> dict[str, str]:
+        result: dict[str, str] = {}
+        daily_events = self.data.get("daily_events", {})
+        if not isinstance(daily_events, dict):
+            return result
+
+        for date_str in sorted(daily_events.keys(), reverse=True):
+            events = daily_events.get(date_str)
+            if not isinstance(events, list):
+                continue
+            for event in reversed(events):
+                if not isinstance(event, dict):
+                    continue
+                attacker_id = str(event.get("attacker") or "").strip()
+                attacker_name = str(event.get("attacker_name") or "").strip()
+                target_id = str(event.get("target") or "").strip()
+                target_name = str(event.get("target_name") or "").strip()
+                if attacker_id and attacker_name and attacker_id not in result:
+                    result[attacker_id] = attacker_name
+                if target_id and target_name and target_id not in result:
+                    result[target_id] = target_name
+        return result
+
     async def clean_old_history(self, days_to_keep: int = 14):
         """清理超过 days_to_keep 天的历史记录（不影响图鉴数据）。"""
         async with self._lock:

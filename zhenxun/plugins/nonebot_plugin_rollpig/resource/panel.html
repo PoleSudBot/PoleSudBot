@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      :root {
+        --bg: #ffffff;
+        --text: #111111;
+        --muted: #666666;
+        --line: #1f2937;
+        --soft: #f3f4f6;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        padding: 32px;
+        background: var(--bg);
+        color: var(--text);
+        font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+      }
+
+      .panel {
+        width: 900px;
+        margin: 0 auto;
+        padding: 32px;
+        border: 3px solid var(--line);
+        border-radius: 24px;
+        background: var(--bg);
+      }
+
+      .header {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+      }
+
+      .hero-avatar,
+      .hero-avatar-placeholder {
+        width: 88px;
+        height: 88px;
+        border-radius: 50%;
+        border: 3px solid var(--line);
+        flex-shrink: 0;
+      }
+
+      .hero-avatar {
+        object-fit: cover;
+      }
+
+      .hero-avatar-placeholder {
+        background: var(--soft);
+      }
+
+      .title {
+        font-size: 40px;
+        font-weight: 700;
+        line-height: 1.2;
+      }
+
+      .subtitle {
+        margin-top: 8px;
+        font-size: 20px;
+        color: var(--muted);
+        line-height: 1.4;
+      }
+
+      .section {
+        margin-top: 24px;
+        padding-top: 24px;
+        border-top: 2px solid var(--line);
+      }
+
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 14px;
+      }
+
+      .stat-card {
+        padding: 16px 18px;
+        border: 2px solid var(--line);
+        border-radius: 18px;
+        background: var(--bg);
+      }
+
+      .stat-label {
+        font-size: 18px;
+        color: var(--muted);
+      }
+
+      .stat-value {
+        margin-top: 10px;
+        font-size: 28px;
+        font-weight: 700;
+      }
+
+      .notes {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .note {
+        padding: 14px 16px;
+        border: 2px solid var(--line);
+        border-radius: 16px;
+        font-size: 22px;
+        line-height: 1.55;
+      }
+
+      .rankings {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .ranking-item {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 14px 16px;
+        border: 2px solid var(--line);
+        border-radius: 16px;
+      }
+
+      .ranking-rank {
+        width: 58px;
+        font-size: 26px;
+        font-weight: 700;
+        text-align: center;
+        flex-shrink: 0;
+      }
+
+      .ranking-avatar,
+      .ranking-avatar-placeholder {
+        width: 54px;
+        height: 54px;
+        border-radius: 50%;
+        border: 2px solid var(--line);
+        flex-shrink: 0;
+      }
+
+      .ranking-avatar {
+        object-fit: cover;
+      }
+
+      .ranking-avatar-placeholder {
+        background: var(--soft);
+      }
+
+      .ranking-content {
+        min-width: 0;
+        flex: 1;
+      }
+
+      .ranking-name {
+        font-size: 24px;
+        font-weight: 700;
+        line-height: 1.35;
+        word-break: break-all;
+      }
+
+      .ranking-meta {
+        margin-top: 6px;
+        font-size: 18px;
+        color: var(--muted);
+        line-height: 1.4;
+      }
+
+      .ranking-value {
+        font-size: 22px;
+        font-weight: 700;
+        text-align: right;
+        flex-shrink: 0;
+      }
+
+      .footer {
+        margin-top: 24px;
+        padding-top: 18px;
+        border-top: 2px solid var(--line);
+        font-size: 20px;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="panel">
+      <section class="header">
+        {% if show_hero_avatar %}
+          {% if hero_avatar %}
+        <img class="hero-avatar" src="{{ hero_avatar }}" />
+          {% else %}
+        <div class="hero-avatar-placeholder"></div>
+          {% endif %}
+        {% endif %}
+        <div>
+          <div class="title">{{ title }}</div>
+          {% if subtitle %}
+          <div class="subtitle">{{ subtitle }}</div>
+          {% endif %}
+        </div>
+      </section>
+
+      {% if stats %}
+      <section class="section stats">
+        {% for stat in stats %}
+        <article class="stat-card">
+          <div class="stat-label">{{ stat.label }}</div>
+          <div class="stat-value">{{ stat.value }}</div>
+        </article>
+        {% endfor %}
+      </section>
+      {% endif %}
+
+      {% if notes %}
+      <section class="section notes">
+        {% for note in notes %}
+        <div class="note">{{ note }}</div>
+        {% endfor %}
+      </section>
+      {% endif %}
+
+      {% if rankings %}
+      <section class="section rankings">
+        {% for item in rankings %}
+        <article class="ranking-item">
+          <div class="ranking-rank">{{ item.rank }}</div>
+          {% if item.avatar %}
+          <img class="ranking-avatar" src="{{ item.avatar }}" />
+          {% else %}
+          <div class="ranking-avatar-placeholder"></div>
+          {% endif %}
+          <div class="ranking-content">
+            <div class="ranking-name">{{ item.name }}</div>
+            {% if item.meta %}
+            <div class="ranking-meta">{{ item.meta }}</div>
+            {% endif %}
+          </div>
+          <div class="ranking-value">{{ item.value }}</div>
+        </article>
+        {% endfor %}
+      </section>
+      {% endif %}
+
+      {% if footer %}
+      <footer class="footer">{{ footer }}</footer>
+      {% endif %}
+    </main>
+  </body>
+</html>
