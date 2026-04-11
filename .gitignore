@@ -178,3 +178,6 @@ zhenxun/builtin_plugins/**/__pycache__/
 multincm-qrcode.png
 restart.sh
 AGENTS.override.md
+.bridge_runtime/
+sidecar/.runtime/
+sidecar/.env

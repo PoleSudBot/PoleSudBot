@@ -49,6 +49,7 @@ dependencies = [
     "aiocache[redis]>=0.12.3,<0.13.0",
     "py-cpuinfo>=9.0.0,<10.0.0",
     "nonebot-plugin-alconna>=0.59.0",
+    "nonebot-plugin-genshinuid",
     "tenacity>=9.0.0,<10.0.0",
     "nonebot-plugin-uninfo>0.4.1",
     "nonebot-plugin-waiter>=0.8.1,<0.9.0",
@@ -122,6 +123,7 @@ nonebot-plugin-whateat-pic = {path = "plugins/nonebot-plugin-whateat-pic", edita
 nonebot-plugin-tsugu-bangdream-bot = {path = "plugins/nonebot-plugin-tsugu-bangdream-bot", editable = true}
 nonebot-plugin-wordcloud = {path = "plugins/nonebot-plugin-wordcloud", editable = true}
 nonebot-plugin-manosaba-memes = {path = "plugins/nonebot-plugin-manosaba-memes", editable = true}
+nonebot-plugin-genshinuid = {path = "sidecar/.runtime/vendors/nonebot-plugin-genshinuid", editable = true}
 
 
 

@@ -2553,6 +2553,23 @@ version = "0.4.12"
 source = { editable = "plugins/nonebot_plugin_fortune" }
 
 [[package]]
+name = "nonebot-plugin-genshinuid"
+version = "4.6.0"
+source = { editable = "sidecar/.runtime/vendors/nonebot-plugin-genshinuid" }
+dependencies = [
+    { name = "nonebot-plugin-apscheduler" },
+    { name = "nonebot2" },
+    { name = "websockets" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "nonebot-plugin-apscheduler", specifier = ">=0.3.0" },
+    { name = "nonebot2", specifier = ">=2.2.0" },
+    { name = "websockets", specifier = ">=12.0" },
+]
+
+[[package]]
 name = "nonebot-plugin-githubcard"
 version = "0.4.1"
 source = { editable = "plugins/nonebot_plugin_githubcard" }
@@ -2887,17 +2904,31 @@ source = { editable = "plugins/nonebot_plugin_tarot" }
 
 [[package]]
 name = "nonebot-plugin-today-waifu"
-version = "0.1.10"
+version = "0.2.0"
 source = { editable = "plugins/nonebot-plugin-today-waifu" }
 dependencies = [
+    { name = "jinja2" },
     { name = "nonebot-adapter-onebot" },
+    { name = "nonebot-plugin-alconna" },
+    { name = "nonebot-plugin-apscheduler" },
+    { name = "nonebot-plugin-htmlrender" },
+    { name = "nonebot-plugin-orm" },
+    { name = "nonebot-plugin-uninfo" },
     { name = "nonebot2", extra = ["fastapi"] },
+    { name = "pillow" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "jinja2", specifier = ">=3.1.0,<4.0.0" },
     { name = "nonebot-adapter-onebot", specifier = ">=2.4.6,<3.0.0" },
+    { name = "nonebot-plugin-alconna", specifier = ">=0.56.2,<1.0.0" },
+    { name = "nonebot-plugin-apscheduler", specifier = ">=0.5.0,<1.0.0" },
+    { name = "nonebot-plugin-htmlrender", specifier = ">=0.6.2,<1.0.0" },
+    { name = "nonebot-plugin-orm", specifier = ">=0.7.6,<1.0.0" },
+    { name = "nonebot-plugin-uninfo", specifier = ">=0.7.0,<1.0.0" },
     { name = "nonebot2", extras = ["fastapi"], specifier = ">=2.4.2,<3.0.0" },
+    { name = "pillow", specifier = ">=10.0.0,<12.0.0" },
 ]
 
 [[package]]
@@ -3466,6 +3497,7 @@ dependencies = [
     { name = "nonebot-plugin-apscheduler" },
     { name = "nonebot-plugin-datastore" },
     { name = "nonebot-plugin-fortune" },
+    { name = "nonebot-plugin-genshinuid" },
     { name = "nonebot-plugin-githubcard" },
     { name = "nonebot-plugin-heweather" },
     { name = "nonebot-plugin-htmlrender" },
@@ -3549,6 +3581,7 @@ requires-dist = [
     { name = "nonebot-plugin-apscheduler", specifier = ">=0.5,<0.6" },
     { name = "nonebot-plugin-datastore" },
     { name = "nonebot-plugin-fortune", editable = "plugins/nonebot_plugin_fortune" },
+    { name = "nonebot-plugin-genshinuid", editable = "sidecar/.runtime/vendors/nonebot-plugin-genshinuid" },
     { name = "nonebot-plugin-githubcard", editable = "plugins/nonebot_plugin_githubcard" },
     { name = "nonebot-plugin-heweather", editable = "plugins/nonebot-plugin-heweather" },
     { name = "nonebot-plugin-htmlrender", specifier = "==0.7.0a3" },

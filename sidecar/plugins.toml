@@ -1,0 +1,11 @@
+# Sidecar 插件清单
+# ref 可选；留空或删除时将跟随默认分支最新提交
+# packages / playwright_browsers 可选；用于 sidecar 容器额外依赖
+
+[[plugins]]
+repo = "https://github.com/jiluoQAQ/RocomUID.git"
+
+[[plugins]]
+repo = "https://github.com/Loping151/XutheringWavesUID.git"
+packages = ["playwright", "opencv-python", "fonttools"]
+playwright_browsers = ["chromium"]
