@@ -52,6 +52,9 @@ class Quote(Model):
     tags = fields.JSONField(default=list)
     """标签列表"""
 
+    manual_tags = fields.JSONField(default=list)
+    """手动维护的标签列表"""
+
     quoted_user_id = fields.CharField(max_length=64, null=True, index=True)
     """被记录用户的QQ号"""
 
@@ -67,6 +70,13 @@ class Quote(Model):
     class Meta:
         table = "quote"
         table_description = "语录表"
+
+    @classmethod
+    def _run_script(cls):
+        return [
+            "ALTER TABLE quote ADD COLUMN manual_tags TEXT;",
+            "UPDATE quote SET manual_tags = '[]' WHERE manual_tags IS NULL;",
+        ]
 
 
 class QuotedReplyData(BaseModel):

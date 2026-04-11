@@ -1,4 +1,5 @@
 import os
+from urllib.parse import urlparse
 from typing import Optional, Literal, Union
 from nonebot.permission import SUPERUSER
 from nonebot.rule import Rule
@@ -9,7 +10,7 @@ from nonebot.adapters.onebot.v11 import (
     Bot as V11Bot,
     MessageEvent,
 )
-from nonebot_plugin_alconna import At, on_alconna
+from nonebot_plugin_alconna import At, Text, on_alconna
 from nonebot_plugin_alconna.uniseg import Image
 from nonebot_plugin_alconna.uniseg.tools import reply_fetch
 from nonebot_plugin_uninfo import Uninfo
@@ -22,8 +23,10 @@ from zhenxun.utils.platform import PlatformUtils
 from zhenxun.utils.rules import admin_check
 
 from ..config import resolve_quote_image_path
+from ..model import Quote
 from ..services.quote_service import QuoteService
 from ..config import QUOTE_ASSETS_PATH
+from ..utils.tag_utils import extract_manual_tags
 
 
 async def _get_image_from_reply(event: Event, bot: Bot) -> Optional[Image]:
@@ -70,6 +73,39 @@ async def _get_image_from_reply(event: Event, bot: Bot) -> Optional[Image]:
     return None
 
 
+def _extract_image_basename(image_seg: Image) -> str | None:
+    for raw_value in (image_seg.id, getattr(image_seg, "path", None), image_seg.url):
+        if not raw_value:
+            continue
+
+        value = str(raw_value)
+        if "://" in value:
+            value = urlparse(value).path or value
+
+        image_basename = os.path.basename(value)
+        if image_basename:
+            return image_basename
+
+    return None
+
+
+async def _get_quote_from_reply(
+    bot: Bot, event: MessageEvent, session: Uninfo
+) -> Quote | None:
+    if not session.group or not await is_reply_to_bot(event):
+        return None
+
+    image_seg = await _get_image_from_reply(event, bot)
+    if not image_seg:
+        return None
+
+    image_basename = _extract_image_basename(image_seg)
+    if not image_basename:
+        return None
+
+    return await QuoteService.find_quote_by_basename(session.group.id, image_basename)
+
+
 async def uploader_or_admin_check(
     bot: Bot, event: MessageEvent, session: Uninfo
 ) -> bool:
@@ -83,11 +119,8 @@ async def uploader_or_admin_check(
         group_id = session.group.id
         user_id = session.user.id
         if image_seg := await _get_image_from_reply(event, bot):
-            if image_seg.id:
-                image_basename = os.path.basename(image_seg.id)
-                quote = await QuoteService.find_quote_by_basename(
-                    group_id, image_basename
-                )
+            if image_basename := _extract_image_basename(image_seg):
+                quote = await QuoteService.find_quote_by_basename(group_id, image_basename)
                 if quote and quote.uploader_user_id == user_id:
                     return True
     return False
@@ -116,6 +149,100 @@ def reply_to_bot_rule() -> Rule:
     return Rule(_rule)
 
 
+def reply_to_quote_rule() -> Rule:
+    """仅在回复机器人发出的语录图片时匹配命令"""
+
+    async def _rule(bot: Bot, event: Event, session: Uninfo):
+        if not isinstance(event, MessageEvent):
+            return False
+        return await _get_quote_from_reply(bot, event, session) is not None
+
+    return Rule(_rule)
+
+
+def not_reply_to_quote_rule() -> Rule:
+    """在非回复语录图片场景下匹配命令"""
+
+    async def _rule(bot: Bot, event: Event, session: Uninfo):
+        if not isinstance(event, MessageEvent):
+            return False
+        return await _get_quote_from_reply(bot, event, session) is None
+
+    return Rule(_rule)
+
+
+async def _require_reply_quote(
+    bot: Bot, event: MessageEvent, session: Uninfo
+) -> Quote | None:
+    quote = await _get_quote_from_reply(bot, event, session)
+    if quote:
+        return quote
+
+    await MessageUtils.build_message("请回复 Bot 发出的语录图片后再使用该命令。").send(
+        target=event, bot=bot
+    )
+    return None
+
+
+def _build_tag_view_message(quote: Quote, show_all: bool) -> list[object]:
+    manual_tags = QuoteService.get_manual_tags(quote)
+    if not show_all:
+        return ["手动 tag：", *QuoteService.format_tags_for_message(manual_tags)]
+
+    auto_tags = QuoteService.get_auto_tags(quote)
+    return [
+        "手动 tag：",
+        *QuoteService.format_tags_for_message(manual_tags),
+        "\n自动 tag：",
+        *QuoteService.format_tags_for_message(auto_tags),
+    ]
+
+
+async def _show_quote_tags(
+    bot: Bot, event: MessageEvent, quote: Quote, show_all: bool
+):
+    await MessageUtils.build_message(
+        _build_tag_view_message(quote, show_all=show_all)
+    ).send(target=event, bot=bot)
+
+
+async def _update_quote_manual_tags(
+    bot: Bot,
+    event: MessageEvent,
+    quote: Quote,
+    tags: list[str],
+    action: Literal["add", "del"],
+):
+    normalized_tags = QuoteService.normalize_tags(tags)
+    if not normalized_tags:
+        await MessageUtils.build_message(
+            f"请在命令后附带至少一个 tag 或 @用户，例如：tag {action} 标签名"
+        ).send(target=event, bot=bot)
+        return
+
+    before_tags = QuoteService.get_manual_tags(quote)
+
+    if action == "add":
+        after_tags = await QuoteService.add_manual_tags(quote, normalized_tags)
+        changed_tags = [tag for tag in after_tags if tag not in before_tags]
+        prefix = "已添加手动 tag：" if changed_tags else "这些手动 tag 已经都在了："
+        display_tags = changed_tags or normalized_tags
+    else:
+        after_tags = await QuoteService.delete_manual_tags(quote, normalized_tags)
+        changed_tags = [tag for tag in before_tags if tag not in after_tags]
+        prefix = "已删除手动 tag：" if changed_tags else "这些手动 tag 当前都不存在："
+        display_tags = changed_tags or normalized_tags
+
+    await MessageUtils.build_message(
+        [
+            prefix,
+            *QuoteService.format_tags_for_message(display_tags),
+            "\n当前手动 tag：",
+            *QuoteService.format_tags_for_message(after_tags),
+        ]
+    ).send(target=event, bot=bot)
+
+
 async def _handle_delete_reply_quote(bot: Bot, event: MessageEvent, session: Uninfo):
     """处理回复语录图片后的删除逻辑"""
     group_id = session.group.id
@@ -128,11 +255,11 @@ async def _handle_delete_reply_quote(bot: Bot, event: MessageEvent, session: Uni
         logger.debug("回复的消息中未找到图片，无法执行删除操作。", "群聊语录")
         return
 
-    if not image_seg.id:
+    image_basename = _extract_image_basename(image_seg)
+    if not image_basename:
         logger.warning("无法获取到回复图片的唯一标识，删除失败。", "群聊语录")
         return
 
-    image_basename = os.path.basename(image_seg.id)
     is_deleted = await QuoteService.delete_quote(group_id, image_basename)
 
     if is_deleted:
@@ -176,6 +303,31 @@ delete_quote_reply_cmd = on_alconna(
     Alconna("删除"), priority=11, block=True, rule=reply_to_bot_rule()
 )
 delete_quote_cmd = on_alconna(Alconna("删除语录"), aliases={"del"}, priority=11, block=True)
+quote_tag_cmd = on_alconna(
+    Alconna("tag", Args["action?", str]["parts?", MultiVar(At | Text)]),
+    priority=4,
+    block=True,
+    rule=reply_to_quote_rule(),
+)
+quote_tag_hint_cmd = on_alconna(
+    Alconna("tag", Args["action", ["all", "add", "del"]]["parts?", MultiVar(At | Text)]),
+    priority=4,
+    block=True,
+    rule=not_reply_to_quote_rule(),
+)
+quote_alltag_cmd = on_alconna(Alconna("alltag"), priority=4, block=True)
+quote_addtag_cmd = on_alconna(
+    Alconna("addtag", Args["parts?", MultiVar(At | Text)]),
+    aliases={"tagadd"},
+    priority=4,
+    block=True,
+)
+quote_deltag_cmd = on_alconna(
+    Alconna("deltag", Args["parts?", MultiVar(At | Text)]),
+    aliases={"tagdel"},
+    priority=4,
+    block=True,
+)
 
 
 @delete_quote_reply_cmd.handle()
@@ -204,6 +356,82 @@ async def handle_delete_quote_standalone(
         return
 
     await _handle_delete_last_quote(bot, event, session)
+
+
+@quote_tag_cmd.handle()
+async def handle_quote_tag(
+    bot: Bot, event: MessageEvent, arp: Arparma, session: Uninfo
+):
+    quote = await _get_quote_from_reply(bot, event, session)
+    if not quote:
+        return
+
+    action = str(arp.query("action", "") or "").strip().lower()
+
+    if not action:
+        await _show_quote_tags(bot, event, quote, show_all=False)
+        return
+
+    if action == "all":
+        if extract_manual_tags(arp):
+            await MessageUtils.build_message(
+                "tag all 仅用于查看全部 tag，请不要额外附带参数。"
+            ).send(target=event, bot=bot)
+            return
+        await _show_quote_tags(bot, event, quote, show_all=True)
+        return
+
+    if action in {"add", "del"}:
+        await _update_quote_manual_tags(
+            bot, event, quote, extract_manual_tags(arp), action
+        )
+        return
+
+    await MessageUtils.build_message(
+        "回复语录时仅支持 tag / tag all / tag add / tag del。"
+    ).send(target=event, bot=bot)
+
+
+@quote_tag_hint_cmd.handle()
+async def handle_quote_tag_hint(bot: Bot, event: MessageEvent):
+    await MessageUtils.build_message(
+        "tag all / tag add / tag del 需要回复 Bot 发出的语录图片后使用。"
+    ).send(target=event, bot=bot)
+
+
+@quote_alltag_cmd.handle()
+async def handle_quote_alltag(bot: Bot, event: MessageEvent, session: Uninfo):
+    quote = await _require_reply_quote(bot, event, session)
+    if not quote:
+        return
+
+    await _show_quote_tags(bot, event, quote, show_all=True)
+
+
+@quote_addtag_cmd.handle()
+async def handle_quote_addtag(
+    bot: Bot, event: MessageEvent, arp: Arparma, session: Uninfo
+):
+    quote = await _require_reply_quote(bot, event, session)
+    if not quote:
+        return
+
+    await _update_quote_manual_tags(
+        bot, event, quote, extract_manual_tags(arp), action="add"
+    )
+
+
+@quote_deltag_cmd.handle()
+async def handle_quote_deltag(
+    bot: Bot, event: MessageEvent, arp: Arparma, session: Uninfo
+):
+    quote = await _require_reply_quote(bot, event, session)
+    if not quote:
+        return
+
+    await _update_quote_manual_tags(
+        bot, event, quote, extract_manual_tags(arp), action="del"
+    )
 
 
 quote_manage_cmd = on_alconna(

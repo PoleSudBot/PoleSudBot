@@ -7,16 +7,14 @@ import uuid
 from typing import Any, cast
 
 import aiofiles
-from arclet.alconna import Alconna, Args, Arparma, Option
+from arclet.alconna import Alconna, Args, Arparma, CommandMeta, MultiVar, Option
 from nonebot.permission import SUPERUSER
 import httpx
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageEvent, MessageSegment
 from nonebot.typing import T_State
-from nonebot_plugin_alconna import on_alconna
+from nonebot_plugin_alconna import At, Text, on_alconna
 from nonebot_plugin_alconna.uniseg import (
-    At,
     Image as UniImage,
-    Text,
     Reply,
     UniMessage,
     Segment,
@@ -37,6 +35,7 @@ from ..services.ocr_service import OCRService
 from ..services.quote_service import QuoteService
 from ..utils.exceptions import ImageProcessError, NetworkError
 from ..utils.image_utils import get_img_hash
+from ..utils.tag_utils import collect_tag_parts, extract_manual_tags
 
 from zhenxun.services import avatar_service
 
@@ -439,14 +438,25 @@ async def _generate_sequence_from_history(
     return img_data, "\n".join(recorded_text_parts), last_quoted_user_id
 
 
-upload_alc = Alconna("上传", Args["image?", UniImage])
+def _extract_target_image_from_parts(parts: list[Any]) -> UniImage | None:
+    for part in parts:
+        if isinstance(part, UniImage):
+            return part
+    return None
+
+
+upload_alc = Alconna(
+    "上传",
+    Args["parts?", MultiVar(At | Text | UniImage)],
+    meta=CommandMeta(strict=False, compact=True),
+)
 save_img_cmd = on_alconna(upload_alc, auto_send_output=False, block=True)
 make_record_alc = Alconna(
     "记录",
-    Args(),
     Option("-s|--style", Args["style_name", str], help_text="指定主题样式"),
     Option("-n|--num", Args["count", int, 1], help_text="记录连续消息的数量"),
     Option("-o|--only|--仅作者", help_text="仅记录/生成被回复用户的连续消息"),
+    Args["parts?", MultiVar(At | Text)],
 )
 make_record_cmd = on_alconna(make_record_alc, block=True)
 
@@ -466,8 +476,9 @@ async def save_img_handle(bot: Bot, event: MessageEvent, arp: Arparma, state: T_
     session_id = event.get_session_id()
     message_id = event.message_id
     user_id = str(event.get_user_id())
-
-    target_image: UniImage | None = arp.query("image")
+    upload_parts = collect_tag_parts(arp)
+    manual_tags = extract_manual_tags(arp)
+    target_image: UniImage | None = _extract_target_image_from_parts(upload_parts)
 
     # 1. 尝试从回复中获取图片
     if not target_image:
@@ -572,6 +583,7 @@ async def save_img_handle(bot: Bot, event: MessageEvent, arp: Arparma, state: T_
             recorded_text=None,
             uploader_user_id=user_id,
             image_hash=image_hash,
+            manual_tags=manual_tags,
         )
 
         if quote:
@@ -835,6 +847,7 @@ async def make_record_handle(
 ):
     """记录语录处理函数 (重构后)"""
     user_id = str(event.get_user_id())
+    manual_tags = extract_manual_tags(arp)
 
     img_data, recorded_text, quoted_user_id, error = await _handle_quote_generation(
         bot, event, arp, session, issuer_user_id=user_id
@@ -869,6 +882,7 @@ async def make_record_handle(
             uploader_user_id=user_id,
             quoted_user_id=quoted_user_id,
             image_hash=image_hash,
+            manual_tags=manual_tags,
         )
 
         if quote and is_new:

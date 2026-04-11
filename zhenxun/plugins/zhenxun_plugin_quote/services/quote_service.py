@@ -1,11 +1,14 @@
+import json
 import os
 from pathlib import Path
 import random
 import base64
+from collections.abc import Iterable
 from typing import Any, ClassVar
 
 from cachetools import TTLCache
 from nonebot.adapters.onebot.v11 import Bot
+from nonebot_plugin_alconna import At, Text
 from tortoise.expressions import Q
 from tortoise.functions import Count
 
@@ -42,6 +45,118 @@ class QuoteService:
 
     _recent_quotes: ClassVar[TTLCache] = TTLCache(maxsize=1000, ttl=600)
     _max_history_per_key: ClassVar[int] = 10
+    _user_tag_prefix: ClassVar[str] = "user:"
+
+    @classmethod
+    def serialize_user_tag(cls, user_id: str) -> str:
+        return f"{cls._user_tag_prefix}{str(user_id).strip()}"
+
+    @classmethod
+    def parse_tag_text(cls, text: str | None) -> list[str]:
+        if not text:
+            return []
+        return [part.strip() for part in text.split() if part.strip()]
+
+    @classmethod
+    def normalize_tags(cls, tags: Iterable[str | None]) -> list[str]:
+        normalized_tags: list[str] = []
+        seen: set[str] = set()
+
+        for tag in tags:
+            if tag is None:
+                continue
+            tag_value = str(tag).strip()
+            if not tag_value or tag_value in seen:
+                continue
+            seen.add(tag_value)
+            normalized_tags.append(tag_value)
+
+        return normalized_tags
+
+    @classmethod
+    def parse_tag_segments(cls, parts: Iterable[Any]) -> list[str]:
+        raw_tags: list[str] = []
+
+        for part in parts:
+            if (
+                isinstance(part, At) or part.__class__.__name__ == "At"
+            ) and getattr(part, "target", None):
+                raw_tags.append(cls.serialize_user_tag(str(part.target)))
+            elif isinstance(part, Text) or part.__class__.__name__ == "Text":
+                raw_tags.extend(cls.parse_tag_text(part.text))
+            elif isinstance(part, str):
+                raw_tags.extend(cls.parse_tag_text(part))
+
+        return cls.normalize_tags(raw_tags)
+
+    @classmethod
+    def _deserialize_storage_tags(cls, raw_tags: Any) -> list[str]:
+        if isinstance(raw_tags, list):
+            return cls.normalize_tags(str(tag) for tag in raw_tags)
+
+        if isinstance(raw_tags, tuple):
+            return cls.normalize_tags(str(tag) for tag in raw_tags)
+
+        if isinstance(raw_tags, str):
+            stripped = raw_tags.strip()
+            if not stripped:
+                return []
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                return cls.normalize_tags(cls.parse_tag_text(stripped))
+            return cls._deserialize_storage_tags(parsed)
+
+        return []
+
+    @classmethod
+    def get_auto_tags(cls, quote: Quote) -> list[str]:
+        return cls._deserialize_storage_tags(getattr(quote, "tags", []))
+
+    @classmethod
+    def get_manual_tags(cls, quote: Quote) -> list[str]:
+        return cls._deserialize_storage_tags(getattr(quote, "manual_tags", []))
+
+    @classmethod
+    def get_all_tags(cls, quote: Quote) -> list[str]:
+        return cls.normalize_tags(cls.get_manual_tags(quote) + cls.get_auto_tags(quote))
+
+    @classmethod
+    def parse_user_tag(cls, tag: str) -> str | None:
+        if not tag.startswith(cls._user_tag_prefix):
+            return None
+        user_id = tag.removeprefix(cls._user_tag_prefix).strip()
+        return user_id or None
+
+    @classmethod
+    def format_tags_for_message(cls, tags: Iterable[str]) -> list[Any]:
+        normalized_tags = cls.normalize_tags(tags)
+        if not normalized_tags:
+            return ["无"]
+
+        message_parts: list[Any] = []
+        for index, tag in enumerate(normalized_tags):
+            if index:
+                message_parts.append(" ")
+
+            if user_id := cls.parse_user_tag(tag):
+                message_parts.append(At(target=user_id, flag="user"))
+            else:
+                message_parts.append(tag)
+
+        return message_parts
+
+    @classmethod
+    def _match_user_filter(cls, quote: Quote, user_id_filter: str | None) -> bool:
+        if not user_id_filter:
+            return True
+
+        user_id = str(user_id_filter)
+        if str(getattr(quote, "quoted_user_id", "") or "") == user_id:
+            return True
+
+        user_tag = cls.serialize_user_tag(user_id)
+        return user_tag in cls.get_all_tags(quote)
 
     @staticmethod
     async def add_quote(
@@ -52,6 +167,7 @@ class QuoteService:
         quoted_user_id: str | None = None,
         image_hash: str | None = None,
         uploader_user_id: str | None = None,
+        manual_tags: list[str] | None = None,
     ) -> tuple[Quote | None, bool]:
         """
         向数据库添加语录，并在内部处理所有重复性检查。
@@ -74,6 +190,7 @@ class QuoteService:
 
             tags_source = ocr_content if ocr_content else recorded_text
             tags = QuoteService.cut_sentence(tags_source) if tags_source else []
+            normalized_manual_tags = QuoteService.normalize_tags(manual_tags or [])
 
             relative_image_path = os.path.relpath(image_path, DATA_PATH)
             relative_image_path = Path(relative_image_path).as_posix()
@@ -85,6 +202,7 @@ class QuoteService:
                 ocr_text=ocr_content,
                 recorded_text=recorded_text,
                 tags=tags,
+                manual_tags=normalized_manual_tags,
                 quoted_user_id=quoted_user_id,
                 uploader_user_id=uploader_user_id,
                 view_count=0,
@@ -147,11 +265,15 @@ class QuoteService:
                 f"尝试随机获取语录 - 群组: {group_id}, 用户筛选: {user_id_filter}",
                 "群聊语录",
             )
-            query_filters = {"group_id": group_id}
+            quotes = list(await Quote.filter(group_id=group_id))
             if user_id_filter:
-                query_filters["quoted_user_id"] = user_id_filter
+                quotes = [
+                    quote
+                    for quote in quotes
+                    if cls._match_user_filter(quote, user_id_filter)
+                ]
 
-            count = await Quote.filter(**query_filters).count()
+            count = len(quotes)
             if count == 0:
                 logger.info(
                     f"群组 {group_id} 中 (用户: {user_id_filter or '任意'}) 没有语录",
@@ -160,11 +282,6 @@ class QuoteService:
                 return None
 
             memory_key = f"{group_id}_{user_id_filter or 'all'}"
-
-            quotes = await Quote.filter(**query_filters)
-
-            if not quotes:
-                return None
 
             recent_ids = cls._recent_quotes.get(memory_key) or []
             if recent_ids and count > cls._max_history_per_key:
@@ -210,8 +327,6 @@ class QuoteService:
         2. [模糊匹配] 如果没有精确匹配结果，则回退到分词模糊搜索。
         """
         base_filters = {"group_id": group_id}
-        if user_id_filter:
-            base_filters["quoted_user_id"] = user_id_filter
 
         logger.info(
             f"第一阶段：尝试对 '{keyword}' 进行精确匹配搜索...", "群聊语录-搜索"
@@ -219,7 +334,13 @@ class QuoteService:
         exact_match_query = Q(ocr_text__icontains=keyword) | Q(
             recorded_text__icontains=keyword
         )
-        exact_matches = await Quote.filter(exact_match_query, **base_filters)
+        exact_matches = list(await Quote.filter(exact_match_query, **base_filters))
+        if user_id_filter:
+            exact_matches = [
+                quote
+                for quote in exact_matches
+                if cls._match_user_filter(quote, user_id_filter)
+            ]
 
         if exact_matches:
             logger.info(
@@ -227,26 +348,20 @@ class QuoteService:
             )
             return exact_matches
 
-        logger.info("精确匹配未找到结果，回退到分词模糊搜索...", "群聊语录-搜索")
+        logger.info("精确匹配未找到结果，回退到分词与 tag 综合搜索...", "群聊语录-搜索")
         keywords = [k.strip() for k in keyword.split() if k.strip()]
         if not keywords:
             return []
 
-        text_query_condition = Q()
-        for kw in keywords:
-            kw_tokens = cls.cut_sentence(kw)
-            single_kw_text_condition = Q(ocr_text__icontains=kw) | Q(
-                recorded_text__icontains=kw
-            )
-            for token in kw_tokens:
-                single_kw_text_condition |= Q(ocr_text__icontains=token)
-                single_kw_text_condition |= Q(recorded_text__icontains=token)
-
-            text_query_condition &= single_kw_text_condition
-
-        candidate_quotes = await Quote.filter(text_query_condition, **base_filters)
+        candidate_quotes = list(await Quote.filter(**base_filters))
+        if user_id_filter:
+            candidate_quotes = [
+                quote
+                for quote in candidate_quotes
+                if cls._match_user_filter(quote, user_id_filter)
+            ]
         logger.debug(
-            f"数据库模糊搜索初步匹配到 {len(candidate_quotes)} 条语录", "群聊语录"
+            f"综合过滤候选语录共 {len(candidate_quotes)} 条", "群聊语录"
         )
         if not candidate_quotes:
             return []
@@ -278,7 +393,7 @@ class QuoteService:
             if quote.recorded_text and token.lower() in quote.recorded_text.lower():
                 return True
 
-        tags_to_check = quote.tags if isinstance(quote.tags, list) else []
+        tags_to_check = cls.get_all_tags(quote)
         for tag in tags_to_check:
             tag_lower = str(tag).lower()
             if kw_lower in tag_lower:
@@ -384,48 +499,69 @@ class QuoteService:
     @staticmethod
     async def add_tags(quote: Quote, tags: list[str]) -> bool:
         """为语录添加标签"""
-        try:
-            logger.info(f"为语录 ID: {quote.id} 添加标签: {tags}", "群聊语录")
-            current_tags = set(quote.tags)
-            new_tags = set(tags)
+        before_tags = QuoteService.get_manual_tags(quote)
+        updated_tags = await QuoteService.add_manual_tags(quote, tags)
+        return updated_tags != before_tags or not QuoteService.normalize_tags(tags)
 
-            updated_tags = list(current_tags.union(new_tags))
-            quote.tags = updated_tags
-            await quote.save()
+    @classmethod
+    async def add_manual_tags(cls, quote: Quote, tags: list[str]) -> list[str]:
+        """为语录添加手动标签"""
+        try:
+            normalized_tags = cls.normalize_tags(tags)
+            logger.info(
+                f"为语录 ID: {quote.id} 添加手动标签: {normalized_tags}", "群聊语录"
+            )
+
+            current_tags = cls.get_manual_tags(quote)
+            updated_tags = cls.normalize_tags(current_tags + normalized_tags)
+            quote.manual_tags = updated_tags
+            await quote.save(update_fields=["manual_tags"])
 
             logger.info(
-                f"语录 ID: {quote.id} 标签更新成功，现有标签: {updated_tags}",
+                f"语录 ID: {quote.id} 手动标签更新成功，现有标签: {updated_tags}",
                 "群聊语录",
             )
-            return True
+            return updated_tags
         except Exception as e:
             logger.error(
-                f"为语录添加标签失败 - 语录 ID: {quote.id}, 错误: {e}", "群聊语录", e=e
+                f"为语录添加手动标签失败 - 语录 ID: {quote.id}, 错误: {e}",
+                "群聊语录",
+                e=e,
             )
-            return False
+            return cls.get_manual_tags(quote)
 
     @staticmethod
     async def delete_tags(quote: Quote, tags: list[str]) -> bool:
         """删除语录的标签"""
-        try:
-            logger.info(f"从语录 ID: {quote.id} 删除标签: {tags}", "群聊语录")
-            current_tags = set(quote.tags)
-            remove_tags = set(tags)
+        before_tags = QuoteService.get_manual_tags(quote)
+        updated_tags = await QuoteService.delete_manual_tags(quote, tags)
+        return updated_tags != before_tags or not QuoteService.normalize_tags(tags)
 
-            updated_tags = list(current_tags - remove_tags)
-            quote.tags = updated_tags
-            await quote.save()
+    @classmethod
+    async def delete_manual_tags(cls, quote: Quote, tags: list[str]) -> list[str]:
+        """删除语录的手动标签"""
+        try:
+            remove_tags = set(cls.normalize_tags(tags))
+            logger.info(
+                f"从语录 ID: {quote.id} 删除手动标签: {list(remove_tags)}", "群聊语录"
+            )
+            current_tags = cls.get_manual_tags(quote)
+            updated_tags = [tag for tag in current_tags if tag not in remove_tags]
+            quote.manual_tags = updated_tags
+            await quote.save(update_fields=["manual_tags"])
 
             logger.info(
-                f"语录 ID: {quote.id} 标签删除成功，现有标签: {updated_tags}",
+                f"语录 ID: {quote.id} 手动标签删除成功，现有标签: {updated_tags}",
                 "群聊语录",
             )
-            return True
+            return updated_tags
         except Exception as e:
             logger.error(
-                f"删除语录标签失败 - 语录 ID: {quote.id}, 错误: {e}", "群聊语录", e=e
+                f"删除语录手动标签失败 - 语录 ID: {quote.id}, 错误: {e}",
+                "群聊语录",
+                e=e,
             )
-            return False
+            return cls.get_manual_tags(quote)
 
     @classmethod
     def _select_and_record_quote(cls, memory_key: str, quotes: list[Quote]) -> Quote:
