@@ -68,8 +68,8 @@ def get_lunar_festivals_dates(today: date):
     }
 
 
-def get_festivals_dates() -> list[tuple[int, str]]:
-    today = date.today()
+def get_festivals_dates(today: date | None = None) -> list[tuple[int, str]]:
+    today = today or date.today()
     lunar_festivals_dates = get_lunar_festivals_dates(today)
     # 添加清明节到节日字典中
     lunar_festivals_dates["清明节"] = find_tomb_sweeping_day(today.year)

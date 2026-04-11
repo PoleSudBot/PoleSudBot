@@ -1,7 +1,7 @@
 import asyncio
-import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 from zhdate import ZhDate
 
@@ -10,7 +10,7 @@ from zhenxun.configs.config import Config
 from zhenxun.services.log import logger
 from zhenxun.utils.http_utils import AsyncHttpx
 
-from .config import REPORT_PATH, Anime, Hitokoto, SixData
+from .config import REPORT_PATH, Anime, Hitokoto, SixData, get_fetch_time
 from .date import get_festivals_dates
 
 
@@ -33,43 +33,126 @@ class Report:
     }
 
     @classmethod
-    async def get_report_image(cls) -> Path:
-        """获取数据"""
-        now = datetime.now()
-        file = REPORT_PATH / f"{now.date()}.png"
-        if file.exists():
-            return file
-        for f in REPORT_PATH.iterdir():
-            f.unlink()
-        zhdata = ZhDate.from_datetime(now)
+    def _now(cls) -> datetime:
+        return datetime.now()
+
+    @classmethod
+    def _get_report_file(cls, report_date: date) -> Path:
+        return REPORT_PATH / f"{report_date}.png"
+
+    @classmethod
+    def _get_fetch_anchor(cls, now: datetime) -> datetime:
+        hour, minute = get_fetch_time()
+        return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    @classmethod
+    def _get_primary_report_date(cls, now: datetime) -> date:
+        if now < cls._get_fetch_anchor(now):
+            return now.date() - timedelta(days=1)
+        return now.date()
+
+    @classmethod
+    def _build_report_datetime(cls, now: datetime, report_date: date) -> datetime:
+        return datetime.combine(report_date, now.time())
+
+    @classmethod
+    def _select_report_date(
+        cls, now: datetime, *, force_refresh: bool = False
+    ) -> date:
+        report_date = cls._get_primary_report_date(now)
+        if now >= cls._get_fetch_anchor(now):
+            return report_date
+
+        report_file = cls._get_report_file(report_date)
+        if cls._is_cache_fresh(
+            report_file, report_date, now, force_refresh=force_refresh
+        ):
+            return report_date
+        return now.date()
+
+    @classmethod
+    def _is_cache_fresh(
+        cls,
+        file: Path,
+        report_date: date,
+        now: datetime,
+        *,
+        force_refresh: bool = False,
+    ) -> bool:
+        if force_refresh or not file.exists():
+            return False
+
+        if report_date != now.date():
+            return True
+
+        fetch_anchor = cls._get_fetch_anchor(now)
+        if now < fetch_anchor:
+            return True
+
+        file_mtime = datetime.fromtimestamp(file.stat().st_mtime)
+        return file_mtime >= fetch_anchor
+
+    @classmethod
+    def _clear_report_cache(cls):
+        for file in REPORT_PATH.iterdir():
+            if file.is_file():
+                file.unlink()
+
+    @classmethod
+    def get_visible_report_date(cls, now: datetime | None = None) -> date:
+        current = now or cls._now()
+        return cls._select_report_date(current)
+
+    @classmethod
+    def get_visible_report_file(cls, now: datetime | None = None) -> Path:
+        report_date = cls.get_visible_report_date(now)
+        return cls._get_report_file(report_date)
+
+    @classmethod
+    async def _render_report_image(cls, report_time: datetime) -> bytes:
+        zhdata = ZhDate.from_datetime(report_time)
         hitokoto, bili, six, it, anime = await asyncio.gather(
             *[
                 cls.get_hitokoto(),
                 cls.get_bili(),
                 cls.get_six(),
                 cls.get_it(),
-                cls.get_anime(),
+                cls.get_anime(report_time),
             ]
         )
         data = {
-            "data_festival": get_festivals_dates(),
+            "data_festival": get_festivals_dates(report_time.date()),
             "data_hitokoto": hitokoto,
             "data_bili": bili,
             "data_six": six,
             "data_anime": anime,
             "data_it": it,
-            "week": cls.week[now.weekday()],
-            "date": now.date(),
+            "week": cls.week[report_time.weekday()],
+            "date": report_time.date(),
             "zh_date": zhdata.chinese().split()[0][5:],
             "full_show": Config.get_config("mahiro_report", "full_show"),
         }
         template_path = Path(__file__).parent / "mahiro_report" / "main.html"
         component = ui.template(template_path, data=data)
-        image_bytes = await ui.render(
+        return await ui.render(
             component, viewport={"width": 578, "height": 1885}, wait=2
         )
-        with open(file, "wb") as f:
-            f.write(image_bytes)
+
+    @classmethod
+    async def get_report_image(cls, force_refresh: bool = False) -> Path:
+        """获取数据"""
+        now = cls._now()
+        report_date = cls._select_report_date(now, force_refresh=force_refresh)
+        file = cls._get_report_file(report_date)
+        if cls._is_cache_fresh(
+            file, report_date, now, force_refresh=force_refresh
+        ):
+            return file
+
+        cls._clear_report_cache()
+        report_time = cls._build_report_datetime(now, report_date)
+        image_bytes = await cls._render_report_image(report_time)
+        file.write_bytes(image_bytes)
         return file
 
     @classmethod
@@ -141,12 +224,15 @@ class Report:
             return ["获取IT资讯失败 QAQ"]
 
     @classmethod
-    async def get_anime(cls) -> list[tuple[str, str]]:
+    async def get_anime(
+        cls, report_time: datetime | None = None
+    ) -> list[tuple[str, str]]:
         """获取今日新番"""
         try:
             res = await AsyncHttpx.get(cls.anime_url)
             data_list = []
-            week = datetime.now().weekday()
+            effective_time = report_time or cls._now()
+            week = effective_time.weekday()
             try:
                 anime = Anime(**res.json()[week])
             except IndexError:

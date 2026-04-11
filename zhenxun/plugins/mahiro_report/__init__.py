@@ -15,8 +15,16 @@ from zhenxun.utils.common_utils import CommonUtils
 from zhenxun.utils.message import MessageUtils
 from zhenxun.utils.platform import broadcast_group
 
-from .config import REPORT_PATH
+from .config import (
+    DEFAULT_FETCH_TIME,
+    DEFAULT_SEND_TIME,
+    get_fetch_time,
+    get_send_time,
+)
 from .data_source import Report
+
+FETCH_HOUR, FETCH_MINUTE = get_fetch_time()
+SEND_HOUR, SEND_MINUTE = get_send_time((FETCH_HOUR, FETCH_MINUTE))
 
 __plugin_meta__ = PluginMetadata(
     name="真寻日报",
@@ -45,6 +53,20 @@ __plugin_meta__ = PluginMetadata(
                 default_value=False,
                 type=bool,
             ),
+            RegisterConfig(
+                key="FETCH_TIME",
+                value=DEFAULT_FETCH_TIME,
+                help="日报抓取时间，格式 HH:MM",
+                default_value=DEFAULT_FETCH_TIME,
+                type=str,
+            ),
+            RegisterConfig(
+                key="SEND_TIME",
+                value=DEFAULT_SEND_TIME,
+                help="日报定时发送时间，格式 HH:MM",
+                default_value=DEFAULT_SEND_TIME,
+                type=str,
+            ),
         ],
     ).to_dict(),
 )
@@ -59,7 +81,7 @@ _reset_matcher = on_alconna(
 
 @_reset_matcher.handle()
 async def _(session: EventSession, arparma: Arparma):
-    file = REPORT_PATH / f"{datetime.now().date()}.png"
+    file = Report.get_visible_report_file(datetime.now())
     if file.exists():
         file.unlink()
         logger.info("重置真寻日报", arparma.header_result, session=session)
@@ -85,13 +107,13 @@ async def check(bot: Bot, group_id: str) -> bool:
 
 @scheduler.scheduled_job(
     "cron",
-    hour=0,
-    minute=1,
+    hour=FETCH_HOUR,
+    minute=FETCH_MINUTE,
 )
-async def _():
+async def _generate_daily_report():
     for _ in range(3):
         try:
-            await Report.get_report_image()
+            await Report.get_report_image(force_refresh=True)
             logger.info("自动生成日报成功...")
             break
         except TimeoutError:
@@ -100,11 +122,16 @@ async def _():
 
 @scheduler.scheduled_job(
     "cron",
-    hour=9,
-    minute=1,
+    hour=SEND_HOUR,
+    minute=SEND_MINUTE,
 )
-async def _():
-    file = await Report.get_report_image()
+async def _send_daily_report():
+    try:
+        file = await Report.get_report_image()
+    except TimeoutError:
+        logger.warning("每日真寻日报发送失败，日报生成超时...")
+        return
+
     message = MessageUtils.build_message(file)
     await broadcast_group(message, log_cmd="真寻日报", check_func=check)
     logger.info("每日真寻日报发送...")
