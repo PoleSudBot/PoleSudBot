@@ -33,17 +33,17 @@ async def _rocomuid_rule(event: Event, state: T_State) -> bool:
 
 
 __plugin_meta__ = PluginMetadata(
-    name="RocomUID",
-    description="通过外部侧车接入 RocomUID 指令族，并纳入真寻插件管理体系。",
+    name="洛克助手",
+    description="洛克王国查询与助手功能，支持图鉴、查蛋、个人信息等常用指令。",
     usage="""
-## 🎮 RocomUID
+## 🎮 洛克助手
 
-- **rc帮助** - 查看 RocomUID 原生帮助列表
+- **rc帮助** - 查看完整指令与使用说明
 - **rc图鉴 [名称]** - 查询精灵图鉴
 - **rc查蛋 [参数]** - 查询精灵蛋信息
 - **rcuid / rc我的信息** - 查询个人信息
 
-完整功能与详细参数请直接发送 `rc帮助` 查看 RocomUID 原生帮助。
+更多功能与详细参数请直接发送 `rc帮助` 查看插件帮助。
 """.strip(),
     extra=PluginExtraData(
         author="jiluoQAQ",
@@ -53,7 +53,7 @@ __plugin_meta__ = PluginMetadata(
         setting=PluginSetting(default_status=True),
         configs=REGISTER_CONFIGS,
         commands=[
-            Command(command="rc帮助", description="查看 RocomUID 原生帮助"),
+            Command(command="rc帮助", description="查看洛克助手帮助"),
             Command(command="rc图鉴 [名称]", description="查询精灵图鉴"),
             Command(command="rc查蛋 [参数]", description="查询精灵蛋信息"),
             Command(command="rcuid / rc我的信息", description="查询个人信息"),
@@ -79,30 +79,30 @@ async def _(
     if not isinstance(bot, OneBotV11Bot) or not isinstance(
         event, OneBotV11MessageEvent
     ):
-        await _finish_local_error(matcher, "RocomUID 当前仅支持 OneBot V11 协议。")
+        await _finish_local_error(matcher, "洛克助手当前仅支持 OneBot V11 协议。")
 
     try:
         responses = await external_bot_bridge.send_request(bot, event)
     except BridgeDependencyUnavailable:
         await _finish_local_error(
             matcher,
-            "RocomUID 侧车依赖不可用，"
+            "洛克助手依赖暂不可用，"
             "请先执行初始化命令准备 sidecar/.runtime 运行目录。",
         )
     except BridgeConnectionTimeout:
         await _finish_local_error(
             matcher,
-            "RocomUID 外部 sidecar 未连接，请先启动侧车服务后再试。",
+            "洛克助手暂时不可用，请先启动相关服务后再试。",
         )
     except BridgeResponseTimeout:
         await _finish_local_error(
             matcher,
-            "RocomUID 暂时没有响应，请稍后再试。",
+            "洛克助手暂时没有响应，请稍后再试。",
         )
     except BridgeUnsupportedEvent:
         await _finish_local_error(
             matcher,
-            "当前消息暂不支持转发到 RocomUID。",
+            "当前消息暂不支持发送到洛克助手。",
         )
 
     try:
@@ -110,10 +110,10 @@ async def _(
     except BridgeUnsupportedEvent:
         await _finish_local_error(
             matcher,
-            "RocomUID 返回了当前协议暂不支持的响应内容。",
+            "洛克助手返回了当前协议暂不支持的响应内容。",
         )
     if sent_count <= 0:
         await _finish_local_error(
             matcher,
-            "RocomUID 没有返回可发送内容，请直接发送 `rc帮助` 再试一次。",
+            "洛克助手没有返回可发送内容，请直接发送 `rc帮助` 再试一次。",
         )

@@ -33,16 +33,16 @@ async def _xutheringwavesuid_rule(event: Event, state: T_State) -> bool:
 
 
 __plugin_meta__ = PluginMetadata(
-    name="XutheringWavesUID",
-    description="通过外部侧车接入 XutheringWavesUID 指令族，并纳入真寻插件管理体系。",
+    name="鸣潮查询",
+    description="鸣潮信息查询与分析功能，支持常用查询、评分分析与资源管理指令。",
     usage="""
-## 🌊 XutheringWavesUID
+## 🌊 鸣潮查询
 
-- **ww帮助** - 查看 XutheringWavesUID 原生帮助列表
+- **ww帮助** - 查看完整指令与使用说明
 - **ww分析帮助** - 查看分析与评分相关帮助
 - **ww下载全部资源** - 下载或刷新插件资源
 
-完整功能与详细参数请直接发送 `ww帮助` 查看 XutheringWavesUID 原生帮助。
+更多功能与详细参数请直接发送 `ww帮助` 查看插件帮助。
 """.strip(),
     extra=PluginExtraData(
         author="tyql688 / Loping151",
@@ -52,7 +52,7 @@ __plugin_meta__ = PluginMetadata(
         setting=PluginSetting(default_status=True),
         configs=REGISTER_CONFIGS,
         commands=[
-            Command(command="ww帮助", description="查看 XutheringWavesUID 原生帮助"),
+            Command(command="ww帮助", description="查看鸣潮查询帮助"),
             Command(command="ww分析帮助", description="查看分析与评分相关帮助"),
             Command(command="ww下载全部资源", description="下载或刷新插件资源"),
         ],
@@ -77,32 +77,30 @@ async def _(
     if not isinstance(bot, OneBotV11Bot) or not isinstance(
         event, OneBotV11MessageEvent
     ):
-        await _finish_local_error(
-            matcher, "XutheringWavesUID 当前仅支持 OneBot V11 协议。"
-        )
+        await _finish_local_error(matcher, "鸣潮查询当前仅支持 OneBot V11 协议。")
 
     try:
         responses = await external_bot_bridge.send_request(bot, event)
     except BridgeDependencyUnavailable:
         await _finish_local_error(
             matcher,
-            "XutheringWavesUID 侧车依赖不可用，"
+            "鸣潮查询依赖暂不可用，"
             "请先执行初始化命令准备 sidecar/.runtime 运行目录。",
         )
     except BridgeConnectionTimeout:
         await _finish_local_error(
             matcher,
-            "XutheringWavesUID 外部 sidecar 未连接，请先启动侧车服务后再试。",
+            "鸣潮查询暂时不可用，请先启动相关服务后再试。",
         )
     except BridgeResponseTimeout:
         await _finish_local_error(
             matcher,
-            "XutheringWavesUID 暂时没有响应，请稍后再试。",
+            "鸣潮查询暂时没有响应，请稍后再试。",
         )
     except BridgeUnsupportedEvent:
         await _finish_local_error(
             matcher,
-            "当前消息暂不支持转发到 XutheringWavesUID。",
+            "当前消息暂不支持发送到鸣潮查询。",
         )
 
     try:
@@ -110,10 +108,10 @@ async def _(
     except BridgeUnsupportedEvent:
         await _finish_local_error(
             matcher,
-            "XutheringWavesUID 返回了当前协议暂不支持的响应内容。",
+            "鸣潮查询返回了当前协议暂不支持的响应内容。",
         )
     if sent_count <= 0:
         await _finish_local_error(
             matcher,
-            "XutheringWavesUID 没有返回可发送内容，请直接发送 `ww帮助` 再试一次。",
+            "鸣潮查询没有返回可发送内容，请直接发送 `ww帮助` 再试一次。",
         )
