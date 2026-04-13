@@ -39,6 +39,7 @@ class BridgeUnsupportedEvent(ExternalBotBridgeError):
 @dataclass(frozen=True)
 class _BridgeLibrary:
     gs_client_cls: type[Any]
+    message_cls: type[Any]
     message_receive_cls: type[Any]
     message_send_cls: type[Any]
     protocol_cls: type[Any]
@@ -99,6 +100,7 @@ def _load_bridge_library() -> _BridgeLibrary:
 
     _LIBRARY_CACHE = _BridgeLibrary(
         gs_client_cls=sayu_protocol_module.GsClient,
+        message_cls=sayu_protocol_module.Message,
         message_receive_cls=sayu_protocol_module.MessageReceive,
         message_send_cls=sayu_protocol_module.MessageSend,
         protocol_cls=protocol_module.OneBotV11Protocol,
@@ -126,6 +128,47 @@ class ExternalBotBridge:
     def _is_connected(self) -> bool:
         ws = getattr(self._client, "_client", None)
         return bool(ws and getattr(ws, "open", False))
+
+    @staticmethod
+    def _normalize_message_segment(
+        segment: Any, message_cls: type[Any]
+    ) -> Any:
+        # GsCore 经 JSON 往返后会把嵌套消息段退化成 dict；
+        # 回放协议层仍要求拿到 Message 对象，否则 node 内层会在 send_message 阶段崩溃。
+        if isinstance(segment, dict):
+            segment_type = segment.get("type")
+            segment_data = segment.get("data")
+        else:
+            segment_type = getattr(segment, "type", None)
+            segment_data = getattr(segment, "data", None)
+
+        if not segment_type:
+            raise BridgeUnsupportedEvent("侧车返回了缺少 type 的消息段")
+
+        if segment_type == "node":
+            if segment_data is None:
+                segment_data = []
+            # node 段内部必须继续递归归一化，否则只修复顶层仍会在内层消息回放时触发属性错误。
+            if not isinstance(segment_data, list):
+                raise BridgeUnsupportedEvent("侧车返回的 node 消息结构无效")
+            segment_data = [
+                ExternalBotBridge._normalize_message_segment(node, message_cls)
+                for node in segment_data
+            ]
+
+        return message_cls(type=segment_type, data=segment_data)
+
+    @classmethod
+    def _normalize_response_content(
+        cls, content: Any, message_cls: type[Any]
+    ) -> list[Any]:
+        # 桥接层只接受协议约定的消息列表结构，尽早在这里报错，避免把半损坏数据送进协议发送器。
+        if not isinstance(content, list):
+            raise BridgeUnsupportedEvent("侧车返回的消息内容结构无效")
+        return [
+            cls._normalize_message_segment(segment, message_cls)
+            for segment in content
+        ]
 
     async def _handle_response(self, message_send: Any) -> None:
         if not getattr(message_send, "msg_id", ""):
@@ -253,7 +296,12 @@ class ExternalBotBridge:
             target_type = getattr(response, "target_type", None)
             if not target_id or not target_type:
                 continue
-            await protocol.send_message(response.content, target_id, target_type)
+            normalized_content = self._normalize_response_content(
+                response.content, library.message_cls
+            )
+            await protocol.send_message(
+                normalized_content, target_id, target_type
+            )
             sent_count += 1
         return sent_count
 

@@ -17,6 +17,7 @@ from zhenxun.services.external_bot_bridge import (
     BridgeUnsupportedEvent,
     external_bot_bridge,
 )
+from zhenxun.services.log import logger
 from zhenxun.services.external_bot_bridge_config import REGISTER_CONFIGS
 from zhenxun.utils.enum import PluginType
 from zhenxun.utils.message import MessageUtils
@@ -68,6 +69,15 @@ async def _finish_local_error(matcher: Matcher, message: str) -> None:
     await MessageUtils.build_message(message).finish(reply_to=True)
 
 
+def _mark_silent_no_response(matcher: Matcher) -> None:
+    # ww 前缀当前仍是宽匹配；上游没回包时静默结束，可以避免误触发后给用户制造无意义报错。
+    matcher.state["_statistics_skip"] = True
+    logger.debug(
+        "鸣潮查询上游无响应，已静默忽略",
+        "XutheringWavesUID",
+    )
+
+
 @matcher.handle()
 async def _(
     bot: OneBotV11Bot,
@@ -93,10 +103,8 @@ async def _(
             "鸣潮查询暂时不可用，请先启动相关服务后再试。",
         )
     except BridgeResponseTimeout:
-        await _finish_local_error(
-            matcher,
-            "鸣潮查询暂时没有响应，请稍后再试。",
-        )
+        _mark_silent_no_response(matcher)
+        return
     except BridgeUnsupportedEvent:
         await _finish_local_error(
             matcher,
@@ -111,7 +119,5 @@ async def _(
             "鸣潮查询返回了当前协议暂不支持的响应内容。",
         )
     if sent_count <= 0:
-        await _finish_local_error(
-            matcher,
-            "鸣潮查询没有返回可发送内容，请直接发送 `ww帮助` 再试一次。",
-        )
+        _mark_silent_no_response(matcher)
+        return
