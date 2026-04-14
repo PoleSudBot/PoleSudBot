@@ -12,6 +12,7 @@ import httpx
 
 nonebot.init()
 
+from zhenxun.utils.exception import AllURIsFailedError
 from zhenxun.plugins.moesekai.providers.aliases import AliasProvider
 from zhenxun.plugins.moesekai.providers.assets import AssetProvider
 from zhenxun.plugins.moesekai.providers.asset_cache import AssetCacheProvider
@@ -512,28 +513,14 @@ def test_asset_cache_provider_reuses_in_memory_miss_state(
 async def test_asset_fetcher_falls_back_between_urls(monkeypatch: pytest.MonkeyPatch):
     calls: list[str] = []
 
-    class FakeClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-    async def fake_fetch_single_content(_client, url: str):
+    async def fake_get_content(url: str, **_kwargs):
         calls.append(url)
         if "assets-direct" in url:
-            raise httpx.ReadTimeout("primary failed")
+            raise AllURIsFailedError([url], [httpx.ReadTimeout("primary failed")])
         return b"image-bytes"
 
-    asset_fetcher_module = importlib.import_module(
-        "zhenxun.plugins.moesekai.providers.asset_fetcher"
-    )
-    monkeypatch.setattr(
-        asset_fetcher_module.httpx,
-        "AsyncClient",
-        lambda **_kwargs: FakeClient(),
-    )
-    monkeypatch.setattr(asset_fetcher, "_fetch_single_content", fake_fetch_single_content)
+    asset_fetcher_module = importlib.import_module("zhenxun.plugins.moesekai.providers.asset_fetcher")
+    monkeypatch.setattr(asset_fetcher_module.AsyncHttpx, "get_content", fake_get_content)
 
     result = await asset_fetcher.fetch_first_content(
         [
@@ -548,6 +535,33 @@ async def test_asset_fetcher_falls_back_between_urls(monkeypatch: pytest.MonkeyP
         "https://assets-direct.unipjsk.com/ondemand/event_story/event_wavering_2026/screen_image/banner_event_story.png",
         "https://sekai-assets.haruki.seiunx.com/jp-assets/ondemand/event_story/event_wavering_2026/screen_image/banner_event_story.png",
     ]
+
+
+@pytest.mark.asyncio
+async def test_asset_fetcher_unwraps_all_uris_failed_to_httpx_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    target_url = "https://assets-direct.unipjsk.com/example.png"
+
+    async def fake_get_content(url: str, **_kwargs):
+        raise AllURIsFailedError(
+            [url],
+            [
+                httpx.HTTPStatusError(
+                    "404",
+                    request=httpx.Request("GET", url),
+                    response=httpx.Response(404, request=httpx.Request("GET", url)),
+                )
+            ],
+        )
+
+    asset_fetcher_module = importlib.import_module("zhenxun.plugins.moesekai.providers.asset_fetcher")
+    monkeypatch.setattr(asset_fetcher_module.AsyncHttpx, "get_content", fake_get_content)
+
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        await asset_fetcher.fetch_content(target_url)
+
+    assert exc_info.value.response.status_code == 404
 
 
 @pytest.mark.asyncio

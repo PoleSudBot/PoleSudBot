@@ -206,21 +206,6 @@ async def test_fetch_selected_revision_uses_github_token(
     requests: list[dict[str, str]] = []
     updated_states: list[dict[str, str | None]] = []
 
-    class FakeClient:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def get(self, url: str, headers: dict[str, str]):
-            requests.append({"url": url, **headers})
-            return httpx.Response(
-                200,
-                request=httpx.Request("GET", url),
-                json={"sha": "new-sha"},
-            )
-
     async def fake_get_probe_source_state(_cls, _name: str):
         return {"last_revision": "old-sha"}
 
@@ -228,8 +213,24 @@ async def test_fetch_selected_revision_uses_github_token(
         updated_states.append(updates)
         return updates
 
+    async def fake_get(url: str, **kwargs):
+        requests.append(
+            {
+                "url": url,
+                "Authorization": kwargs["headers"]["Authorization"],
+                "Accept": kwargs["headers"]["Accept"],
+                "X-GitHub-Api-Version": kwargs["headers"]["X-GitHub-Api-Version"],
+                "accept_status_codes": str(kwargs.get("accept_status_codes")),
+            }
+        )
+        return httpx.Response(
+            200,
+            request=httpx.Request("GET", url),
+            json={"sha": "new-sha"},
+        )
+
     monkeypatch.setattr(masterdata_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(masterdata_module.httpx, "AsyncClient", lambda **_kwargs: FakeClient())
+    monkeypatch.setattr(masterdata_module.AsyncHttpx, "get", fake_get)
     monkeypatch.setattr(
         MasterDataService,
         "_get_probe_source_state",
@@ -248,7 +249,131 @@ async def test_fetch_selected_revision_uses_github_token(
     assert requests[0]["Authorization"] == "Bearer ghp_test_token"
     assert requests[0]["Accept"] == "application/vnd.github+json"
     assert requests[0]["X-GitHub-Api-Version"] == "2022-11-28"
+    assert requests[0]["accept_status_codes"] == "(403, 429)"
     assert updated_states
+
+
+@pytest.mark.asyncio
+async def test_fetch_selected_revision_falls_back_on_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source = MasterSourceConfig(
+        name="8823-jp",
+        region="jp",
+        owner="kotori8823",
+        repo="sekai-master-db",
+        branch="master",
+        version_path="versions.json",
+        version_field="data_version",
+        datasets={"events": "events.json"},
+    )
+
+    settings = SimpleNamespace(github_token="")
+    updated = False
+
+    async def fake_get_probe_source_state(_cls, _name: str):
+        return {"last_revision": "old-sha"}
+
+    async def fake_update_probe_source_state(_cls, _name: str, **_updates):
+        nonlocal updated
+        updated = True
+        return {}
+
+    async def fake_get(url: str, **_kwargs):
+        return httpx.Response(
+            429,
+            request=httpx.Request("GET", url),
+            text="secondary rate limit",
+        )
+
+    monkeypatch.setattr(masterdata_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(masterdata_module.AsyncHttpx, "get", fake_get)
+    monkeypatch.setattr(
+        MasterDataService,
+        "_get_probe_source_state",
+        classmethod(fake_get_probe_source_state),
+    )
+    monkeypatch.setattr(
+        MasterDataService,
+        "_update_probe_source_state",
+        classmethod(fake_update_probe_source_state),
+    )
+
+    revision = await MasterDataService._fetch_selected_revision(source)
+
+    assert revision == "old-sha"
+    assert updated is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_version_reports_context_for_non_json_body(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source = MasterSourceConfig(
+        name="8823-jp",
+        region="jp",
+        owner="kotori8823",
+        repo="sekai-master-db",
+        branch="master",
+        version_path="versions.json",
+        version_field="data_version",
+        datasets={"events": "events.json"},
+    )
+
+    async def fake_get(url: str, **_kwargs):
+        return httpx.Response(
+            200,
+            request=httpx.Request("GET", url),
+            text="<html>bad gateway</html>",
+            headers={"content-type": "text/html; charset=utf-8"},
+        )
+
+    monkeypatch.setattr(masterdata_module.AsyncHttpx, "get", fake_get)
+
+    with pytest.raises(TypeError) as exc_info:
+        await MasterDataService._fetch_version(source)
+
+    message = str(exc_info.value)
+    assert "version 接口返回的不是有效 JSON 对象" in message
+    assert "source=8823-jp" in message
+    assert "status=200" in message
+    assert "content-type=text/html; charset=utf-8" in message
+    assert "<html>bad gateway</html>" in message
+
+
+@pytest.mark.asyncio
+async def test_fetch_version_reports_context_for_non_object_json(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source = MasterSourceConfig(
+        name="haruki-jp",
+        region="jp",
+        owner="Team-Haruki",
+        repo="haruki-sekai-master",
+        branch="main",
+        version_path="versions/current_version.json",
+        version_field="dataVersion",
+        datasets={"events": "master/events.json"},
+    )
+
+    async def fake_get(url: str, **_kwargs):
+        return httpx.Response(
+            200,
+            request=httpx.Request("GET", url),
+            json=["not", "an", "object"],
+        )
+
+    monkeypatch.setattr(masterdata_module.AsyncHttpx, "get", fake_get)
+
+    with pytest.raises(TypeError) as exc_info:
+        await MasterDataService._fetch_version(source)
+
+    message = str(exc_info.value)
+    assert "version 接口返回的不是 JSON 对象" in message
+    assert "source=haruki-jp" in message
+    assert "status=200" in message
+    assert "content-type=application/json" in message
+    assert 'body=["not","an","object"]' in message
 
 
 @pytest.mark.asyncio

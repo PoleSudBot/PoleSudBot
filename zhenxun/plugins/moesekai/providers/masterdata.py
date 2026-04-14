@@ -239,16 +239,72 @@ class MasterDataProvider:
         new_map = cls._dataset_ids(new_payload)
         return [item for key, item in new_map.items() if key not in old_ids]
 
+    @staticmethod
+    def _response_excerpt(response: httpx.Response, *, limit: int = 240) -> str:
+        text = response.text.replace("\n", " ").replace("\r", " ").strip()
+        if not text:
+            return "<empty>"
+        if len(text) > limit:
+            return f"{text[:limit]}...(truncated)"
+        return text
+
+    @classmethod
+    def _response_debug_context(
+        cls,
+        response: httpx.Response,
+        *,
+        source: MasterSourceConfig,
+        kind: Literal["version", "revision"],
+    ) -> str:
+        content_type = response.headers.get("content-type", "<missing>")
+        return (
+            f"{kind} source={source.name} "
+            f"url={response.request.url!s} "
+            f"status={response.status_code} "
+            f"content-type={content_type} "
+            f"body={cls._response_excerpt(response)}"
+        )
+
+    @classmethod
+    def _parse_json_object_response(
+        cls,
+        response: httpx.Response,
+        *,
+        source: MasterSourceConfig,
+        kind: Literal["version", "revision"],
+    ) -> dict[str, Any]:
+        context = cls._response_debug_context(response, source=source, kind=kind)
+        try:
+            payload = response.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise TypeError(f"{kind} 接口返回的不是有效 JSON 对象: {context}") from exc
+        if not isinstance(payload, dict):
+            raise TypeError(f"{kind} 接口返回的不是 JSON 对象: {context}")
+        return payload
+
     @classmethod
     async def _fetch_version(cls, source: MasterSourceConfig) -> str | None:
         if not source.version_path:
             return None
-        payload = await AsyncHttpx.get_json(source.version_url, raise_on_failure=True)
-        if not isinstance(payload, dict):
-            raise TypeError("版本接口返回的不是 JSON 对象")
+        response = await AsyncHttpx.get(
+            source.version_url,
+            timeout=20,
+        )
+        payload = cls._parse_json_object_response(
+            response,
+            source=source,
+            kind="version",
+        )
         version = payload.get(source.version_field)
         if version is None:
-            raise ValueError(f"版本字段 {source.version_field} 不存在")
+            context = cls._response_debug_context(
+                response,
+                source=source,
+                kind="version",
+            )
+            raise ValueError(
+                f"版本字段 {source.version_field} 不存在: {context}"
+            )
         return str(version)
 
     @staticmethod
@@ -391,11 +447,12 @@ class MasterDataProvider:
         if not source.revision_api_url:
             return previous_revision
         try:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
-                response = await client.get(
-                    source.revision_api_url,
-                    headers=cls._build_github_headers(),
-                )
+            response = await AsyncHttpx.get(
+                source.revision_api_url,
+                headers=cls._build_github_headers(),
+                timeout=20,
+                accept_status_codes=(403, 429),
+            )
             if cls._is_rate_limited(response):
                 logger.warning(
                     f"MoeSekai GitHub revision 获取触发限流，跳过 revision 刷新: {source.name}",
@@ -403,8 +460,20 @@ class MasterDataProvider:
                 )
                 return previous_revision
             response.raise_for_status()
-            payload = response.json()
-            revision = str(payload["sha"]) if isinstance(payload, dict) and payload.get("sha") else None
+            payload = cls._parse_json_object_response(
+                response,
+                source=source,
+                kind="revision",
+            )
+            revision_value = payload.get("sha")
+            if revision_value is None:
+                context = cls._response_debug_context(
+                    response,
+                    source=source,
+                    kind="revision",
+                )
+                raise ValueError(f"revision 接口缺少 sha 字段: {context}")
+            revision = str(revision_value)
             await cls._update_probe_source_state(
                 source.name,
                 last_revision=revision,
