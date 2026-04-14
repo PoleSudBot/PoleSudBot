@@ -54,6 +54,27 @@ class SidecarPluginSpec:
     playwright_browsers: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class RepoSyncResult:
+    label: str
+    status: str
+    stage: str
+    head: str | None = None
+    error: str | None = None
+
+
+class RepoSyncFailure(CommandError):
+    """Adds stage metadata so prod-setup can summarize repo failures precisely."""
+
+    def __init__(self, label: str, stage: str, error: str | CommandError):
+        detail = str(error).strip()
+        result = error.result if isinstance(error, CommandError) else None
+        super().__init__(f"{label} 在 {stage} 失败：\n{detail}", result)
+        self.label = label
+        self.stage = stage
+        self.detail = detail
+
+
 def ensure_venv_exists() -> None:
     """Checks for a .venv directory and runs `uv venv` if not found."""
     venv_path = config.PROJECT_ROOT / ".venv"
@@ -87,6 +108,59 @@ def _read_plugin_urls() -> list[str]:
         for line in config.PLUGINS_LIST_FILE.read_text("utf-8").splitlines()
         if line.strip() and not line.startswith("#")
     ]
+
+
+def _capture_repo_head(local_path: Path) -> str | None:
+    if not (local_path / ".git").is_dir():
+        return None
+    try:
+        return git.get_head_commit(local_path)
+    except CommandError:
+        return None
+
+
+def _build_repo_sync_failure(
+    *,
+    label: str,
+    stage: str,
+    local_path: Path,
+    error: CommandError,
+) -> RepoSyncResult:
+    detail = str(error).strip()
+    if isinstance(error, RepoSyncFailure):
+        stage = error.stage
+        detail = error.detail
+
+    # 这里保留失败仓库当前 HEAD，避免一次失败就让后续部署完全丢失本地状态指纹。
+    head = _capture_repo_head(local_path)
+    summary = detail.splitlines()[0] if detail else "未知错误"
+    config.logger.error(f"  - ❌ {label} 在 {stage} 失败: {summary}")
+    return RepoSyncResult(
+        label=label,
+        status="failed",
+        stage=stage,
+        head=head,
+        error=detail,
+    )
+
+
+def _collect_repo_sync_failures(results: list[RepoSyncResult]) -> list[RepoSyncResult]:
+    return [result for result in results if result.status == "failed"]
+
+
+def _can_persist_repo_sync_state(results: list[RepoSyncResult]) -> bool:
+    # 只有每个仓库都还能解析出 HEAD 时才覆盖缓存状态，避免失败克隆把上次有效快照清掉。
+    return all(result.head for result in results)
+
+
+def _log_repo_sync_summary(results: list[RepoSyncResult]) -> None:
+    failures = _collect_repo_sync_failures(results)
+    config.logger.info("\n📋 Repository sync summary:")
+    config.logger.info(f"  - ✅ Success: {len(results) - len(failures)}")
+    config.logger.info(f"  - ❌ Failed: {len(failures)}")
+    for result in failures:
+        detail = result.error or "未知错误"
+        config.logger.error(f"  - {result.label} [{result.stage}]: {detail}")
 
 
 def _parse_sidecar_string_list_field(entry: Any, field_name: str) -> tuple[str, ...]:
@@ -183,18 +257,43 @@ def _get_origin_default_branch(cwd: Path) -> str:
     return "main"
 
 
-def _sync_repo_ref(local_path: Path, repo_ref: str | None, label: str) -> str:
+def _sync_repo_ref(
+    local_path: Path,
+    repo_ref: str | None,
+    label: str,
+    *,
+    check_tracked_clean: bool = True,
+) -> str:
     if not repo_ref:
         branch = _get_origin_default_branch(local_path)
-        return _update_existing_repo(local_path, branch, label)
+        return _update_existing_repo(
+            local_path,
+            branch,
+            label,
+            check_tracked_clean=check_tracked_clean,
+        )
 
-    process.git(["fetch", "origin", "--prune", "--tags"], local_path, quiet=True)
+    try:
+        process.git(["fetch", "origin", "--prune", "--tags"], local_path, quiet=True)
+    except CommandError as e:
+        raise RepoSyncFailure(label, "获取 origin tags", e) from e
     if git.remote_branch_exists(local_path, "origin", repo_ref):
-        return _update_existing_repo(local_path, repo_ref, label)
+        return _update_existing_repo(
+            local_path,
+            repo_ref,
+            label,
+            check_tracked_clean=check_tracked_clean,
+        )
 
     process.git(["fetch", "origin", repo_ref], local_path, check=False, quiet=True)
-    process.git(["checkout", "--detach", repo_ref], local_path)
-    return git.get_head_commit(local_path)
+    try:
+        process.git(["checkout", "--detach", repo_ref], local_path)
+    except CommandError as e:
+        raise RepoSyncFailure(label, f"切换到指定引用 {repo_ref}", e) from e
+    try:
+        return git.get_head_commit(local_path)
+    except CommandError as e:
+        raise RepoSyncFailure(label, "读取 HEAD 提交", e) from e
 
 
 def _sync_managed_repo_ref(
@@ -203,18 +302,40 @@ def _sync_managed_repo_ref(
     clone_url: str,
     repo_ref: str | None,
     label: str,
+    check_tracked_clean: bool = True,
 ) -> str:
     if local_path.exists():
         config.logger.info(f"  - Updating {label}: {local_path.name}")
         if not (local_path / ".git").is_dir():
-            raise CommandError(f"{label} 路径存在，但不是独立 Git 仓库：{local_path}")
-        _ensure_tracked_clean(local_path, label)
-        return _sync_repo_ref(local_path, repo_ref, label)
+            raise RepoSyncFailure(
+                label,
+                "检查仓库",
+                f"{label} 路径存在，但不是独立 Git 仓库：{local_path}",
+            )
+        if check_tracked_clean:
+            try:
+                _ensure_tracked_clean(local_path, label)
+            except CommandError as e:
+                raise RepoSyncFailure(label, "检查工作区", e) from e
+        return _sync_repo_ref(
+            local_path,
+            repo_ref,
+            label,
+            check_tracked_clean=check_tracked_clean,
+        )
 
     config.logger.info(f"  - Cloning {label}: {local_path.name}")
     local_path.parent.mkdir(parents=True, exist_ok=True)
-    process.git(["clone", clone_url, str(local_path)], config.PROJECT_ROOT)
-    return _sync_repo_ref(local_path, repo_ref, label)
+    try:
+        process.git(["clone", clone_url, str(local_path)], config.PROJECT_ROOT)
+    except CommandError as e:
+        raise RepoSyncFailure(label, "克隆仓库", e) from e
+    return _sync_repo_ref(
+        local_path,
+        repo_ref,
+        label,
+        check_tracked_clean=check_tracked_clean,
+    )
 
 
 def _sync_sidecar_plugin_repositories(
@@ -277,6 +398,88 @@ def _sync_sidecar_runtime() -> tuple[str, str, dict[str, str]]:
     sidecar_plugin_heads = _sync_sidecar_plugin_repositories(specs)
     _write_sidecar_dependency_manifest(specs)
     return bridge_vendor_head, sidecar_core_head, sidecar_plugin_heads
+
+
+def _sync_managed_repo_ref_with_report(
+    *,
+    local_path: Path,
+    clone_url: str,
+    repo_ref: str | None,
+    label: str,
+) -> RepoSyncResult:
+    try:
+        head = _sync_managed_repo_ref(
+            local_path=local_path,
+            clone_url=clone_url,
+            repo_ref=repo_ref,
+            label=label,
+            check_tracked_clean=False,
+        )
+        return RepoSyncResult(
+            label=label,
+            status="success",
+            stage="同步完成",
+            head=head,
+        )
+    except CommandError as e:
+        return _build_repo_sync_failure(
+            label=label,
+            stage="同步仓库",
+            local_path=local_path,
+            error=e,
+        )
+
+
+def _sync_sidecar_runtime_with_report() -> (
+    tuple[str, str, dict[str, str], list[RepoSyncResult]]
+):
+    config.SIDECAR_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+
+    results: list[RepoSyncResult] = []
+
+    config.logger.info("🔌 Preparing bridge vendor...")
+    bridge_result = _sync_managed_repo_ref_with_report(
+        local_path=config.BRIDGE_VENDOR_DIR,
+        clone_url=config.BRIDGE_VENDOR_REPO,
+        repo_ref=config.BRIDGE_VENDOR_REF or None,
+        label="桥接依赖 nonebot-plugin-genshinuid",
+    )
+    results.append(bridge_result)
+
+    config.logger.info("🛰️ Preparing sidecar core...")
+    sidecar_core_result = _sync_managed_repo_ref_with_report(
+        local_path=config.SIDECAR_CORE_DIR,
+        clone_url=config.SIDECAR_CORE_REPO,
+        repo_ref=config.SIDECAR_CORE_REF or None,
+        label="sidecar Core",
+    )
+    results.append(sidecar_core_result)
+
+    specs = _read_sidecar_plugin_specs()
+    if specs:
+        config.logger.info(f"🎮 Syncing {len(specs)} sidecar plugins...")
+
+    sidecar_plugin_heads: dict[str, str] = {}
+    plugin_dir = config.SIDECAR_CORE_DIR / "gsuid_core" / "plugins"
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    for spec in specs:
+        result = _sync_managed_repo_ref_with_report(
+            local_path=plugin_dir / spec.name,
+            clone_url=spec.repo,
+            repo_ref=spec.ref,
+            label=f"sidecar 插件 {spec.name}",
+        )
+        results.append(result)
+        if result.head:
+            sidecar_plugin_heads[spec.name] = result.head
+
+    _write_sidecar_dependency_manifest(specs)
+    return (
+        bridge_result.head or "",
+        sidecar_core_result.head or "",
+        sidecar_plugin_heads,
+        results,
+    )
 
 
 def _ensure_sidecar_env_file() -> None:
@@ -353,6 +556,30 @@ def _ensure_tracked_clean(
         _discard_tracked_paths(cwd, sorted(ignored_entries))
 
 
+def _discard_ignored_tracked_paths(
+    cwd: Path,
+    label: str,
+    *,
+    ignored_paths: set[str] | None = None,
+) -> None:
+    ignored_paths = ignored_paths or set()
+    if not ignored_paths:
+        return
+
+    ignored_entries = [
+        path for _, path in _parse_tracked_status(cwd) if path in ignored_paths
+    ]
+    if not ignored_entries:
+        return
+
+    ignored_list = ", ".join(sorted(ignored_entries))
+    config.logger.warning(
+        f"⚠️ {label} 检测到可自动忽略的部署产物改动：{ignored_list}。"
+        "将恢复到当前 HEAD 后继续更新。"
+    )
+    _discard_tracked_paths(cwd, sorted(ignored_entries))
+
+
 def _ensure_upstream_remote(cwd: Path, upstream_url: str | None) -> None:
     if not upstream_url:
         return
@@ -365,11 +592,18 @@ def _ensure_upstream_remote(cwd: Path, upstream_url: str | None) -> None:
 
 def _checkout_target_branch(cwd: Path, branch: str, label: str) -> None:
     if not git.remote_branch_exists(cwd, "origin", branch):
-        raise CommandError(f"{label} 的远程分支 origin/{branch} 不存在。")
-    if git.local_branch_exists(cwd, branch):
-        process.git(["checkout", branch], cwd)
-    else:
-        process.git(["checkout", "-b", branch, f"origin/{branch}"], cwd)
+        raise RepoSyncFailure(
+            label,
+            "校验目标分支",
+            f"{label} 的远程分支 origin/{branch} 不存在。",
+        )
+    try:
+        if git.local_branch_exists(cwd, branch):
+            process.git(["checkout", branch], cwd)
+        else:
+            process.git(["checkout", "-b", branch, f"origin/{branch}"], cwd)
+    except CommandError as e:
+        raise RepoSyncFailure(label, f"切换到分支 {branch}", e) from e
 
 
 def _update_existing_repo(
@@ -378,14 +612,36 @@ def _update_existing_repo(
     label: str,
     *,
     ignored_paths: set[str] | None = None,
+    check_tracked_clean: bool = True,
 ) -> str:
     if not (cwd / ".git").is_dir():
-        raise CommandError(f"{label} 路径存在，但不是独立 Git 仓库：{cwd}")
-    _ensure_tracked_clean(cwd, label, ignored_paths=ignored_paths)
-    process.git(["fetch", "origin", "--prune"], cwd, quiet=True)
+        raise RepoSyncFailure(
+            label,
+            "检查仓库",
+            f"{label} 路径存在，但不是独立 Git 仓库：{cwd}",
+        )
+    if check_tracked_clean:
+        try:
+            _ensure_tracked_clean(cwd, label, ignored_paths=ignored_paths)
+        except CommandError as e:
+            raise RepoSyncFailure(label, "检查工作区", e) from e
+    else:
+        # prod-setup 需要按仓库汇总失败原因，因此这里让 git 自己暴露真实冲突，
+        # 而不是在预检查阶段提前打断整批仓库同步。
+        _discard_ignored_tracked_paths(cwd, label, ignored_paths=ignored_paths)
+    try:
+        process.git(["fetch", "origin", "--prune"], cwd, quiet=True)
+    except CommandError as e:
+        raise RepoSyncFailure(label, "获取 origin 更新", e) from e
     _checkout_target_branch(cwd, branch, label)
-    process.git(["pull", "--ff-only", "origin", branch], cwd)
-    return git.get_head_commit(cwd)
+    try:
+        process.git(["pull", "--ff-only", "origin", branch], cwd)
+    except CommandError as e:
+        raise RepoSyncFailure(label, f"快进拉取 origin/{branch}", e) from e
+    try:
+        return git.get_head_commit(cwd)
+    except CommandError as e:
+        raise RepoSyncFailure(label, "读取 HEAD 提交", e) from e
 
 
 def _sync_managed_repo(
@@ -395,24 +651,77 @@ def _sync_managed_repo(
     branch: str,
     label: str,
     upstream_url: str | None = None,
+    check_tracked_clean: bool = True,
 ) -> str:
     if local_path.exists():
         config.logger.info(f"  - Updating {label}: {local_path.name}")
         _ensure_upstream_remote(local_path, upstream_url)
-        return _update_existing_repo(local_path, branch, label)
+        return _update_existing_repo(
+            local_path,
+            branch,
+            label,
+            check_tracked_clean=check_tracked_clean,
+        )
 
     config.logger.info(f"  - Cloning {label}: {local_path.name}")
     local_path.parent.mkdir(parents=True, exist_ok=True)
-    process.git(
-        ["clone", "--depth=1", "-b", branch, clone_url, str(local_path)],
-        config.PROJECT_ROOT,
-    )
+    try:
+        process.git(
+            ["clone", "--depth=1", "-b", branch, clone_url, str(local_path)],
+            config.PROJECT_ROOT,
+        )
+    except CommandError as e:
+        raise RepoSyncFailure(label, "克隆仓库", e) from e
     _ensure_upstream_remote(local_path, upstream_url)
-    return git.get_head_commit(local_path)
+    try:
+        return git.get_head_commit(local_path)
+    except CommandError as e:
+        raise RepoSyncFailure(label, "读取 HEAD 提交", e) from e
 
 
 def _sync_resources_repo() -> str:
     return _sync_managed_repo(
+        local_path=RESOURCES_DIR,
+        clone_url=config.RESOURCES_REPO,
+        branch=config.RESOURCES_BRANCH,
+        label="resources 仓库",
+    )
+
+
+def _sync_managed_repo_with_report(
+    *,
+    local_path: Path,
+    clone_url: str,
+    branch: str,
+    label: str,
+    upstream_url: str | None = None,
+) -> RepoSyncResult:
+    try:
+        head = _sync_managed_repo(
+            local_path=local_path,
+            clone_url=clone_url,
+            branch=branch,
+            label=label,
+            upstream_url=upstream_url,
+            check_tracked_clean=False,
+        )
+        return RepoSyncResult(
+            label=label,
+            status="success",
+            stage="同步完成",
+            head=head,
+        )
+    except CommandError as e:
+        return _build_repo_sync_failure(
+            label=label,
+            stage="同步仓库",
+            local_path=local_path,
+            error=e,
+        )
+
+
+def _sync_resources_repo_with_report() -> RepoSyncResult:
+    return _sync_managed_repo_with_report(
         local_path=RESOURCES_DIR,
         clone_url=config.RESOURCES_REPO,
         branch=config.RESOURCES_BRANCH,
@@ -438,6 +747,44 @@ def _sync_plugin_repositories(urls: list[str]) -> dict[str, str]:
             upstream_url=url,
         )
     return plugin_heads
+
+
+def _sync_plugin_repositories_with_report(
+    urls: list[str],
+) -> tuple[dict[str, str], list[RepoSyncResult]]:
+    config.PLUGINS_SRC_DIR.mkdir(parents=True, exist_ok=True)
+    plugin_heads: dict[str, str] = {}
+    results: list[RepoSyncResult] = []
+    for url in tqdm(urls, desc="Syncing plugins"):
+        repo_name_with_owner = git.get_repo_name_from_url(url)
+        if not repo_name_with_owner:
+            label = f"插件仓库 {url}"
+            result = RepoSyncResult(
+                label=label,
+                status="failed",
+                stage="解析 plugins.txt",
+                error=f"Invalid GitHub URL in plugins.txt: {url}",
+            )
+            config.logger.error(
+                f"  - ❌ {label} 在 解析 plugins.txt 失败: Invalid GitHub URL"
+            )
+            results.append(result)
+            continue
+
+        plugin_name = repo_name_with_owner.split("/")[-1]
+        clone_url = f"https://github.com/{config.YOUR_GITHUB_ORG}/{plugin_name}.git"
+        local_path = config.PLUGINS_SRC_DIR / plugin_name
+        result = _sync_managed_repo_with_report(
+            local_path=local_path,
+            clone_url=clone_url,
+            branch=config.PLUGIN_BRANCH,
+            label=f"插件仓库 {plugin_name}",
+            upstream_url=url,
+        )
+        results.append(result)
+        if result.head:
+            plugin_heads[plugin_name] = result.head
+    return plugin_heads, results
 
 
 def _file_sha256(path: Path) -> str:
@@ -987,38 +1334,55 @@ class ProdSetupCommand(CommandBase):
         config.logger.info(
             f"🧱 Preparing resources repository on '{config.RESOURCES_BRANCH}'..."
         )
-        resources_head = _sync_resources_repo()
+        resources_result = _sync_resources_repo_with_report()
 
         config.logger.info(
             f"🚀 Syncing {len(urls)} plugin repositories on '{config.PLUGIN_BRANCH}'..."
         )
-        plugin_heads = _sync_plugin_repositories(urls)
-        bridge_vendor_head, _, _ = _sync_sidecar_runtime()
+        plugin_heads, plugin_results = _sync_plugin_repositories_with_report(urls)
+        bridge_vendor_head, _, _, sidecar_results = _sync_sidecar_runtime_with_report()
 
-        lock_fingerprint, fingerprint_material = _build_lock_fingerprint(
-            plugin_heads=plugin_heads,
-            resources_head=resources_head,
-            bridge_vendor_head=bridge_vendor_head,
-        )
-        should_relock, reason = _should_regenerate_lock(lock_fingerprint)
+        sync_results = [resources_result, *plugin_results, *sidecar_results]
+        resources_head = resources_result.head or ""
+        repo_failures = _collect_repo_sync_failures(sync_results)
 
-        if should_relock:
-            config.logger.info(f"\n🔁 Regenerating '{config.LOCK_FILE.name}': {reason}")
-            process.uv_streamed(["lock"], config.PROJECT_ROOT)
-        else:
-            config.logger.info(f"\n✅ Reusing '{config.LOCK_FILE.name}': {reason}")
+        try:
+            lock_fingerprint, fingerprint_material = _build_lock_fingerprint(
+                plugin_heads=plugin_heads,
+                resources_head=resources_head,
+                bridge_vendor_head=bridge_vendor_head,
+            )
+            should_relock, reason = _should_regenerate_lock(lock_fingerprint)
 
-        sync_args = _build_prod_sync_args()
-        config.logger.info(f"🔧 Syncing environment with: uv {' '.join(sync_args)}")
-        process.uv_streamed(sync_args, config.PROJECT_ROOT)
+            if should_relock:
+                config.logger.info(
+                    f"\n🔁 Regenerating '{config.LOCK_FILE.name}': {reason}"
+                )
+                process.uv_streamed(["lock"], config.PROJECT_ROOT)
+            else:
+                config.logger.info(f"\n✅ Reusing '{config.LOCK_FILE.name}': {reason}")
 
-        _save_prod_setup_state(
-            lock_fingerprint=lock_fingerprint,
-            fingerprint_material=fingerprint_material,
-            plugin_heads=plugin_heads,
-            resources_head=resources_head,
-            bridge_vendor_head=bridge_vendor_head,
-        )
+            sync_args = _build_prod_sync_args()
+            config.logger.info(f"🔧 Syncing environment with: uv {' '.join(sync_args)}")
+            process.uv_streamed(sync_args, config.PROJECT_ROOT)
+
+            if _can_persist_repo_sync_state(sync_results):
+                _save_prod_setup_state(
+                    lock_fingerprint=lock_fingerprint,
+                    fingerprint_material=fingerprint_material,
+                    plugin_heads=plugin_heads,
+                    resources_head=resources_head,
+                    bridge_vendor_head=bridge_vendor_head,
+                )
+            else:
+                config.logger.warning(
+                    "⚠️ 部分仓库无法解析当前 HEAD，本次不会覆盖部署缓存状态。"
+                )
+        finally:
+            _log_repo_sync_summary(sync_results)
+
+        if repo_failures:
+            raise SystemExit(1)
 
         config.logger.info("\n🎉 Production setup complete! Environment is ready.")
 
