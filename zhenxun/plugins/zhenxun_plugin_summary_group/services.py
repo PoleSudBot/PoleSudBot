@@ -37,6 +37,7 @@ class SummaryParameters(BaseModel):
     content_filter: str | None = None
     target_user_ids: set[str] = Field(default_factory=set)
     response_target: MsgTarget
+    reply_to_message_id: str | None = None
 
     class Config:
         arbitrary_types_allowed = True
@@ -143,6 +144,7 @@ class SummaryService:
             self.fetch_result.user_info_cache,
             group_id=self.params.target_group_id,
             model_name=self.summary_result.resolved_model_name,
+            reply_to_message_id=self.params.reply_to_message_id,
         )
 
     async def execute(self) -> bool:
@@ -158,7 +160,9 @@ class SummaryService:
                 e=e,
             )
             await UniMessage.text(e.user_friendly_message).send(
-                self.params.response_target
+                self.params.response_target,
+                self.params.bot,
+                reply_to=self.params.reply_to_message_id or False,
             )
             return False
         except LLMException as e:
@@ -168,7 +172,9 @@ class SummaryService:
                 e=e,
             )
             await UniMessage.text(e.user_friendly_message).send(
-                self.params.response_target
+                self.params.response_target,
+                self.params.bot,
+                reply_to=self.params.reply_to_message_id or False,
             )
             return False
         except Exception as e:
@@ -179,7 +185,11 @@ class SummaryService:
             )
             await UniMessage.text(
                 "处理总结时发生了一个未知的内部错误，请联系管理员。"
-            ).send(self.params.response_target)
+            ).send(
+                self.params.response_target,
+                self.params.bot,
+                reply_to=self.params.reply_to_message_id or False,
+            )
             return False
 
 

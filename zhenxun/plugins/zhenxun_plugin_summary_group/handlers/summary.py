@@ -28,7 +28,7 @@ def _collect_parts(
     arp = result.result
     if arp and "$extra" in arp.main_args:
         extra_args = arp.main_args.get("$extra", [])
-        collected_parts.extend(arg for arg in extra_args if isinstance(arg, (At, Text)))
+        collected_parts.extend(arg for arg in extra_args if isinstance(arg, At | Text))
     return collected_parts
 
 
@@ -55,6 +55,14 @@ def _extract_text_parts(parts: list[At | Text]) -> list[str]:
         for part in parts
         if isinstance(part, Text) and part.text.strip()
     ]
+
+
+def _extract_reply_message_id(
+    event: GroupMessageEvent | PrivateMessageEvent,
+) -> str | None:
+    # 只让最终结果回复原指令，避免“正在生成”之类的过程提示也被串成回复链。
+    message_id = getattr(event, "message_id", None)
+    return str(message_id) if message_id else None
 
 
 async def _resolve_target_group_id(
@@ -115,6 +123,7 @@ async def handle_summary(
     originating_group_id = (
         event.group_id if isinstance(event, GroupMessageEvent) else None
     )
+    reply_to_message_id = _extract_reply_message_id(event)
     target_group_id = await _resolve_target_group_id(bot, event, result, target)
     if target_group_id is None:
         return
@@ -190,6 +199,7 @@ async def handle_summary(
         content_filter=content_value,
         target_user_ids=target_user_ids,
         response_target=target,
+        reply_to_message_id=reply_to_message_id,
     )
 
     service = SummaryService(params)
@@ -220,6 +230,7 @@ async def handle_time_range_summary(
     time_range_type: str = "today",
 ):
     scope = build_preset_scope(time_range_type)
+    reply_to_message_id = _extract_reply_message_id(event)
     target_group_id = await _resolve_target_group_id(bot, event, result, target)
     if target_group_id is None:
         return
@@ -240,6 +251,7 @@ async def handle_time_range_summary(
             scope=scope,
             style=style.result if style.available else None,
             response_target=target,
+            reply_to_message_id=reply_to_message_id,
         )
     )
     await service.execute()

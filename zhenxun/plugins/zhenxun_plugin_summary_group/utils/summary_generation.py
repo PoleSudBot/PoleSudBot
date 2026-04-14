@@ -285,6 +285,7 @@ async def send_summary(
     user_info_cache: dict[str, str] | None = None,
     group_id: int | None = None,
     model_name: str | None = None,
+    reply_to_message_id: str | None = None,
 ) -> bool:
     try:
         reply_msg = None
@@ -340,7 +341,12 @@ async def send_summary(
             reply_msg = UniMessage.text(full_text)
 
         if reply_msg:
-            await reply_msg.send(target, bot)
+            # 手动总结会显式透传触发消息 ID，定时总结则保持普通发送。
+            await reply_msg.send(
+                target,
+                bot,
+                reply_to=reply_to_message_id or False,
+            )
 
             logger.info(
                 f"总结已发送，类型: {output_type or 'text'}",
