@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import time
 
+import nonebot
 from nonebot import get_driver
 from nonebot.adapters import Bot, Event
 from nonebot.exception import IgnoredException
@@ -9,9 +10,11 @@ from nonebot.matcher import Matcher
 from nonebot.message import event_preprocessor, run_postprocessor, run_preprocessor
 from nonebot.typing import T_State
 from nonebot_plugin_alconna import UniMsg
-from nonebot_plugin_uninfo import Uninfo
+from nonebot_plugin_session import EventSession
 
+from zhenxun.services import onebot_transport
 from zhenxun.services.cache.runtime_cache import is_cache_ready
+from zhenxun.services.light_session import LightSession, build_light_session
 from zhenxun.services.log import logger
 from zhenxun.services.message_load import is_overloaded
 from zhenxun.services.runtime_bootstrap import register_runtime_bootstrap
@@ -29,14 +32,12 @@ from .auth_checker import (
 )
 
 _SKIP_AUTH_PLUGINS = {"chat_history", "chat_message"}
-_BOT_CONNECT_TS: float | None = None
 _AUTH_QUEUE_MAXSIZE = 200
-_AUTH_QUEUE: asyncio.Queue[tuple[Matcher, Event, Bot, Uninfo, UniMsg | None]] = (
+_AUTH_QUEUE: asyncio.Queue[tuple[Matcher, Event, Bot, LightSession, UniMsg | None]] = (
     asyncio.Queue(maxsize=_AUTH_QUEUE_MAXSIZE)
 )
 _AUTH_QUEUE_STARTED = False
 _AUTH_WORKERS: list[asyncio.Task] = []
-_LAST_DROP_LOG = 0.0
 
 driver = get_driver()
 register_runtime_bootstrap(driver)
@@ -44,9 +45,12 @@ register_runtime_bootstrap(driver)
 
 @driver.on_bot_connect
 async def _mark_bot_connected(bot: Bot):
-    del bot
-    global _BOT_CONNECT_TS
-    _BOT_CONNECT_TS = time.time()
+    onebot_transport.mark_connected(bot)
+
+
+@driver.on_bot_disconnect
+async def _mark_bot_disconnected(bot: Bot):
+    onebot_transport.mark_disconnected(bot)
 
 
 async def _auth_worker(worker_id: int) -> None:
@@ -122,33 +126,13 @@ def _skip_auth_for_plugin(matcher: Matcher) -> bool:
     return "chat_history" in module_name
 
 
-def _resolve_actor_user_id(event: Event, fallback_user_id: str) -> str:
-    """优先使用事件发起者ID，避免 notice 场景 session.user 指向 bot 自身。"""
-    event_user_id = getattr(event, "user_id", None)
-    if event_user_id is None:
-        return fallback_user_id
-    event_user_id = str(event_user_id)
-    return event_user_id or fallback_user_id
-
-
-def _resolve_event_group_id(event: Event, fallback_group_id: str | None) -> str | None:
-    """notice 场景 session.group 可能缺失，回退到事件上的 group_id。"""
-    event_group_id = getattr(event, "group_id", None)
-    if event_group_id is None:
-        return fallback_group_id
-    resolved = str(event_group_id)
-    return resolved or fallback_group_id
-
-
-def _resolve_event_channel_id(
-    event: Event, fallback_channel_id: str | None
-) -> str | None:
-    """频道场景回退到事件上的 channel_id。"""
-    event_channel_id = getattr(event, "channel_id", None)
-    if event_channel_id is None:
-        return fallback_channel_id
-    resolved = str(event_channel_id)
-    return resolved or fallback_channel_id
+def _get_event_bot(event: Event) -> Bot | None:
+    self_id = getattr(event, "self_id", None)
+    if self_id is None:
+        return None
+    with contextlib.suppress(KeyError):
+        return nonebot.get_bot(str(self_id))
+    return None
 
 
 @event_preprocessor
@@ -157,9 +141,22 @@ async def _drop_message_before_cache_ready(event: Event):
         return
     if not is_cache_ready():
         raise IgnoredException("cache not ready ignore")
-    if _BOT_CONNECT_TS is not None:
+
+    bot = _get_event_bot(event)
+    if bot and onebot_transport.should_drop(bot):
+        # 必须在任何依赖注入之前止血；一旦进入 Uninfo fetcher，
+        # 断连场景就会把每条消息放大成 get_group_info 风暴。
+        onebot_transport.note_unavailable(
+            bot,
+            "丢弃新消息",
+            "为避免断连期间刷屏与全局卡顿，本次事件已忽略。",
+        )
+        raise IgnoredException("onebot control unavailable")
+
+    connected_at = onebot_transport.get_connected_at(str(getattr(event, "self_id", "")))
+    if connected_at is not None:
         event_ts = getattr(event, "time", None)
-        if event_ts is not None and event_ts < _BOT_CONNECT_TS:
+        if event_ts is not None and event_ts < connected_at:
             raise IgnoredException("drop backlog message")
 
 
@@ -168,24 +165,26 @@ async def _auth_preprocessor(
     matcher: Matcher,
     event: Event,
     bot: Bot,
-    session: Uninfo,
+    session: EventSession,
     state: T_State,
     message: UniMsg | None = None,
 ):
     if event.get_type() == "message" and not is_cache_ready():
         raise IgnoredException("cache not ready ignore")
     start_time = time.time()
+    light_session = state.get("_zx_light_session")
+    if light_session is None:
+        light_session = build_light_session(bot, event, session)
+        state["_zx_light_session"] = light_session
+
     entity = state.get("_zx_entity")
     if entity is None:
-        entity = get_entity_ids(session)
-        entity.user_id = _resolve_actor_user_id(event, entity.user_id)
-        entity.group_id = _resolve_event_group_id(event, entity.group_id)
-        entity.channel_id = _resolve_event_channel_id(event, entity.channel_id)
+        entity = get_entity_ids(light_session)
         state["_zx_entity"] = entity
 
     event_cache = state.get("_zx_event_cache")
     if event_cache is None:
-        event_cache = _get_event_cache(event, session, entity)
+        event_cache = _get_event_cache(event, light_session, entity)
         state["_zx_event_cache"] = event_cache
 
     text = state.get("_zx_plain_text")
@@ -208,7 +207,7 @@ async def _auth_preprocessor(
     if await route_precheck(
         matcher,
         event,
-        session,
+        light_session,
         message,
         entity=entity,
         event_cache=event_cache,
@@ -224,7 +223,7 @@ async def _auth_preprocessor(
             matcher,
             event,
             bot,
-            session,
+            light_session,
             message,
             skip_ban=False,
             entity=entity,
@@ -250,16 +249,16 @@ async def _auth_preprocessor(
 
 
 @run_postprocessor
-async def _unblock_after_matcher(matcher: Matcher, session: Uninfo, event: Event):
-    user_id = _resolve_actor_user_id(event, session.user.id)
-    group_id = _resolve_event_group_id(event, None)
-    channel_id = _resolve_event_channel_id(event, None)
-    if session.group:
-        if session.group.parent:
-            group_id = session.group.parent.id
-            channel_id = session.group.id
-        else:
-            group_id = session.group.id
-    if user_id and matcher.plugin:
+async def _unblock_after_matcher(
+    matcher: Matcher, bot: Bot, session: EventSession, event: Event
+):
+    light_session = build_light_session(bot, event, session)
+    entity = get_entity_ids(light_session)
+    if entity.user_id and matcher.plugin:
         module = matcher.plugin.name
-        LimitManager.unblock(module, user_id, group_id, channel_id)
+        LimitManager.unblock(
+            module,
+            entity.user_id,
+            entity.group_id,
+            entity.channel_id,
+        )
