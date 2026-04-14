@@ -33,6 +33,12 @@ async def _get_browser_instance() -> Any:
     raise RuntimeError("nonebot_plugin_htmlrender.browser 未提供可用浏览器获取函数。")
 
 
+async def get_managed_browser() -> Any:
+    """返回经过真寻补丁管理的 htmlrender 浏览器实例。"""
+    _patch_playwright_env_check_once()
+    return await _get_browser_instance()
+
+
 async def _shutdown_browser_instance() -> None:
     _clear_patched_browser_check_cache()
     for attr_name in (

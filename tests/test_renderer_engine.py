@@ -12,6 +12,33 @@ from zhenxun.services.renderer.engine import PlaywrightEngine, _is_browser_close
 
 
 @pytest.mark.asyncio
+async def test_get_managed_browser_patches_env_before_fetching_browser(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    patch_calls: list[str] = []
+
+    async def fake_get_browser_instance():
+        assert patch_calls == ["patched"]
+        return "browser-instance"
+
+    # 这里要求先应用 check_once 补丁，再交给 htmlrender 取浏览器，
+    # 否则 moesekai 截图会在冷启动/退出阶段重新触发环境检查。
+    monkeypatch.setattr(
+        renderer_engine,
+        "_patch_playwright_env_check_once",
+        lambda: patch_calls.append("patched"),
+    )
+    monkeypatch.setattr(
+        renderer_engine, "_get_browser_instance", fake_get_browser_instance
+    )
+
+    browser = await renderer_engine.get_managed_browser()
+
+    assert browser == "browser-instance"
+    assert patch_calls == ["patched"]
+
+
+@pytest.mark.asyncio
 async def test_initialize_disables_idle_recycle_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ):
