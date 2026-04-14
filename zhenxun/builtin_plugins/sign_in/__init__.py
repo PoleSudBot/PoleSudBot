@@ -34,7 +34,7 @@ __plugin_meta__ = PluginMetadata(
         我的签到
         好感度排行 ?[num=10]
         好感度总排行 ?[num=10]
-    * 签到时有 3% 概率 * 2 *
+    * 签到时仍有概率触发双倍好感度 *
     """.strip(),
     extra=PluginExtraData(
         author="HibiKier",
@@ -62,27 +62,6 @@ __plugin_meta__ = PluginMetadata(
                 help="签到好感度加成额外获得的最大金币数",
                 default_value=200,
                 type=int,
-            ),
-            RegisterConfig(
-                key="SIGN_CARD1_PROB",
-                value=0.2,
-                help="签到好感度双倍加持卡Ⅰ掉落概率",
-                default_value=0.2,
-                type=float,
-            ),
-            RegisterConfig(
-                key="SIGN_CARD2_PROB",
-                value=0.09,
-                help="签到好感度双倍加持卡Ⅲ掉落概率",
-                default_value=0.09,
-                type=float,
-            ),
-            RegisterConfig(
-                key="SIGN_CARD3_PROB",
-                value=0.05,
-                help="签到好感度双倍加持卡Ⅲ掉落概率",
-                default_value=0.05,
-                type=float,
             ),
         ],
         limits=[PluginCdBlock()],

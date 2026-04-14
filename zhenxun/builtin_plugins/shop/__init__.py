@@ -31,15 +31,13 @@ from ._data_source import ShopManage, gold_rank
 
 __plugin_meta__ = PluginMetadata(
     name="商店",
-    description="商店系统[金币回收计划]",
+    description="道具库存过渡期入口",
     usage="""
-    商品操作
+    过渡期可用指令
     指令：
-        商店
         我的金币
         我的道具
         使用道具 [名称/Id]
-        购买道具 [名称/Id]
         金币排行 ?[num=10]
         金币总排行 ?[num=10]
     """.strip(),
@@ -49,10 +47,8 @@ __plugin_meta__ = PluginMetadata(
         plugin_type=PluginType.NORMAL,
         menu_type="商店",
         commands=[
-            Command(command="商店"),
             Command(command="我的金币"),
             Command(command="我的道具"),
-            Command(command="购买道具"),
             Command(command="使用道具"),
             Command(command="金币排行"),
             Command(command="金币总排行"),
@@ -131,9 +127,11 @@ _matcher.shortcut(
 
 @_matcher.assign("$main")
 async def _(session: Uninfo, arparma: Arparma):
-    image = await ShopManage.get_shop_image()
+    # 过渡期不再展示商品页，保留原命令仅用于提示老用户改走库存消耗入口。
     logger.info("查看商店", arparma.header_result, session=session)
-    await MessageUtils.build_message(image).send()
+    await MessageUtils.build_message(ShopManage.get_transition_notice()).send(
+        reply_to=True
+    )
 
 
 @_matcher.assign("my-cost")
@@ -168,6 +166,7 @@ async def _(
         await MessageUtils.build_message(
             "请在指令后跟需要购买的道具名称或id..."
         ).finish(reply_to=True)
+    # 过渡期继续兼容旧购买命令，但统一返回停售提示，避免继续新增道具库存。
     logger.info(
         f"购买道具 {name}, 数量: {num}",
         arparma.header_result,

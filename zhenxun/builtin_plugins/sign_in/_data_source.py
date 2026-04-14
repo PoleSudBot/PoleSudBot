@@ -222,18 +222,13 @@ class SignManage:
             impression_added *= 2
         await SignUser.sign(user, impression_added, session.self_id, platform)
         gold = random.randint(1, 100)
-        gift = random_event(float(user.impression))
-        if isinstance(gift, int):
-            gold += gift
-            await UserConsole.add_gold(user.user_id, gold + gift, "sign_in", platform)
-            gift = f"额外金币 +{gift}"
-        else:
-            await UserConsole.add_gold(user.user_id, gold, "sign_in", platform)
-            await UserConsole.add_props_by_name(user.user_id, gift, 1, platform)
-            gift += " + 1"
+        # 过渡期签到只发金币，不再产出新道具；这里同时避免把额外金币重复入账。
+        extra_gold = random_event(float(user.impression))
+        await UserConsole.add_gold(user.user_id, gold + extra_gold, "sign_in", platform)
+        gift = f"额外金币 +{extra_gold}"
         logger.info(
             f"签到成功. score: {user.impression:.2f} "
-            f"(+{impression_added:.2f}).获取金币/道具: {gold}",
+            f"(+{impression_added:.2f}).获取金币: {gold + extra_gold}",
             "签到",
             session=session,
         )

@@ -1,7 +1,7 @@
 import asyncio
 from collections import defaultdict
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import datetime
 import inspect
 import time
 from types import MappingProxyType
@@ -19,16 +19,16 @@ from zhenxun.models.friend_user import FriendUser
 from zhenxun.models.goods_info import GoodsInfo
 from zhenxun.models.group_member_info import GroupInfoUser
 from zhenxun.models.user_console import UserConsole
-from zhenxun.models.user_gold_log import UserGoldLog
-from zhenxun.models.user_props_log import UserPropsLog
 from zhenxun.services import avatar_service
-from zhenxun.services.log import logger
 from zhenxun.ui.models import ImageCell, TextCell
-from zhenxun.utils.enum import GoldHandle, PropHandle
 from zhenxun.utils.platform import PlatformUtils
 from zhenxun.utils.pydantic_compat import model_dump
 
 from .config import ICON_PATH, PLATFORM_PATH
+
+SHOP_TRANSITION_NOTICE = (
+    "道具商店已下线，现有道具仍可通过“我的道具”和“使用道具”继续消耗。"
+)
 
 
 class Goods(BaseModel):
@@ -154,6 +154,10 @@ async def gold_rank(session: Uninfo, group_id: str | None, num: int) -> bytes | 
 
 class ShopManage:
     uuid2goods: dict[str, Goods] = {}  # noqa: RUF012
+
+    @classmethod
+    def get_transition_notice(cls) -> str:
+        return SHOP_TRANSITION_NOTICE
 
     @classmethod
     async def get_shop_image(cls) -> bytes:
@@ -446,55 +450,8 @@ class ShopManage:
         返回:
             str: 返回小
         """
-        if num < 0:
-            return "购买的数量要大于0!"
-        goods_list = (
-            await GoodsInfo.filter(
-                Q(goods_limit_time__gte=time.time()) | Q(goods_limit_time=0)
-            )
-            .annotate()
-            .order_by("id")
-            .all()
-        )
-        if name.isdigit():
-            if int(name) > len(goods_list) or int(name) <= 0:
-                return "道具编号不存在..."
-            goods = goods_list[int(name) - 1]
-        elif filter_goods := [g for g in goods_list if g.goods_name == name]:
-            goods = filter_goods[0]
-        else:
-            return "道具名称不存在..."
-        user = await UserConsole.get_user(user_id, platform)
-        price = goods.goods_price * num * goods.goods_discount
-        if user.gold < price:
-            return "糟糕! 您的金币好像不太够哦..."
-        today = datetime.now()
-        create_time = today - timedelta(
-            hours=today.hour, minutes=today.minute, seconds=today.second
-        )
-        count = await UserPropsLog.filter(
-            user_id=user_id,
-            handle=PropHandle.BUY,
-            uuid=goods.uuid,
-            create_time__gte=create_time,
-        ).count()
-        if goods.daily_limit and count >= goods.daily_limit:
-            return "今天的购买已达限制了喔!"
-        await UserGoldLog.create(user_id=user_id, gold=price, handle=GoldHandle.BUY)
-        await UserPropsLog.create(
-            user_id=user_id, uuid=goods.uuid, gold=price, num=num, handle=PropHandle.BUY
-        )
-        logger.info(
-            f"花费 {price} 金币购买 {goods.goods_name} ×{num} 成功！",
-            "购买道具",
-            session=user_id,
-        )
-        user.gold -= int(price)
-        if goods.uuid not in user.props:
-            user.props[goods.uuid] = 0
-        user.props[goods.uuid] += num
-        await user.save(update_fields=["gold", "props"])
-        return f"花费 {price} 金币购买 {goods.goods_name} ×{num} 成功！"
+        # 过渡期保留旧库存消耗入口，但彻底关闭新增购买，避免继续放大道具存量。
+        return SHOP_TRANSITION_NOTICE
 
     @classmethod
     async def my_props(
