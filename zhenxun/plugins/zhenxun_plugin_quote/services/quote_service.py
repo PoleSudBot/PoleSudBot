@@ -224,27 +224,7 @@ class QuoteService:
             )
             quote = await QuoteService.find_quote_by_basename(group_id, image_basename)
             if quote:
-                absolute_image_path = resolve_quote_image_path(quote.image_path)
-                if os.path.exists(absolute_image_path):
-                    try:
-                        os.remove(absolute_image_path)
-                        logger.info(
-                            f"图片文件删除成功: {absolute_image_path}", "群聊语录"
-                        )
-                    except Exception as file_error:
-                        logger.warning(
-                            f"删除图片文件失败: {absolute_image_path}, 错误: {file_error}",
-                            "群聊语录",
-                            e=file_error,
-                        )
-                else:
-                    logger.warning(f"图片文件不存在: {absolute_image_path}", "群聊语录")
-
-                await Quote.filter(id=quote.id).delete()
-                logger.info(
-                    f"语录删除成功 - ID: {quote.id}, 群组: {group_id}", "群聊语录"
-                )
-                return True
+                return await QuoteService.delete_quote_instance(quote)
             else:
                 logger.warning(
                     f"要删除的语录不存在 - 群组: {group_id}, 图片: {image_basename}",
@@ -253,6 +233,38 @@ class QuoteService:
                 return False
         except Exception as e:
             logger.error(f"删除语录失败 - 群组: {group_id}, 错误: {e}", "群聊语录", e=e)
+            return False
+
+    @staticmethod
+    async def delete_quote_instance(quote: Quote) -> bool:
+        """按语录实体删除数据，避免定位成功后再次走文件名查找。"""
+        try:
+            absolute_image_path = resolve_quote_image_path(quote.image_path)
+            if os.path.exists(absolute_image_path):
+                try:
+                    os.remove(absolute_image_path)
+                    logger.info(f"图片文件删除成功: {absolute_image_path}", "群聊语录")
+                except Exception as file_error:
+                    logger.warning(
+                        f"删除图片文件失败: {absolute_image_path}, 错误: {file_error}",
+                        "群聊语录",
+                        e=file_error,
+                    )
+            else:
+                logger.warning(f"图片文件不存在: {absolute_image_path}", "群聊语录")
+
+            await Quote.filter(id=quote.id).delete()
+            logger.info(
+                f"语录删除成功 - ID: {quote.id}, 群组: {quote.group_id}",
+                "群聊语录",
+            )
+            return True
+        except Exception as e:
+            logger.error(
+                f"按语录实体删除失败 - ID: {quote.id}, 群组: {quote.group_id}, 错误: {e}",
+                "群聊语录",
+                e=e,
+            )
             return False
 
     @classmethod
@@ -471,6 +483,96 @@ class QuoteService:
         except Exception as e:
             logger.error(
                 f"根据文件名查找语录时发生错误 - 群组: {group_id}, 文件名: {image_basename}, 错误: {e}",
+                "群聊语录",
+                e=e,
+            )
+            return None
+
+    @staticmethod
+    def _is_quote_image_stem_match(quote: Quote, image_md5: str) -> bool:
+        """只比较最终文件名主干，避免把路径中的其他十六进制串误判为语录标识。"""
+        return Path(str(quote.image_path)).stem.lower() == image_md5.lower()
+
+    @classmethod
+    def _pick_quote_by_image_md5(
+        cls, quotes: Iterable[Quote], image_md5: str
+    ) -> Quote | None:
+        for quote in quotes:
+            if cls._is_quote_image_stem_match(quote, image_md5):
+                logger.debug(
+                    f"回复图片 md5 最终校验通过 - quote_id={quote.id}, image_path={quote.image_path}",
+                    "群聊语录",
+                )
+                return quote
+
+            logger.debug(
+                f"回复图片 md5 最终校验未通过 - quote_id={quote.id}, image_path={quote.image_path}, image_md5={image_md5}",
+                "群聊语录",
+            )
+        return None
+
+    @classmethod
+    async def find_quote_by_reply_image(
+        cls,
+        group_id: str,
+        reply_image_md5: str | None = None,
+        reply_image_basename: str | None = None,
+    ) -> Quote | None:
+        """根据回复中的图片标识查找语录，优先走 md5 链路，失败后回退 basename。"""
+        try:
+            if reply_image_md5:
+                logger.info(
+                    f"根据回复图片 md5 查找语录 - 群组: {group_id}, md5: {reply_image_md5}",
+                    "群聊语录",
+                )
+
+                exact_candidates = await Quote.filter(
+                    group_id=group_id,
+                    image_path__iendswith=f"{reply_image_md5}.png",
+                ).limit(10)
+                if exact_candidates:
+                    logger.debug(
+                        f"回复图片 md5 首选粗筛命中 {len(exact_candidates)} 条候选",
+                        "群聊语录",
+                    )
+                    if quote := cls._pick_quote_by_image_md5(
+                        exact_candidates, reply_image_md5
+                    ):
+                        return quote
+                else:
+                    logger.debug("回复图片 md5 首选粗筛未命中", "群聊语录")
+
+                fuzzy_candidates = await Quote.filter(
+                    group_id=group_id,
+                    image_path__icontains=reply_image_md5,
+                ).limit(10)
+                if fuzzy_candidates:
+                    logger.debug(
+                        f"回复图片 md5 兼容粗筛命中 {len(fuzzy_candidates)} 条候选",
+                        "群聊语录",
+                    )
+                    if quote := cls._pick_quote_by_image_md5(
+                        fuzzy_candidates, reply_image_md5
+                    ):
+                        return quote
+                else:
+                    logger.debug("回复图片 md5 兼容粗筛未命中", "群聊语录")
+
+            if reply_image_basename:
+                logger.debug(
+                    f"回复图片查找回退到 basename 链路 - 群组: {group_id}, basename: {reply_image_basename}",
+                    "群聊语录",
+                )
+                return await cls.find_quote_by_basename(group_id, reply_image_basename)
+
+            logger.info(
+                f"回复图片未提供可用标识，无法在群组 {group_id} 中定位语录。",
+                "群聊语录",
+            )
+            return None
+        except Exception as e:
+            logger.error(
+                f"根据回复图片查找语录时发生错误 - 群组: {group_id}, md5: {reply_image_md5}, basename: {reply_image_basename}, 错误: {e}",
                 "群聊语录",
                 e=e,
             )

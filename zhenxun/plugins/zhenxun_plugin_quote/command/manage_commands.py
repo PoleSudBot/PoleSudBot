@@ -1,4 +1,6 @@
 import os
+import re
+from pathlib import Path
 from urllib.parse import urlparse
 from typing import Optional, Literal, Union
 from nonebot.permission import SUPERUSER
@@ -27,6 +29,8 @@ from ..model import Quote
 from ..services.quote_service import QuoteService
 from ..config import QUOTE_ASSETS_PATH
 from ..utils.tag_utils import extract_manual_tags
+
+_IMAGE_STEM_MD5_RE = re.compile(r"(?i)[0-9a-f]{32}")
 
 
 async def _get_image_from_reply(event: Event, bot: Bot) -> Optional[Image]:
@@ -73,8 +77,24 @@ async def _get_image_from_reply(event: Event, bot: Bot) -> Optional[Image]:
     return None
 
 
-def _extract_image_basename(image_seg: Image) -> str | None:
-    for raw_value in (image_seg.id, getattr(image_seg, "path", None), image_seg.url):
+def _extract_reply_image_identifiers(image_seg: Image) -> tuple[str | None, str | None]:
+    """
+    从回复图片里提取语录标识。
+
+    这里不能继续依赖平台回传的完整文件名，因为 OneBot 发出的图片在被回复时
+    可能会变成大写文件名或不同扩展名。我们只认文件名主干是不是完整的 32 位
+    MD5，这样既能兼容 `.png/.jpg` 差异，也能避免把 URL 参数里的其他十六进制
+    字符串误识别为语录图片标识。
+    """
+
+    fallback_basename: str | None = None
+    sources = (
+        ("id", image_seg.id),
+        ("path", getattr(image_seg, "path", None)),
+        ("url", image_seg.url),
+    )
+
+    for source_name, raw_value in sources:
         if not raw_value:
             continue
 
@@ -83,10 +103,33 @@ def _extract_image_basename(image_seg: Image) -> str | None:
             value = urlparse(value).path or value
 
         image_basename = os.path.basename(value)
-        if image_basename:
-            return image_basename
+        if not image_basename:
+            continue
 
-    return None
+        if fallback_basename is None:
+            fallback_basename = image_basename
+
+        image_stem = Path(image_basename).stem
+        if _IMAGE_STEM_MD5_RE.fullmatch(image_stem):
+            image_md5 = image_stem.lower()
+            logger.debug(
+                "回复图片标识提取成功 - 来源: %s, basename: %s, md5: %s"
+                % (source_name, image_basename, image_md5),
+                "群聊语录",
+            )
+            return image_md5, image_basename
+
+        logger.debug(
+            f"回复图片来源 {source_name} 未命中语录 md5，basename: {image_basename}",
+            "群聊语录",
+        )
+
+    if fallback_basename:
+        logger.debug(
+            f"回复图片未提取到 md5，将回退到 basename 链路: {fallback_basename}",
+            "群聊语录",
+        )
+    return None, fallback_basename
 
 
 async def _get_quote_from_reply(
@@ -99,11 +142,15 @@ async def _get_quote_from_reply(
     if not image_seg:
         return None
 
-    image_basename = _extract_image_basename(image_seg)
-    if not image_basename:
+    image_md5, image_basename = _extract_reply_image_identifiers(image_seg)
+    if not image_md5 and not image_basename:
         return None
 
-    return await QuoteService.find_quote_by_basename(session.group.id, image_basename)
+    return await QuoteService.find_quote_by_reply_image(
+        session.group.id,
+        reply_image_md5=image_md5,
+        reply_image_basename=image_basename,
+    )
 
 
 async def uploader_or_admin_check(
@@ -116,13 +163,10 @@ async def uploader_or_admin_check(
         return True
 
     if session.group:
-        group_id = session.group.id
         user_id = session.user.id
-        if image_seg := await _get_image_from_reply(event, bot):
-            if image_basename := _extract_image_basename(image_seg):
-                quote = await QuoteService.find_quote_by_basename(group_id, image_basename)
-                if quote and quote.uploader_user_id == user_id:
-                    return True
+        quote = await _get_quote_from_reply(bot, event, session)
+        if quote and quote.uploader_user_id == user_id:
+            return True
     return False
 
 
@@ -255,23 +299,31 @@ async def _handle_delete_reply_quote(bot: Bot, event: MessageEvent, session: Uni
         logger.debug("回复的消息中未找到图片，无法执行删除操作。", "群聊语录")
         return
 
-    image_basename = _extract_image_basename(image_seg)
-    if not image_basename:
+    image_md5, image_basename = _extract_reply_image_identifiers(image_seg)
+    if not image_md5 and not image_basename:
         logger.warning("无法获取到回复图片的唯一标识，删除失败。", "群聊语录")
         return
 
-    is_deleted = await QuoteService.delete_quote(group_id, image_basename)
+    quote = await QuoteService.find_quote_by_reply_image(
+        group_id,
+        reply_image_md5=image_md5,
+        reply_image_basename=image_basename,
+    )
+    if not quote:
+        logger.info(
+            f"尝试删除语录失败，回复图片未能定位到群组 {group_id} 中的语录。"
+            f" md5={image_md5}, basename={image_basename}",
+            "群聊语录",
+        )
+        return
+
+    is_deleted = await QuoteService.delete_quote_instance(quote)
 
     if is_deleted:
         await MessageUtils.build_message(
             [At(target=user_id, flag="user"), " 删除成功"]
         ).send()
         return
-
-    logger.info(
-        f"尝试删除语录失败，图片 '{image_basename}' 不在群组 {group_id} 的语录库中。",
-        "群聊语录",
-    )
 
 
 async def _handle_delete_last_quote(bot: Bot, event: MessageEvent, session: Uninfo):
