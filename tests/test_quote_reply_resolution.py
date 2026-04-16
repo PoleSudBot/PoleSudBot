@@ -248,6 +248,42 @@ async def test_find_quote_by_reply_image_falls_back_to_basename(monkeypatch):
     assert result is expected_quote
 
 
+@pytest.mark.asyncio
+async def test_search_quotes_exact_stage_merges_manual_tags_with_text_matches(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    quotes = [
+        SimpleNamespace(
+            id=77,
+            group_id="123",
+            image_path="quote/images/auto.png",
+            ocr_text="1969 live",
+            recorded_text=None,
+            tags=["1969"],
+            manual_tags=[],
+            quoted_user_id=None,
+        ),
+        SimpleNamespace(
+            id=116,
+            group_id="123",
+            image_path="quote/images/manual.png",
+            ocr_text=None,
+            recorded_text=None,
+            tags=[],
+            manual_tags=["1969"],
+            quoted_user_id=None,
+        ),
+    ]
+
+    monkeypatch.setattr(quote_service_module.Quote, "filter", _build_filter(quotes))
+
+    matches = await QuoteService._search_quotes_by_text_and_filter_by_tags(
+        "123", "1969"
+    )
+
+    assert {quote.id for quote in matches} == {77, 116}
+
+
 def test_compact_quote_shortcut_matches_regular_queries_only():
     matched_cases = {
         "语录777": ("777",),

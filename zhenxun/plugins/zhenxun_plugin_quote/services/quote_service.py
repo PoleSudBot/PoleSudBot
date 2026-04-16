@@ -339,20 +339,27 @@ class QuoteService:
         2. [模糊匹配] 如果没有精确匹配结果，则回退到分词模糊搜索。
         """
         base_filters = {"group_id": group_id}
+        candidate_quotes = list(await Quote.filter(**base_filters))
+        if user_id_filter:
+            candidate_quotes = [
+                quote
+                for quote in candidate_quotes
+                if cls._match_user_filter(quote, user_id_filter)
+            ]
+        logger.debug(f"搜索候选语录共 {len(candidate_quotes)} 条", "群聊语录")
+        if not candidate_quotes:
+            return []
 
         logger.info(
             f"第一阶段：尝试对 '{keyword}' 进行精确匹配搜索...", "群聊语录-搜索"
         )
-        exact_match_query = Q(ocr_text__icontains=keyword) | Q(
-            recorded_text__icontains=keyword
-        )
-        exact_matches = list(await Quote.filter(exact_match_query, **base_filters))
-        if user_id_filter:
-            exact_matches = [
-                quote
-                for quote in exact_matches
-                if cls._match_user_filter(quote, user_id_filter)
-            ]
+        # 精确阶段也必须把手动/自动 tag 视作同一检索池，否则一旦文本先命中，
+        # 手动 tag 命中的语录会被提前短路掉，表现上就像 manual_tags 没参与查询。
+        exact_matches = [
+            quote
+            for quote in candidate_quotes
+            if cls._check_exact_keyword_in_quote(keyword, quote)
+        ]
 
         if exact_matches:
             logger.info(
@@ -365,19 +372,6 @@ class QuoteService:
         if not keywords:
             return []
 
-        candidate_quotes = list(await Quote.filter(**base_filters))
-        if user_id_filter:
-            candidate_quotes = [
-                quote
-                for quote in candidate_quotes
-                if cls._match_user_filter(quote, user_id_filter)
-            ]
-        logger.debug(
-            f"综合过滤候选语录共 {len(candidate_quotes)} 条", "群聊语录"
-        )
-        if not candidate_quotes:
-            return []
-
         final_matches = []
         for quote in candidate_quotes:
             if all(cls._check_single_keyword_in_quote(kw, quote) for kw in keywords):
@@ -385,6 +379,23 @@ class QuoteService:
 
         logger.debug(f"经过最终过滤后，匹配到 {len(final_matches)} 条语录", "群聊语录")
         return final_matches
+
+    @classmethod
+    def _check_exact_keyword_in_quote(cls, keyword: str, quote: Quote) -> bool:
+        """
+        检查完整关键词是否直接命中语录文本或任一 tag。
+
+        精确阶段如果只看 ocr/recorded_text，会导致文本命中先返回，
+        让手动 tag 命中的语录完全失去参与抽取的机会。
+        """
+        kw_lower = keyword.lower()
+
+        if quote.ocr_text and kw_lower in quote.ocr_text.lower():
+            return True
+        if quote.recorded_text and kw_lower in quote.recorded_text.lower():
+            return True
+
+        return any(kw_lower in str(tag).lower() for tag in cls.get_all_tags(quote))
 
     @classmethod
     def _check_single_keyword_in_quote(cls, keyword: str, quote: Quote) -> bool:
