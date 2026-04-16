@@ -62,9 +62,15 @@ upload_commands = _load_module(
     f"{PLUGIN_PACKAGE}.command.upload_commands",
     PLUGIN_ROOT / "command" / "upload_commands.py",
 )
+tag_utils = _load_module(
+    f"{PLUGIN_PACKAGE}.utils.tag_utils",
+    PLUGIN_ROOT / "utils" / "tag_utils.py",
+)
 
 QuoteService = quote_service_module.QuoteService
 Image = manage_commands.Image
+At = upload_commands.At
+Text = upload_commands.Text
 
 
 class _FakeQuery:
@@ -106,6 +112,14 @@ class _FakeQuery:
             return rows
 
         return _resolve().__await__()
+
+
+class _FakeExistsQuery:
+    def __init__(self, exists_result: bool):
+        self._exists_result = exists_result
+
+    async def exists(self):
+        return self._exists_result
 
 
 def _build_filter(
@@ -369,6 +383,77 @@ def test_make_record_alc_supports_compact_no_space_input():
 
 
 @pytest.mark.asyncio
+async def test_match_upload_with_image_requires_current_or_reply_image():
+    class _FakeEvent:
+        def __init__(self, message, reply=None):
+            self.message = message
+            self.reply = reply
+
+    assert await upload_commands._match_upload_with_image(
+        _FakeEvent([SimpleNamespace(type="text")])
+    ) is False
+    assert await upload_commands._match_upload_with_image(
+        _FakeEvent([SimpleNamespace(type="image")])
+    ) is True
+    assert await upload_commands._match_upload_with_image(
+        _FakeEvent(
+            [SimpleNamespace(type="text")],
+            reply=SimpleNamespace(message=[SimpleNamespace(type="image")]),
+        )
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_match_record_reply_requires_reply():
+    assert await upload_commands._match_record_reply(SimpleNamespace(reply=None)) is False
+    assert (
+        await upload_commands._match_record_reply(
+            SimpleNamespace(reply=SimpleNamespace(message=[]))
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_extract_manual_tags_with_mention_names_uses_card_and_normalizes():
+    class _Bot:
+        async def get_group_member_info(self, **kwargs):
+            return {"card": "群主 张三", "nickname": "张三"}
+
+    tags = await tag_utils.parse_tag_segments_with_mention_names(
+        _Bot(),
+        "123",
+        [
+            At(flag="user", target="114514", display="展示 名"),
+            Text("经典"),
+        ],
+    )
+
+    assert tags == ["user:114514", "群主_张三", "经典"]
+
+
+@pytest.mark.asyncio
+async def test_extract_manual_tags_with_mention_names_falls_back_to_display_or_user_only():
+    class _FailBot:
+        async def get_group_member_info(self, **kwargs):
+            raise RuntimeError("boom")
+
+    display_tags = await tag_utils.parse_tag_segments_with_mention_names(
+        _FailBot(),
+        "123",
+        [At(flag="user", target="114514", display="展示 名")],
+    )
+    user_only_tags = await tag_utils.parse_tag_segments_with_mention_names(
+        _FailBot(),
+        "123",
+        [At(flag="user", target="114514")],
+    )
+
+    assert display_tags == ["user:114514", "展示_名"]
+    assert user_only_tags == ["user:114514"]
+
+
+@pytest.mark.asyncio
 async def test_get_quotes_by_ids_in_order_preserves_input_order(monkeypatch):
     quotes = [
         SimpleNamespace(id=1, group_id="123"),
@@ -565,6 +650,214 @@ async def test_set_pending_emoji_like_ignores_api_failure(monkeypatch):
             raise RuntimeError("unsupported")
 
     await upload_commands._set_pending_emoji_like(_Bot(), SimpleNamespace(message_id=1))
+
+
+@pytest.mark.asyncio
+async def test_save_img_handle_writes_dual_mention_tags(monkeypatch, tmp_path: Path):
+    captured: dict[str, object] = {}
+    sent_api_calls: list[tuple[str, dict]] = []
+
+    async def _fake_extract_tags(bot, group_id, arp, arg_name="parts"):
+        assert group_id == "123"
+        return ["user:114514", "群主_张三"]
+
+    async def _fake_get_img_hash(path):
+        return "image-hash"
+
+    async def _fake_recognize_text(path: str):
+        return "ocr text"
+
+    async def _fake_set_pending_emoji_like(*args, **kwargs):
+        return None
+
+    async def _fake_add_quote(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(id=1), True
+
+    class _Bot:
+        async def call_api(self, name: str, **kwargs):
+            sent_api_calls.append((name, kwargs))
+
+    monkeypatch.setattr(
+        upload_commands,
+        "extract_manual_tags_with_mention_names",
+        _fake_extract_tags,
+    )
+    monkeypatch.setattr(upload_commands, "ensure_quote_path", lambda: tmp_path)
+    monkeypatch.setattr(upload_commands, "get_img_hash", _fake_get_img_hash)
+    monkeypatch.setattr(
+        upload_commands.OCRService, "recognize_text", _fake_recognize_text
+    )
+    monkeypatch.setattr(
+        upload_commands.QuoteService, "add_quote", _fake_add_quote
+    )
+    monkeypatch.setattr(
+        upload_commands.Quote,
+        "filter",
+        lambda **kwargs: _FakeExistsQuery(False),
+    )
+    monkeypatch.setattr(upload_commands, "_set_pending_emoji_like", _fake_set_pending_emoji_like)
+
+    arp = SimpleNamespace(
+        all_matched_args={"parts": [upload_commands.UniImage(raw=b"fake-image-bytes")]},
+        main_args={},
+    )
+    event = SimpleNamespace(
+        get_session_id=lambda: "group_123_456",
+        message_id=1001,
+        get_user_id=lambda: "42",
+        reply=None,
+    )
+
+    await upload_commands.save_img_handle(_Bot(), event, arp, {})
+
+    assert captured["group_id"] == "123"
+    assert captured["manual_tags"] == ["user:114514", "群主_张三"]
+    assert any(call[0] == "send_group_msg" for call in sent_api_calls)
+
+
+@pytest.mark.asyncio
+async def test_make_record_handle_writes_dual_mention_tags(monkeypatch, tmp_path: Path):
+    captured: dict[str, object] = {}
+    sent_messages: list[object] = []
+
+    async def _fake_extract_tags(bot, group_id, arp, arg_name="parts"):
+        assert group_id == "123"
+        return ["user:114514", "群主_张三"]
+
+    async def _fake_handle_generation(bot, event, arp, session, issuer_user_id=None):
+        return b"generated-image", "recorded text", "114514", None
+
+    async def _fake_add_quote(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(id=1), True
+
+    class _FakeMessage:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def send(self, target=None, bot=None):
+            sent_messages.append(self.payload)
+
+    monkeypatch.setattr(
+        upload_commands,
+        "extract_manual_tags_with_mention_names",
+        _fake_extract_tags,
+    )
+    monkeypatch.setattr(
+        upload_commands, "_handle_quote_generation", _fake_handle_generation
+    )
+    monkeypatch.setattr(upload_commands, "ensure_quote_path", lambda: tmp_path)
+    monkeypatch.setattr(
+        upload_commands.Quote,
+        "filter",
+        lambda **kwargs: _FakeExistsQuery(False),
+    )
+    monkeypatch.setattr(
+        upload_commands.QuoteService, "add_quote", _fake_add_quote
+    )
+    monkeypatch.setattr(
+        upload_commands.MessageUtils, "build_message", lambda payload: _FakeMessage(payload)
+    )
+
+    event = SimpleNamespace(get_user_id=lambda: "42")
+    session = SimpleNamespace(group=SimpleNamespace(id="123"))
+
+    await upload_commands.make_record_handle(
+        SimpleNamespace(), event, SimpleNamespace(), session
+    )
+
+    assert captured["group_id"] == "123"
+    assert captured["manual_tags"] == ["user:114514", "群主_张三"]
+    assert sent_messages == [b"generated-image"]
+
+
+@pytest.mark.asyncio
+async def test_handle_quote_tag_add_uses_dual_mention_tags(monkeypatch):
+    quote = SimpleNamespace(id=1)
+    captured: dict[str, object] = {}
+
+    async def _fake_get_quote_from_reply(bot, event, session):
+        return quote
+
+    async def _fake_extract_tags(bot, group_id, arp, arg_name="parts"):
+        assert group_id == "123"
+        return ["user:114514", "群主_张三"]
+
+    async def _fake_update(bot, event, quote_arg, tags, action):
+        captured["quote"] = quote_arg
+        captured["tags"] = tags
+        captured["action"] = action
+
+    class _FakeArp:
+        def query(self, key, default=""):
+            return "add" if key == "action" else default
+
+    monkeypatch.setattr(manage_commands, "_get_quote_from_reply", _fake_get_quote_from_reply)
+    monkeypatch.setattr(
+        manage_commands,
+        "extract_manual_tags_with_mention_names",
+        _fake_extract_tags,
+    )
+    monkeypatch.setattr(
+        manage_commands, "_update_quote_manual_tags", _fake_update
+    )
+
+    await manage_commands.handle_quote_tag(
+        SimpleNamespace(),
+        SimpleNamespace(),
+        _FakeArp(),
+        SimpleNamespace(group=SimpleNamespace(id="123")),
+    )
+
+    assert captured == {
+        "quote": quote,
+        "tags": ["user:114514", "群主_张三"],
+        "action": "add",
+    }
+
+
+@pytest.mark.asyncio
+async def test_handle_quote_deltag_uses_dual_mention_tags(monkeypatch):
+    quote = SimpleNamespace(id=1)
+    captured: dict[str, object] = {}
+
+    async def _fake_require_reply_quote(bot, event, session):
+        return quote
+
+    async def _fake_extract_tags(bot, group_id, arp, arg_name="parts"):
+        assert group_id == "123"
+        return ["user:114514", "群主_张三"]
+
+    async def _fake_update(bot, event, quote_arg, tags, action):
+        captured["quote"] = quote_arg
+        captured["tags"] = tags
+        captured["action"] = action
+
+    monkeypatch.setattr(
+        manage_commands, "_require_reply_quote", _fake_require_reply_quote
+    )
+    monkeypatch.setattr(
+        manage_commands,
+        "extract_manual_tags_with_mention_names",
+        _fake_extract_tags,
+    )
+    monkeypatch.setattr(
+        manage_commands, "_update_quote_manual_tags", _fake_update
+    )
+
+    await manage_commands.handle_quote_deltag(
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(group=SimpleNamespace(id="123")),
+    )
+
+    assert captured == {
+        "quote": quote,
+        "tags": ["user:114514", "群主_张三"],
+        "action": "del",
+    }
 
 
 @pytest.mark.asyncio

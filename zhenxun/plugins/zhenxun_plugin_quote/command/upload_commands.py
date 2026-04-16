@@ -11,6 +11,7 @@ from arclet.alconna import Alconna, Args, Arparma, CommandMeta, MultiVar, Option
 from nonebot.permission import SUPERUSER
 import httpx
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageEvent, MessageSegment
+from nonebot.rule import Rule
 from nonebot.typing import T_State
 from nonebot_plugin_alconna import At, Text, on_alconna
 from nonebot_plugin_alconna.uniseg import (
@@ -35,7 +36,10 @@ from ..services.ocr_service import OCRService
 from ..services.quote_service import QuoteService
 from ..utils.exceptions import ImageProcessError, NetworkError
 from ..utils.image_utils import get_img_hash
-from ..utils.tag_utils import collect_tag_parts, extract_manual_tags
+from ..utils.tag_utils import (
+    collect_tag_parts,
+    extract_manual_tags_with_mention_names,
+)
 
 from zhenxun.services import avatar_service
 
@@ -445,12 +449,55 @@ def _extract_target_image_from_parts(parts: list[Any]) -> UniImage | None:
     return None
 
 
+def _message_has_image_segment(message: Any) -> bool:
+    if not message:
+        return False
+
+    try:
+        return any(getattr(seg, "type", None) == "image" for seg in message)
+    except TypeError:
+        return False
+
+
+async def _match_upload_with_image(event: MessageEvent) -> bool:
+    if _message_has_image_segment(event.message):
+        return True
+
+    # 这里故意只看事件里已经携带的 reply.message，避免为了“静默让路”
+    # 额外触发 reply_fetch/get_msg 这类重解析或网络调用。
+    reply = getattr(event, "reply", None)
+    return reply is not None and _message_has_image_segment(getattr(reply, "message", None))
+
+
+def upload_has_image_rule() -> Rule:
+    async def _rule(event: MessageEvent) -> bool:
+        return await _match_upload_with_image(event)
+
+    return Rule(_rule)
+
+
+async def _match_record_reply(event: MessageEvent) -> bool:
+    return getattr(event, "reply", None) is not None
+
+
+def record_reply_rule() -> Rule:
+    async def _rule(event: MessageEvent) -> bool:
+        return await _match_record_reply(event)
+
+    return Rule(_rule)
+
+
 upload_alc = Alconna(
     "上传",
     Args["parts?", MultiVar(At | Text | UniImage)],
     meta=CommandMeta(strict=False, compact=True),
 )
-save_img_cmd = on_alconna(upload_alc, auto_send_output=False, block=True)
+save_img_cmd = on_alconna(
+    upload_alc,
+    auto_send_output=False,
+    block=True,
+    rule=upload_has_image_rule(),
+)
 make_record_alc = Alconna(
     "记录",
     Option("-s|--style", Args["style_name", str], help_text="指定主题样式"),
@@ -459,7 +506,7 @@ make_record_alc = Alconna(
     Args["parts?", MultiVar(At | Text)],
     meta=CommandMeta(strict=False, compact=True),
 )
-make_record_cmd = on_alconna(make_record_alc, block=True)
+make_record_cmd = on_alconna(make_record_alc, block=True, rule=record_reply_rule())
 
 generate_quote_alc = Alconna(
     "生成",
@@ -501,7 +548,8 @@ async def save_img_handle(bot: Bot, event: MessageEvent, arp: Arparma, state: T_
     message_id = event.message_id
     user_id = str(event.get_user_id())
     upload_parts = collect_tag_parts(arp)
-    manual_tags = extract_manual_tags(arp)
+    group_id = session_id.split("_")[1] if "group" in session_id else None
+    manual_tags = await extract_manual_tags_with_mention_names(bot, group_id, arp)
     target_image: UniImage | None = _extract_target_image_from_parts(upload_parts)
 
     # 1. 尝试从回复中获取图片
@@ -560,7 +608,7 @@ async def save_img_handle(bot: Bot, event: MessageEvent, arp: Arparma, state: T_
         await save_img_cmd.finish(f"写入临时文件失败: {e}")
 
     if "group" in session_id:
-        group_id = session_id.split("_")[1]
+        assert group_id is not None
         image_hash = await get_img_hash(temp_image_path)
 
         if (
@@ -872,7 +920,9 @@ async def make_record_handle(
 ):
     """记录语录处理函数 (重构后)"""
     user_id = str(event.get_user_id())
-    manual_tags = extract_manual_tags(arp)
+    manual_tags = await extract_manual_tags_with_mention_names(
+        bot, session.group.id if session.group else None, arp
+    )
 
     img_data, recorded_text, quoted_user_id, error = await _handle_quote_generation(
         bot, event, arp, session, issuer_user_id=user_id

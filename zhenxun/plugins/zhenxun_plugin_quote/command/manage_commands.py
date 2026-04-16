@@ -30,7 +30,10 @@ from ..config import resolve_quote_image_path
 from ..model import Quote
 from ..services.quote_service import QuoteService
 from ..config import QUOTE_ASSETS_PATH
-from ..utils.tag_utils import extract_manual_tags
+from ..utils.tag_utils import (
+    extract_manual_tags,
+    extract_manual_tags_with_mention_names,
+)
 
 _IMAGE_STEM_MD5_RE = re.compile(r"(?i)[0-9a-f]{32}")
 _REPLY_QUOTE_STATE_KEY = "reply_quote"
@@ -466,7 +469,11 @@ async def handle_quote_tag(
 
     if action in {"add", "del"}:
         await _update_quote_manual_tags(
-            bot, event, quote, extract_manual_tags(arp), action
+            bot,
+            event,
+            quote,
+            await extract_manual_tags_with_mention_names(bot, session.group.id, arp),
+            action,
         )
         return
 
@@ -493,7 +500,11 @@ async def handle_quote_addtag(
         return
 
     await _update_quote_manual_tags(
-        bot, event, quote, extract_manual_tags(arp), action="add"
+        bot,
+        event,
+        quote,
+        await extract_manual_tags_with_mention_names(bot, session.group.id, arp),
+        action="add",
     )
 
 
@@ -506,7 +517,11 @@ async def handle_quote_deltag(
         return
 
     await _update_quote_manual_tags(
-        bot, event, quote, extract_manual_tags(arp), action="del"
+        bot,
+        event,
+        quote,
+        await extract_manual_tags_with_mention_names(bot, session.group.id, arp),
+        action="del",
     )
 
 
