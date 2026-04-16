@@ -44,6 +44,7 @@ def _load_module(module_name: str, path: Path):
 _register_namespace_package(PLUGIN_PACKAGE, PLUGIN_ROOT)
 _register_namespace_package(f"{PLUGIN_PACKAGE}.command", PLUGIN_ROOT / "command")
 _register_namespace_package(f"{PLUGIN_PACKAGE}.services", PLUGIN_ROOT / "services")
+_register_namespace_package(f"{PLUGIN_PACKAGE}.utils", PLUGIN_ROOT / "utils")
 
 quote_service_module = _load_module(
     f"{PLUGIN_PACKAGE}.services.quote_service",
@@ -52,6 +53,14 @@ quote_service_module = _load_module(
 manage_commands = _load_module(
     f"{PLUGIN_PACKAGE}.command.manage_commands",
     PLUGIN_ROOT / "command" / "manage_commands.py",
+)
+query_commands = _load_module(
+    f"{PLUGIN_PACKAGE}.command.query_commands",
+    PLUGIN_ROOT / "command" / "query_commands.py",
+)
+upload_commands = _load_module(
+    f"{PLUGIN_PACKAGE}.command.upload_commands",
+    PLUGIN_ROOT / "command" / "upload_commands.py",
 )
 
 QuoteService = quote_service_module.QuoteService
@@ -237,3 +246,136 @@ async def test_find_quote_by_reply_image_falls_back_to_basename(monkeypatch):
     )
 
     assert result is expected_quote
+
+
+def test_compact_quote_shortcut_matches_regular_queries_only():
+    matched_cases = {
+        "语录777": ("777",),
+        "语录统计学": ("统计学",),
+        "语录管理学 test": ("管理学", "test"),
+    }
+    for text, expected in matched_cases.items():
+        result = query_commands.quote_alc.parse(text)
+        assert result.matched is True
+        assert result.all_matched_args["search_keywords"] == expected
+
+    for text in ("语录统计", "语录统计 热门", "语录主题", "语录管理"):
+        assert query_commands.quote_alc.parse(text).matched is False
+
+
+def test_make_record_alc_supports_compact_no_space_input():
+    result = upload_commands.make_record_alc.parse("记录aaa bbb")
+
+    assert result.matched is True
+    assert tuple(part.text for part in result.all_matched_args["parts"]) == (
+        "aaa",
+        "bbb",
+    )
+
+
+@pytest.mark.asyncio
+async def test_set_pending_emoji_like_calls_napcat_api(monkeypatch):
+    monkeypatch.setattr(upload_commands.Config, "get_config", lambda *args, **kwargs: "10024")
+
+    called: list[tuple[str, dict]] = []
+
+    class _Bot:
+        async def call_api(self, name: str, **kwargs):
+            called.append((name, kwargs))
+
+    event = SimpleNamespace(message_id=123456)
+
+    await upload_commands._set_pending_emoji_like(_Bot(), event)
+
+    assert called == [
+        ("set_msg_emoji_like", {"message_id": 123456, "emoji_id": "10024"})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_set_pending_emoji_like_skips_when_disabled(monkeypatch):
+    monkeypatch.setattr(upload_commands.Config, "get_config", lambda *args, **kwargs: "")
+
+    called = False
+
+    class _Bot:
+        async def call_api(self, name: str, **kwargs):
+            nonlocal called
+            called = True
+
+    await upload_commands._set_pending_emoji_like(_Bot(), SimpleNamespace(message_id=1))
+
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_set_pending_emoji_like_ignores_api_failure(monkeypatch):
+    monkeypatch.setattr(upload_commands.Config, "get_config", lambda *args, **kwargs: "10024")
+
+    class _Bot:
+        async def call_api(self, name: str, **kwargs):
+            raise RuntimeError("unsupported")
+
+    await upload_commands._set_pending_emoji_like(_Bot(), SimpleNamespace(message_id=1))
+
+
+@pytest.mark.asyncio
+async def test_delete_quote_standalone_prefers_reply_quote(monkeypatch):
+    reply_quote = SimpleNamespace(id=42)
+    calls = {"reply": 0, "last": 0}
+
+    async def _fake_get_quote_from_reply(bot, event, session):
+        return reply_quote
+
+    async def _fake_handle_delete_reply_quote(bot, event, session, quote=None):
+        calls["reply"] += 1
+        assert quote is reply_quote
+
+    async def _fake_handle_delete_last_quote(bot, event, session):
+        calls["last"] += 1
+
+    monkeypatch.setattr(manage_commands, "_get_quote_from_reply", _fake_get_quote_from_reply)
+    monkeypatch.setattr(
+        manage_commands, "_handle_delete_reply_quote", _fake_handle_delete_reply_quote
+    )
+    monkeypatch.setattr(
+        manage_commands, "_handle_delete_last_quote", _fake_handle_delete_last_quote
+    )
+
+    session = SimpleNamespace(group=SimpleNamespace(id="123"))
+
+    await manage_commands.handle_delete_quote_standalone(
+        SimpleNamespace(), SimpleNamespace(), session
+    )
+
+    assert calls == {"reply": 1, "last": 0}
+
+
+@pytest.mark.asyncio
+async def test_delete_quote_standalone_falls_back_to_last_quote(monkeypatch):
+    calls = {"reply": 0, "last": 0}
+
+    async def _fake_get_quote_from_reply(bot, event, session):
+        return None
+
+    async def _fake_handle_delete_reply_quote(bot, event, session, quote=None):
+        calls["reply"] += 1
+
+    async def _fake_handle_delete_last_quote(bot, event, session):
+        calls["last"] += 1
+
+    monkeypatch.setattr(manage_commands, "_get_quote_from_reply", _fake_get_quote_from_reply)
+    monkeypatch.setattr(
+        manage_commands, "_handle_delete_reply_quote", _fake_handle_delete_reply_quote
+    )
+    monkeypatch.setattr(
+        manage_commands, "_handle_delete_last_quote", _fake_handle_delete_last_quote
+    )
+
+    session = SimpleNamespace(group=SimpleNamespace(id="123"))
+
+    await manage_commands.handle_delete_quote_standalone(
+        SimpleNamespace(), SimpleNamespace(), session
+    )
+
+    assert calls == {"reply": 0, "last": 1}

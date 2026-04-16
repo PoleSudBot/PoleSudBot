@@ -1,5 +1,5 @@
 import aiofiles
-from arclet.alconna import Alconna, Args, Arparma, Subcommand, MultiVar
+from arclet.alconna import Alconna, Args, Arparma, MultiVar, Subcommand
 from nonebot.adapters.onebot.v11 import Bot, Event
 from nonebot.typing import T_State
 from nonebot_plugin_alconna import At, on_alconna
@@ -18,6 +18,12 @@ from ..services.quote_service import QuoteService
 
 quote_alc = Alconna("语录", Args["target_user?", At]["search_keywords?", MultiVar(str)])
 record_pool = on_alconna(quote_alc, priority=2, block=True)
+# 不能直接给“语录”开 compact=True，否则会吞掉“语录统计/语录主题/语录管理”。
+# 这里用负前瞻只补“语录xxx”这种普通查询粘连写法，并保留管理/统计命令原路由。
+record_pool.shortcut(
+    r"语录(?!(?:统计|主题|管理)(?:\s|$))(?P<query>.+)",
+    {"args": ["{query}"], "fuzzy": False},
+)
 
 stats_alc = Alconna(
     "quote",

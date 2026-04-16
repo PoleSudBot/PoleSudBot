@@ -154,7 +154,10 @@ async def _get_quote_from_reply(
 
 
 async def uploader_or_admin_check(
-    bot: Bot, event: MessageEvent, session: Uninfo
+    bot: Bot,
+    event: MessageEvent,
+    session: Uninfo,
+    quote: Quote | None = None,
 ) -> bool:
     """
     检查执行删除操作的用户是否为语录上传者，或者是满足配置权限的管理员。
@@ -164,7 +167,7 @@ async def uploader_or_admin_check(
 
     if session.group:
         user_id = session.user.id
-        quote = await _get_quote_from_reply(bot, event, session)
+        quote = quote or await _get_quote_from_reply(bot, event, session)
         if quote and quote.uploader_user_id == user_id:
             return True
     return False
@@ -184,15 +187,6 @@ async def is_reply_to_bot(event: Event) -> bool:
     )
 
 
-def reply_to_bot_rule() -> Rule:
-    """仅在回复机器人消息时匹配命令"""
-
-    async def _rule(bot: Bot, event: Event, session: Uninfo):
-        return await is_reply_to_bot(event)
-
-    return Rule(_rule)
-
-
 def reply_to_quote_rule() -> Rule:
     """仅在回复机器人发出的语录图片时匹配命令"""
 
@@ -200,17 +194,6 @@ def reply_to_quote_rule() -> Rule:
         if not isinstance(event, MessageEvent):
             return False
         return await _get_quote_from_reply(bot, event, session) is not None
-
-    return Rule(_rule)
-
-
-def not_reply_to_quote_rule() -> Rule:
-    """在非回复语录图片场景下匹配命令"""
-
-    async def _rule(bot: Bot, event: Event, session: Uninfo):
-        if not isinstance(event, MessageEvent):
-            return False
-        return await _get_quote_from_reply(bot, event, session) is None
 
     return Rule(_rule)
 
@@ -287,34 +270,29 @@ async def _update_quote_manual_tags(
     ).send(target=event, bot=bot)
 
 
-async def _handle_delete_reply_quote(bot: Bot, event: MessageEvent, session: Uninfo):
+async def _handle_delete_reply_quote(
+    bot: Bot,
+    event: MessageEvent,
+    session: Uninfo,
+    quote: Quote | None = None,
+):
     """处理回复语录图片后的删除逻辑"""
     group_id = session.group.id
     user_id = session.user.id
 
-    if not await uploader_or_admin_check(bot, event, session):
-        await delete_quote_reply_cmd.finish()
-
-    if not (image_seg := await _get_image_from_reply(event, bot)):
-        logger.debug("回复的消息中未找到图片，无法执行删除操作。", "群聊语录")
-        return
-
-    image_md5, image_basename = _extract_reply_image_identifiers(image_seg)
-    if not image_md5 and not image_basename:
-        logger.warning("无法获取到回复图片的唯一标识，删除失败。", "群聊语录")
-        return
-
-    quote = await QuoteService.find_quote_by_reply_image(
-        group_id,
-        reply_image_md5=image_md5,
-        reply_image_basename=image_basename,
-    )
+    # 回复删除只在已确认回复语录图片时接管，避免和其他插件的“删除”命令互相抢占。
+    quote = quote or await _get_quote_from_reply(bot, event, session)
     if not quote:
         logger.info(
-            f"尝试删除语录失败，回复图片未能定位到群组 {group_id} 中的语录。"
-            f" md5={image_md5}, basename={image_basename}",
+            f"尝试删除语录失败，回复内容未能定位到群组 {group_id} 中的语录。",
             "群聊语录",
         )
+        return
+
+    if not await uploader_or_admin_check(bot, event, session, quote=quote):
+        await MessageUtils.build_message(
+            [At(target=user_id, flag="user"), " 仅上传者或满足删除权限的管理员可删除此语录"]
+        ).send(target=event, bot=bot)
         return
 
     is_deleted = await QuoteService.delete_quote_instance(quote)
@@ -322,8 +300,12 @@ async def _handle_delete_reply_quote(bot: Bot, event: MessageEvent, session: Uni
     if is_deleted:
         await MessageUtils.build_message(
             [At(target=user_id, flag="user"), " 删除成功"]
-        ).send()
+        ).send(target=event, bot=bot)
         return
+
+    await MessageUtils.build_message("删除失败，请稍后再试。").send(
+        target=event, bot=bot
+    )
 
 
 async def _handle_delete_last_quote(bot: Bot, event: MessageEvent, session: Uninfo):
@@ -352,7 +334,7 @@ async def _handle_delete_last_quote(bot: Bot, event: MessageEvent, session: Unin
 
 
 delete_quote_reply_cmd = on_alconna(
-    Alconna("删除"), priority=11, block=True, rule=reply_to_bot_rule()
+    Alconna("删除"), priority=11, block=True, rule=reply_to_quote_rule()
 )
 delete_quote_cmd = on_alconna(Alconna("删除语录"), aliases={"del"}, priority=11, block=True)
 quote_tag_cmd = on_alconna(
@@ -361,24 +343,22 @@ quote_tag_cmd = on_alconna(
     block=True,
     rule=reply_to_quote_rule(),
 )
-quote_tag_hint_cmd = on_alconna(
-    Alconna("tag", Args["action", ["all", "add", "del"]]["parts?", MultiVar(At | Text)]),
-    priority=4,
-    block=True,
-    rule=not_reply_to_quote_rule(),
+quote_alltag_cmd = on_alconna(
+    Alconna("alltag"), priority=4, block=True, rule=reply_to_quote_rule()
 )
-quote_alltag_cmd = on_alconna(Alconna("alltag"), priority=4, block=True)
 quote_addtag_cmd = on_alconna(
     Alconna("addtag", Args["parts?", MultiVar(At | Text)]),
     aliases={"tagadd"},
     priority=4,
     block=True,
+    rule=reply_to_quote_rule(),
 )
 quote_deltag_cmd = on_alconna(
     Alconna("deltag", Args["parts?", MultiVar(At | Text)]),
     aliases={"tagdel"},
     priority=4,
     block=True,
+    rule=reply_to_quote_rule(),
 )
 
 
@@ -403,8 +383,9 @@ async def handle_delete_quote_standalone(
         logger.debug("删除命令在非群聊环境中使用，已忽略。", "群聊语录")
         return
 
-    if await is_reply_to_bot(event):
-        await _handle_delete_reply_quote(bot, event, session)
+    reply_quote = await _get_quote_from_reply(bot, event, session)
+    if reply_quote is not None:
+        await _handle_delete_reply_quote(bot, event, session, quote=reply_quote)
         return
 
     await _handle_delete_last_quote(bot, event, session)
@@ -441,13 +422,6 @@ async def handle_quote_tag(
 
     await MessageUtils.build_message(
         "回复语录时仅支持 tag / tag all / tag add / tag del。"
-    ).send(target=event, bot=bot)
-
-
-@quote_tag_hint_cmd.handle()
-async def handle_quote_tag_hint(bot: Bot, event: MessageEvent):
-    await MessageUtils.build_message(
-        "tag all / tag add / tag del 需要回复 Bot 发出的语录图片后使用。"
     ).send(target=event, bot=bot)
 
 

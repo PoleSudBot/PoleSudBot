@@ -457,6 +457,7 @@ make_record_alc = Alconna(
     Option("-n|--num", Args["count", int, 1], help_text="记录连续消息的数量"),
     Option("-o|--only|--仅作者", help_text="仅记录/生成被回复用户的连续消息"),
     Args["parts?", MultiVar(At | Text)],
+    meta=CommandMeta(strict=False, compact=True),
 )
 make_record_cmd = on_alconna(make_record_alc, block=True)
 
@@ -468,6 +469,29 @@ generate_quote_alc = Alconna(
     Option("-o|--only|--仅作者", help_text="仅生成被回复用户的连续消息"),
 )
 generate_quote_cmd = on_alconna(generate_quote_alc, block=True)
+
+
+async def _set_pending_emoji_like(bot: Bot, event: MessageEvent) -> None:
+    """
+    为上传中的消息添加轻量反馈。
+
+    这是 NapCat 的扩展能力，其他协议端可能不支持，所以这里只做 best-effort，
+    失败时仅记录调试日志，不能影响后续 OCR/AI 与保存流程。
+    """
+    emoji_id = str(
+        Config.get_config("quote", "QUOTE_UPLOAD_PENDING_EMOJI_ID", "10024") or ""
+    ).strip()
+    if not emoji_id:
+        return
+
+    try:
+        await bot.call_api(
+            "set_msg_emoji_like",
+            message_id=int(event.message_id),
+            emoji_id=emoji_id,
+        )
+    except Exception as e:
+        logger.debug(f"设置上传处理中表情失败，可能协议端不支持: {e}", "群聊语录")
 
 
 @save_img_cmd.handle()
@@ -560,6 +584,7 @@ async def save_img_handle(bot: Bot, event: MessageEvent, arp: Arparma, state: T_
             )
             return
 
+        await _set_pending_emoji_like(bot, event)
         ocr_content = await OCRService.recognize_text(str(temp_image_path))
 
         image_name = hashlib.md5(img_data).hexdigest() + ".png"
