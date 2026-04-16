@@ -249,6 +249,8 @@ async def _(
         )
     elif parsed.action == "test_new_card":
         result = await handle_test_new_card_reminder(
+            bot=bot,
+            group_id=group_id,
             platform=platform,
             user_id=user_id,
             server=parsed.server,
@@ -261,6 +263,14 @@ async def _(
     else:
         result = "暂不支持的指令"
 
+    if result is None:
+        logger.info(
+            f"MoeSekai 执行命令: {parsed.action}",
+            parsed.raw_text,
+            session=session,
+            platform=platform,
+        )
+        return
     await _send_result(result, bot=bot, event=event)
     logger.info(
         f"MoeSekai 执行命令: {parsed.action}",

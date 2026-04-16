@@ -335,6 +335,19 @@ class MoeSekaiSettings(BaseModel):
     master_check_interval_seconds: int = 180
     master_check_mode: Literal["revision", "version", "hybrid"] = "revision"
     master_notify_superusers: bool = True
+    new_card_auto_asset_timeout_seconds: float = 8.0
+    new_card_media_fetch_concurrency: int = 4
+    new_card_send_timeout_seconds: float = 12.0
+    new_card_send_delay_min_seconds: float = 0.2
+    new_card_send_delay_max_seconds: float = 0.8
+    new_card_plain_card_max_estimated_bytes: int = 41_943_040
+    new_card_plain_stamp_max_estimated_bytes: int = 10_485_760
+    new_card_abort_after_consecutive_failures: int = 2
+    new_card_forward_max_nodes_per_batch: int = 4
+    new_card_forward_max_estimated_bytes: int = 10_485_760
+    new_card_fallback_delay_min_seconds: float = 1.5
+    new_card_fallback_delay_max_seconds: float = 3.0
+    new_card_fallback_abort_after_consecutive_failures: int = 2
     github_token: str = ""
     alias_global_editor_groups: list[str] = Field(default_factory=list)
     alias_sync_interval_seconds: int = 21600
@@ -717,6 +730,70 @@ REGISTER_CONFIGS = [
     ),
     RegisterConfig(
         module=MODULE_NAME,
+        key="MOESEKAI_NEW_CARD_AUTO_ASSET_TIMEOUT_SECONDS",
+        value=REGISTER_DEFAULTS.new_card_auto_asset_timeout_seconds,
+        default_value=REGISTER_DEFAULTS.new_card_auto_asset_timeout_seconds,
+        help="自动新卡提醒单个资源抓取超时秒数",
+        type=float,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MOESEKAI_NEW_CARD_MEDIA_FETCH_CONCURRENCY",
+        value=REGISTER_DEFAULTS.new_card_media_fetch_concurrency,
+        default_value=REGISTER_DEFAULTS.new_card_media_fetch_concurrency,
+        help="自动新卡提醒资源抓取并发数",
+        type=int,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MOESEKAI_NEW_CARD_SEND_TIMEOUT_SECONDS",
+        value=REGISTER_DEFAULTS.new_card_send_timeout_seconds,
+        default_value=REGISTER_DEFAULTS.new_card_send_timeout_seconds,
+        help="自动新卡提醒单批发送超时秒数",
+        type=float,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MOESEKAI_NEW_CARD_SEND_DELAY_MIN_SECONDS",
+        value=REGISTER_DEFAULTS.new_card_send_delay_min_seconds,
+        default_value=REGISTER_DEFAULTS.new_card_send_delay_min_seconds,
+        help="自动新卡提醒普通消息之间的最小发送间隔秒数",
+        type=float,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MOESEKAI_NEW_CARD_SEND_DELAY_MAX_SECONDS",
+        value=REGISTER_DEFAULTS.new_card_send_delay_max_seconds,
+        default_value=REGISTER_DEFAULTS.new_card_send_delay_max_seconds,
+        help="自动新卡提醒普通消息之间的最大发送间隔秒数",
+        type=float,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MOESEKAI_NEW_CARD_PLAIN_CARD_MAX_ESTIMATED_BYTES",
+        value=REGISTER_DEFAULTS.new_card_plain_card_max_estimated_bytes,
+        default_value=REGISTER_DEFAULTS.new_card_plain_card_max_estimated_bytes,
+        help="自动新卡提醒单条卡图消息的估算字节上限",
+        type=int,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MOESEKAI_NEW_CARD_PLAIN_STAMP_MAX_ESTIMATED_BYTES",
+        value=REGISTER_DEFAULTS.new_card_plain_stamp_max_estimated_bytes,
+        default_value=REGISTER_DEFAULTS.new_card_plain_stamp_max_estimated_bytes,
+        help="自动新卡提醒单条表情消息的估算字节上限",
+        type=int,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MOESEKAI_NEW_CARD_ABORT_AFTER_CONSECUTIVE_FAILURES",
+        value=REGISTER_DEFAULTS.new_card_abort_after_consecutive_failures,
+        default_value=REGISTER_DEFAULTS.new_card_abort_after_consecutive_failures,
+        help="自动新卡提醒连续失败多少次就中止该群本轮发送",
+        type=int,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
         key="MOESEKAI_GITHUB_TOKEN",
         value=REGISTER_DEFAULTS.github_token,
         default_value=REGISTER_DEFAULTS.github_token,
@@ -981,6 +1058,43 @@ def get_settings() -> MoeSekaiSettings:
         "master_notify_superusers": _get_compat_config(
             "MOESEKAI_MASTER_NOTIFY_SUPERUSERS",
             defaults.master_notify_superusers,
+        ),
+        "new_card_auto_asset_timeout_seconds": _get_compat_config(
+            "MOESEKAI_NEW_CARD_AUTO_ASSET_TIMEOUT_SECONDS",
+            defaults.new_card_auto_asset_timeout_seconds,
+        ),
+        "new_card_media_fetch_concurrency": _get_compat_config(
+            "MOESEKAI_NEW_CARD_MEDIA_FETCH_CONCURRENCY",
+            defaults.new_card_media_fetch_concurrency,
+        ),
+        "new_card_send_timeout_seconds": _get_compat_config(
+            "MOESEKAI_NEW_CARD_SEND_TIMEOUT_SECONDS",
+            defaults.new_card_send_timeout_seconds,
+        ),
+        "new_card_send_delay_min_seconds": _get_compat_config(
+            "MOESEKAI_NEW_CARD_SEND_DELAY_MIN_SECONDS",
+            defaults.new_card_send_delay_min_seconds,
+            legacy_keys=["MOESEKAI_NEW_CARD_FALLBACK_DELAY_MIN_SECONDS"],
+        ),
+        "new_card_send_delay_max_seconds": _get_compat_config(
+            "MOESEKAI_NEW_CARD_SEND_DELAY_MAX_SECONDS",
+            defaults.new_card_send_delay_max_seconds,
+            legacy_keys=["MOESEKAI_NEW_CARD_FALLBACK_DELAY_MAX_SECONDS"],
+        ),
+        "new_card_plain_card_max_estimated_bytes": _get_compat_config(
+            "MOESEKAI_NEW_CARD_PLAIN_CARD_MAX_ESTIMATED_BYTES",
+            defaults.new_card_plain_card_max_estimated_bytes,
+            legacy_keys=["MOESEKAI_NEW_CARD_FORWARD_MAX_ESTIMATED_BYTES"],
+        ),
+        "new_card_plain_stamp_max_estimated_bytes": _get_compat_config(
+            "MOESEKAI_NEW_CARD_PLAIN_STAMP_MAX_ESTIMATED_BYTES",
+            defaults.new_card_plain_stamp_max_estimated_bytes,
+            legacy_keys=["MOESEKAI_NEW_CARD_FORWARD_MAX_ESTIMATED_BYTES"],
+        ),
+        "new_card_abort_after_consecutive_failures": _get_compat_config(
+            "MOESEKAI_NEW_CARD_ABORT_AFTER_CONSECUTIVE_FAILURES",
+            defaults.new_card_abort_after_consecutive_failures,
+            legacy_keys=["MOESEKAI_NEW_CARD_FALLBACK_ABORT_AFTER_CONSECUTIVE_FAILURES"],
         ),
         "github_token": _get_compat_config(
             "MOESEKAI_GITHUB_TOKEN",

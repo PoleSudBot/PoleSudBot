@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -212,6 +213,13 @@ class AssetProvider:
         urls = self.build_candidate_urls(server, kind=kind, assetbundle=assetbundle)
         return urls[0] if urls else None
 
+    def get_local_path(self, server: str, *, kind: str, assetbundle: str) -> Path | None:
+        return self._cache_provider.get_local_path(
+            server,
+            kind=kind,
+            assetbundle=assetbundle,
+        )
+
     async def get_card_image(
         self,
         server: str,
@@ -234,6 +242,23 @@ class AssetProvider:
             assetbundle=assetbundle,
             timeout=timeout,
         )
+
+    def get_card_image_local_path(
+        self,
+        server: str,
+        assetbundle: str,
+        *,
+        after_training: bool = False,
+        thumbnail: bool = False,
+    ) -> Path | None:
+        kind = "card_after_training" if after_training else "card_normal"
+        if thumbnail:
+            kind = (
+                "card_thumbnail_after_training"
+                if after_training
+                else "card_thumbnail_normal"
+            )
+        return self.get_local_path(server, kind=kind, assetbundle=assetbundle)
 
     async def get_music_jacket(
         self,
@@ -304,6 +329,13 @@ class AssetProvider:
             assetbundle=assetbundle,
             timeout=timeout,
         )
+
+    def get_stamp_image_local_path(
+        self,
+        server: str,
+        assetbundle: str,
+    ) -> Path | None:
+        return self.get_local_path(server, kind="stamp", assetbundle=assetbundle)
 
     async def get_character_image(
         self,

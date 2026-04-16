@@ -385,6 +385,30 @@ async def has_notification_record(
     )
 
 
+async def list_notification_record_keys_by_groups(
+    *,
+    feature_name: str,
+    server: str,
+    record_key_prefix: str,
+    groups: list[tuple[str, str]],
+) -> dict[tuple[str, str], set[str]]:
+    result = {(platform, group_id): set() for platform, group_id in groups}
+    if not result:
+        return result
+    # 这里按前缀一次性拉回本轮记录，避免群发送阶段对 notification_records 做 N+1 exists 查询。
+    records = await MoeSekaiNotificationRecord.filter(
+        feature_name=feature_name,
+        server=server,
+        record_key__startswith=record_key_prefix,
+    ).values_list("platform", "group_id", "record_key")
+    allowed_groups = set(result)
+    for platform, group_id, record_key in records:
+        group_key = (platform, group_id)
+        if group_key in allowed_groups:
+            result[group_key].add(record_key)
+    return result
+
+
 async def create_notification_record(
     *,
     platform: str,

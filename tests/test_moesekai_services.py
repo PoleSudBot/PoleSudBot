@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from datetime import datetime, timedelta
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 
 import nonebot
 import pytest
+from nonebot.exception import ActionFailed
 from PIL import Image as PILImage
 from PIL import ImageDraw
 
@@ -359,6 +362,8 @@ async def test_handle_test_live_reminder_defaults_to_jp_when_unbound(
 async def test_handle_test_new_card_reminder_defaults_to_jp_when_unbound(
     monkeypatch: pytest.MonkeyPatch,
 ):
+    captured: dict[str, object] = {}
+
     async def fake_resolve_default_server(*_args, **kwargs):
         assert kwargs["explicit_server"] is None
         assert kwargs["fallback_jp"] is True
@@ -372,17 +377,12 @@ async def test_handle_test_new_card_reminder_defaults_to_jp_when_unbound(
         assert server == "jp"
         return [{"id": 200, "assetbundleName": "stamp001", "seq": 1}]
 
-    async def fake_collect_new_card_nodes(*, server: str, **_kwargs):
+    async def fake_send_test_batches(*, bot, group_id: str, server: str, revision: str | None, specs):
         assert server == "jp"
-        return ["preview-node"], 1, 0
-
-    async def fake_build_new_card_forward(*, server: str, revision: str, prepared_nodes, prepared_card_count, prepared_stamp_count, **_kwargs):
-        assert server == "jp"
+        assert group_id == "178732453"
         assert revision == "test"
-        assert prepared_nodes == ["preview-node"]
-        assert prepared_card_count == 1
-        assert prepared_stamp_count == 0
-        return "new-card-forward"
+        captured["keys"] = [spec.key for spec in specs]
+        return True
 
     monkeypatch.setattr(
         service_module.moesekai_app,
@@ -393,22 +393,20 @@ async def test_handle_test_new_card_reminder_defaults_to_jp_when_unbound(
     monkeypatch.setattr(service_module.master_data_provider, "get_stamps", fake_get_stamps)
     monkeypatch.setattr(
         service_module.moesekai_app,
-        "_collect_new_card_nodes",
-        fake_collect_new_card_nodes,
-    )
-    monkeypatch.setattr(
-        service_module.moesekai_app,
-        "_build_new_card_forward",
-        fake_build_new_card_forward,
+        "_send_test_new_card_batches",
+        fake_send_test_batches,
     )
 
     result = await service_module.moesekai_app.handle_test_new_card_reminder(
+        bot=SimpleNamespace(),
+        group_id="178732453",
         platform="qq",
         user_id="123456",
         server=None,
     )
 
-    assert result == "new-card-forward"
+    assert result is None
+    assert captured["keys"] == ["test:summary", "test:card:100", "test:stamp:200"]
 
 
 @pytest.mark.asyncio
@@ -2047,6 +2045,8 @@ async def test_handle_test_new_card_reminder_returns_clear_message_when_no_media
     monkeypatch.setattr(service_module.asset_provider, "get_stamp_image", fake_get_stamp_image)
 
     result = await service_module.moesekai_app.handle_test_new_card_reminder(
+        bot=SimpleNamespace(),
+        group_id="178732453",
         platform="qq",
         user_id="123456",
         server="jp",
@@ -2077,6 +2077,8 @@ async def test_handle_test_new_card_reminder_reports_missing_explicit_card_ids(
     monkeypatch.setattr(service_module.master_data_provider, "get_stamps", fake_get_stamps)
 
     result = await service_module.moesekai_app.handle_test_new_card_reminder(
+        bot=SimpleNamespace(),
+        group_id="178732453",
         platform="qq",
         user_id="123456",
         server="jp",
@@ -2084,3 +2086,1096 @@ async def test_handle_test_new_card_reminder_reports_missing_explicit_card_ids(
     )
 
     assert result == "未找到指定的新卡测试数据"
+
+
+@pytest.mark.asyncio
+async def test_prepare_new_card_summary_item_uses_generic_summary_lines(
+):
+    item = await service_module.moesekai_app._prepare_new_card_summary_item(
+        server="jp",
+        revision="rev-summary",
+        key="rev-summary:summary",
+    )
+
+    expected = "\n".join(
+        [
+            f"{service_module.server_label('jp')} 新卡上线/表情更新",
+            "Revision：rev-summary",
+            "检测到新卡/表情更新",
+        ]
+    )
+    assert str(item.message) == expected
+    assert item.estimated_bytes == len(expected.encode("utf-8"))
+
+
+@pytest.mark.asyncio
+async def test_dispatch_new_card_notifications_replays_pending_snapshot_without_fresh_updates(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    base_key = "rev-pending"
+    summary_key = f"{base_key}:summary"
+    card_key = f"{base_key}:card:100"
+    pending_payload = {
+        "jp": {
+            base_key: {
+                "current_revision": base_key,
+                "current_version": None,
+                "cards": [{"id": 100}],
+                "stamps": [],
+            }
+        }
+    }
+
+    class DummyPendingStore:
+        def load(self, default):
+            return copy.deepcopy(pending_payload or default)
+
+        def save(self, payload):
+            pending_payload.clear()
+            pending_payload.update(copy.deepcopy(payload))
+
+    async def fake_toggles(*, feature_name: str, server: str):
+        return [SimpleNamespace(platform="qq", group_id="group-a")]
+
+    async def fake_sent_keys(**_kwargs):
+        return {("qq", "group-a"): set()}
+
+    async def fake_batches(*, server: str, specs):
+        assert server == "jp"
+        assert [spec.key for spec in specs] == [summary_key, card_key]
+        yield [
+            service_module._NewCardReminderPreparedItem(
+                key=summary_key,
+                kind="summary",
+                message="summary",
+                estimated_bytes=1,
+            ),
+            service_module._NewCardReminderPreparedItem(
+                key=card_key,
+                kind="card",
+                message="card",
+                estimated_bytes=1,
+            ),
+        ]
+
+    plain_calls: list[tuple[str, list[str]]] = []
+
+    async def fake_send_plain_items(
+        *,
+        bot,
+        server: str,
+        revision: str | None,
+        target_state,
+        items,
+        batch_index: int,
+        mark_sent: bool = True,
+    ):
+        plain_calls.append((target_state.group_id, [item.key for item in items]))
+        target_state.pending_keys.difference_update(item.key for item in items)
+
+    monkeypatch.setattr(service_module, "_NEW_CARD_PENDING_STATE", DummyPendingStore())
+    monkeypatch.setattr(service_module, "list_enabled_group_feature_toggles", fake_toggles)
+    monkeypatch.setattr(service_module, "list_notification_record_keys_by_groups", fake_sent_keys)
+    monkeypatch.setattr(service_module.moesekai_app, "_iter_new_card_batches", fake_batches)
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_send_new_card_plain_items",
+        fake_send_plain_items,
+    )
+
+    await service_module.moesekai_app.dispatch_new_card_notifications(
+        bot=SimpleNamespace(),
+        results=[],
+    )
+
+    assert plain_calls == [
+        ("group-a", [summary_key]),
+        ("group-a", [card_key]),
+    ]
+    assert pending_payload == {}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_new_card_notifications_keeps_pending_snapshot_after_failed_round_and_replays_next_round(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    base_key = "rev-replay"
+    summary_key = f"{base_key}:summary"
+    card_key = f"{base_key}:card:100"
+    result = service_module.RegionUpdateResult(
+        server="jp",
+        updated=True,
+        download_success=True,
+        current_revision=base_key,
+        added_records={"cards": [{"id": 100}], "stamps": []},
+    )
+    pending_payload: dict[str, dict[str, dict[str, object]]] = {}
+    replay_round = {"value": 0}
+
+    class DummyPendingStore:
+        def load(self, default):
+            return copy.deepcopy(pending_payload or default)
+
+        def save(self, payload):
+            pending_payload.clear()
+            pending_payload.update(copy.deepcopy(payload))
+
+    async def fake_toggles(*, feature_name: str, server: str):
+        return [SimpleNamespace(platform="qq", group_id="group-a")]
+
+    async def fake_sent_keys(**_kwargs):
+        return {("qq", "group-a"): set()}
+
+    async def fake_batches(*, server: str, specs):
+        assert server == "jp"
+        yield [
+            service_module._NewCardReminderPreparedItem(
+                key=summary_key,
+                kind="summary",
+                message="summary",
+                estimated_bytes=1,
+            ),
+            service_module._NewCardReminderPreparedItem(
+                key=card_key,
+                kind="card",
+                message="card",
+                estimated_bytes=1,
+            ),
+        ]
+
+    async def fake_send_plain_items(
+        *,
+        bot,
+        server: str,
+        revision: str | None,
+        target_state,
+        items,
+        batch_index: int,
+        mark_sent: bool = True,
+    ):
+        if replay_round["value"] == 0:
+            target_state.aborted = True
+            return
+        target_state.pending_keys.difference_update(item.key for item in items)
+
+    monkeypatch.setattr(service_module, "_NEW_CARD_PENDING_STATE", DummyPendingStore())
+    monkeypatch.setattr(service_module, "list_enabled_group_feature_toggles", fake_toggles)
+    monkeypatch.setattr(service_module, "list_notification_record_keys_by_groups", fake_sent_keys)
+    monkeypatch.setattr(service_module.moesekai_app, "_iter_new_card_batches", fake_batches)
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_send_new_card_plain_items",
+        fake_send_plain_items,
+    )
+
+    await service_module.moesekai_app.dispatch_new_card_notifications(
+        bot=SimpleNamespace(),
+        results=[result],
+    )
+
+    assert pending_payload == {
+        "jp": {
+            base_key: {
+                "current_revision": base_key,
+                "current_version": None,
+                "cards": [{"id": 100}],
+                "stamps": [],
+            }
+        }
+    }
+
+    replay_round["value"] = 1
+    await service_module.moesekai_app.dispatch_new_card_notifications(
+        bot=SimpleNamespace(),
+        results=[],
+    )
+
+    assert pending_payload == {}
+
+
+@pytest.mark.asyncio
+async def test_handle_test_new_card_reminder_explicit_ids_do_not_include_stamps(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, object] = {}
+
+    async def fake_get_cards(_server: str):
+        return [{"id": 1006}, {"id": 1007}, {"id": 1008}]
+
+    async def fake_get_stamps(_server: str):
+        return [{"id": 501}]
+
+    async def fake_send_test_batches(*, bot, group_id: str, server: str, revision: str | None, specs):
+        captured["keys"] = [spec.key for spec in specs]
+        return True
+
+    monkeypatch.setattr(service_module.master_data_provider, "get_cards", fake_get_cards)
+    monkeypatch.setattr(service_module.master_data_provider, "get_stamps", fake_get_stamps)
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_send_test_new_card_batches",
+        fake_send_test_batches,
+    )
+
+    result = await service_module.moesekai_app.handle_test_new_card_reminder(
+        bot=SimpleNamespace(),
+        group_id="178732453",
+        platform="qq",
+        user_id="123456",
+        server="jp",
+        card_ids=[1006, 1007],
+    )
+
+    assert result is None
+    assert captured["keys"] == ["test:summary", "test:card:1007", "test:card:1006"]
+
+
+@pytest.mark.asyncio
+async def test_send_test_new_card_batches_reuses_plain_sender_across_prepared_batches(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    settings = SimpleNamespace(
+        new_card_auto_asset_timeout_seconds=8.0,
+        new_card_media_fetch_concurrency=4,
+        new_card_send_timeout_seconds=5.0,
+        new_card_send_delay_min_seconds=0.2,
+        new_card_send_delay_max_seconds=0.8,
+        new_card_plain_card_max_estimated_bytes=10_485_760,
+        new_card_plain_stamp_max_estimated_bytes=10_485_760,
+        new_card_abort_after_consecutive_failures=2,
+    )
+    monkeypatch.setattr(service_module, "get_settings", lambda: settings)
+
+    specs = [
+        service_module._NewCardReminderItemSpec(key="test:summary", kind="summary", payload={}),
+        service_module._NewCardReminderItemSpec(key="test:card:1006", kind="card", payload={}),
+        service_module._NewCardReminderItemSpec(key="test:card:1007", kind="card", payload={}),
+    ]
+
+    async def fake_batches(*, server: str, specs):
+        yield [
+            service_module._NewCardReminderPreparedItem(
+                key="test:summary",
+                kind="summary",
+                message="summary",
+                estimated_bytes=1,
+            ),
+        ]
+        yield [
+            service_module._NewCardReminderPreparedItem(
+                key="test:card:1006",
+                kind="card",
+                message="card-1006",
+                estimated_bytes=1,
+            ),
+        ]
+        yield [
+            service_module._NewCardReminderPreparedItem(
+                key="test:card:1007",
+                kind="card",
+                message="card-1007",
+                estimated_bytes=1,
+            ),
+        ]
+
+    plain_calls: list[tuple[list[str], bool]] = []
+
+    async def fake_send_plain_items(
+        *,
+        bot,
+        server: str,
+        revision: str | None,
+        target_state,
+        items,
+        batch_index: int,
+        mark_sent: bool = True,
+    ):
+        plain_calls.append(([item.key for item in items], mark_sent))
+        target_state.pending_keys.difference_update(item.key for item in items)
+
+    monkeypatch.setattr(service_module.moesekai_app, "_iter_new_card_batches", fake_batches)
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_send_new_card_plain_items",
+        fake_send_plain_items,
+    )
+
+    sent_content = await service_module.moesekai_app._send_test_new_card_batches(
+        bot=SimpleNamespace(),
+        group_id="178732453",
+        server="jp",
+        revision="test",
+        specs=specs,
+    )
+
+    assert sent_content is True
+    assert plain_calls == [
+        (["test:summary"], False),
+        (["test:card:1006", "test:card:1007"], False),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_build_new_card_segments_fetches_normal_and_trained_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    started: list[bool] = []
+    both_started = asyncio.Event()
+    release = asyncio.Event()
+
+    monkeypatch.setattr(
+        service_module.asset_provider,
+        "only_has_after_training",
+        lambda _card: False,
+    )
+    monkeypatch.setattr(
+        service_module.asset_provider,
+        "has_after_training",
+        lambda _card: True,
+    )
+
+    async def fake_get_card_image(
+        _server: str,
+        _assetbundle: str,
+        *,
+        after_training: bool = False,
+        timeout: float = 20,
+    ) -> bytes:
+        assert timeout == 5
+        started.append(after_training)
+        if len(started) == 2:
+            both_started.set()
+        await release.wait()
+        return b"trained-image" if after_training else b"normal-image"
+
+    monkeypatch.setattr(
+        service_module.asset_provider,
+        "get_card_image",
+        fake_get_card_image,
+    )
+    monkeypatch.setattr(
+        service_module.alias_provider,
+        "get_character_profile",
+        lambda _target_id, **_kwargs: asyncio.sleep(0, result=AliasProfile(
+            target_type="character",
+            target_id="200",
+            canonical_name="初音未来",
+            display_title="初音未来",
+            merged_aliases=[],
+            group_aliases=[],
+        )),
+    )
+
+    task = asyncio.create_task(
+        service_module.moesekai_app._build_new_card_segments(
+            "jp",
+            {
+                "id": 100,
+                "name": "群青赞歌",
+                "characterId": 200,
+                "cardRarityType": "rarity_4",
+                "assetbundleName": "card001",
+            },
+            asset_timeout=5,
+        )
+    )
+    await asyncio.wait_for(both_started.wait(), timeout=1)
+    release.set()
+    segments, has_media, estimated_bytes = await task
+
+    assert has_media is True
+    assert len(segments) == 3
+    assert str(segments[0]) == "100:🌟4[群青赞歌]初音未来"
+    assert set(started) == {False, True}
+    assert estimated_bytes >= len(b"normal-image") + len(b"trained-image")
+
+
+@pytest.mark.asyncio
+async def test_build_new_card_segments_prefers_prefix_and_cached_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    cached_image = tmp_path / "card_normal.png"
+    cached_image.write_bytes(b"cached")
+
+    monkeypatch.setattr(
+        service_module.asset_provider,
+        "only_has_after_training",
+        lambda _card: False,
+    )
+    monkeypatch.setattr(
+        service_module.asset_provider,
+        "has_after_training",
+        lambda _card: False,
+    )
+
+    async def fake_get_card_image(
+        _server: str,
+        _assetbundle: str,
+        *,
+        after_training: bool = False,
+        timeout: float = 20,
+    ) -> bytes:
+        assert after_training is False
+        return b"normal-image"
+
+    monkeypatch.setattr(
+        service_module.asset_provider,
+        "get_card_image",
+        fake_get_card_image,
+    )
+    monkeypatch.setattr(
+        service_module.asset_provider,
+        "get_card_image_local_path",
+        lambda *_args, **_kwargs: cached_image,
+    )
+    monkeypatch.setattr(
+        service_module.alias_provider,
+        "get_character_profile",
+        lambda _target_id, **_kwargs: asyncio.sleep(0, result=AliasProfile(
+            target_type="character",
+            target_id="14",
+            canonical_name="鳳えむ",
+            display_title="鳳えむ",
+            merged_aliases=[],
+            group_aliases=[],
+        )),
+    )
+
+    segments, has_media, _ = await service_module.moesekai_app._build_new_card_segments(
+        "jp",
+        {
+            "id": 805,
+            "name": "",
+            "prefix": "feat.シナモロール",
+            "characterId": 14,
+            "cardRarityType": "rarity_4",
+            "assetbundleName": "res014_no032",
+        },
+    )
+
+    assert has_media is True
+    assert str(segments[0]) == "805:🌟4[feat.シナモロール]鳳えむ"
+    assert getattr(segments[1], "path", None) == str(cached_image)
+    assert getattr(segments[1], "raw", None) is None
+
+
+@pytest.mark.asyncio
+async def test_build_new_card_segments_falls_back_to_raw_when_cached_path_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        service_module.asset_provider,
+        "only_has_after_training",
+        lambda _card: False,
+    )
+    monkeypatch.setattr(
+        service_module.asset_provider,
+        "has_after_training",
+        lambda _card: False,
+    )
+
+    async def fake_get_card_image(
+        _server: str,
+        _assetbundle: str,
+        *,
+        after_training: bool = False,
+        timeout: float = 20,
+    ) -> bytes:
+        assert after_training is False
+        return b"normal-image"
+
+    monkeypatch.setattr(
+        service_module.asset_provider,
+        "get_card_image",
+        fake_get_card_image,
+    )
+    monkeypatch.setattr(
+        service_module.asset_provider,
+        "get_card_image_local_path",
+        lambda *_args, **_kwargs: None,
+    )
+
+    async def fake_get_character_profile(_target_id: str, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        service_module.alias_provider,
+        "get_character_profile",
+        fake_get_character_profile,
+    )
+
+    segments, has_media, _ = await service_module.moesekai_app._build_new_card_segments(
+        "jp",
+        {
+            "id": 101,
+            "name": "未知卡",
+            "characterId": 999,
+            "cardRarityType": "rarity_special",
+            "assetbundleName": "card002",
+        },
+    )
+
+    assert has_media is True
+    assert str(segments[0]) == "101:rarity_special[未知卡]角色999"
+    assert getattr(segments[1], "path", None) is None
+    assert getattr(segments[1], "raw", None) == b"normal-image"
+
+
+@pytest.mark.asyncio
+async def test_build_new_card_segments_falls_back_for_unknown_rarity_and_character(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        service_module.asset_provider,
+        "only_has_after_training",
+        lambda _card: False,
+    )
+    monkeypatch.setattr(
+        service_module.asset_provider,
+        "has_after_training",
+        lambda _card: False,
+    )
+
+    async def fake_get_card_image(
+        _server: str,
+        _assetbundle: str,
+        *,
+        after_training: bool = False,
+        timeout: float = 20,
+    ) -> bytes:
+        assert after_training is False
+        return b"normal-image"
+
+    async def fake_get_character_profile(_target_id: str, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        service_module.asset_provider,
+        "get_card_image",
+        fake_get_card_image,
+    )
+    monkeypatch.setattr(
+        service_module.alias_provider,
+        "get_character_profile",
+        fake_get_character_profile,
+    )
+
+    segments, has_media, _ = await service_module.moesekai_app._build_new_card_segments(
+        "jp",
+        {
+            "id": 101,
+            "name": "未知卡",
+            "characterId": 999,
+            "cardRarityType": "rarity_special",
+            "assetbundleName": "card002",
+        },
+    )
+
+    assert has_media is True
+    assert str(segments[0]) == "101:rarity_special[未知卡]角色999"
+
+
+@pytest.mark.asyncio
+async def test_iter_new_card_batches_chunks_by_prepare_window(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    settings = SimpleNamespace(
+        new_card_auto_asset_timeout_seconds=8.0,
+        new_card_media_fetch_concurrency=2,
+        new_card_plain_card_max_estimated_bytes=10,
+        new_card_plain_stamp_max_estimated_bytes=10,
+    )
+    monkeypatch.setattr(service_module, "get_settings", lambda: settings)
+
+    async def fake_prepare(*, server: str, spec, asset_timeout: float, semaphore):
+        assert server == "jp"
+        assert asset_timeout == 8.0
+        assert semaphore is not None
+        return service_module._NewCardReminderPreparedItem(
+            key=spec.key,
+            kind=spec.kind,
+            message=f"node-{spec.key}",
+            estimated_bytes=6,
+        )
+
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_prepare_new_card_item",
+        fake_prepare,
+    )
+
+    specs = [
+        service_module._NewCardReminderItemSpec(key="item1", kind="card", payload={}),
+        service_module._NewCardReminderItemSpec(key="item2", kind="card", payload={}),
+        service_module._NewCardReminderItemSpec(key="item3", kind="card", payload={}),
+    ]
+    batches = [
+        [item.key for item in batch]
+        async for batch in service_module.moesekai_app._iter_new_card_batches(
+            server="jp",
+            specs=specs,
+        )
+    ]
+
+    assert batches == [["item1", "item2"], ["item3"]]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_new_card_notifications_filters_pending_keys_per_group(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    base_key = "rev-1"
+    summary_key = f"{base_key}:summary"
+    card_key = f"{base_key}:card:100"
+    result = service_module.RegionUpdateResult(
+        server="jp",
+        updated=True,
+        download_success=True,
+        current_revision=base_key,
+        added_records={"cards": [{"id": 100}], "stamps": []},
+    )
+    pending_payload: dict[str, dict[str, dict[str, object]]] = {}
+
+    class DummyPendingStore:
+        def load(self, default):
+            return copy.deepcopy(pending_payload or default)
+
+        def save(self, payload):
+            pending_payload.clear()
+            pending_payload.update(copy.deepcopy(payload))
+
+    async def fake_toggles(*, feature_name: str, server: str):
+        assert feature_name == service_module.FEATURE_NEW_CARD_REMINDER
+        assert server == "jp"
+        return [
+            SimpleNamespace(platform="qq", group_id="group-a"),
+            SimpleNamespace(platform="qq", group_id="group-b"),
+        ]
+
+    async def fake_sent_keys(*, feature_name: str, server: str, record_key_prefix: str, groups):
+        assert record_key_prefix == f"{base_key}:"
+        return {
+            ("qq", "group-a"): set(),
+            ("qq", "group-b"): {summary_key},
+        }
+
+    async def fake_batches(*, server: str, specs):
+        assert server == "jp"
+        assert [spec.key for spec in specs] == [summary_key, card_key]
+        yield [
+            service_module._NewCardReminderPreparedItem(
+                key=summary_key,
+                kind="summary",
+                message="summary",
+                estimated_bytes=1,
+            ),
+            service_module._NewCardReminderPreparedItem(
+                key=card_key,
+                kind="card",
+                message="card-100",
+                estimated_bytes=1,
+            ),
+        ]
+
+    plain_calls: list[tuple[str, list[str]]] = []
+
+    async def fake_send_plain_items(
+        *,
+        bot,
+        server: str,
+        revision: str | None,
+        target_state,
+        items,
+        batch_index: int,
+        mark_sent: bool = True,
+    ):
+        plain_calls.append((target_state.group_id, [item.key for item in items]))
+        target_state.pending_keys.difference_update(item.key for item in items)
+
+    monkeypatch.setattr(
+        service_module,
+        "list_enabled_group_feature_toggles",
+        fake_toggles,
+    )
+    monkeypatch.setattr(service_module, "_NEW_CARD_PENDING_STATE", DummyPendingStore())
+    monkeypatch.setattr(
+        service_module,
+        "list_notification_record_keys_by_groups",
+        fake_sent_keys,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_iter_new_card_batches",
+        fake_batches,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_send_new_card_plain_items",
+        fake_send_plain_items,
+    )
+
+    await service_module.moesekai_app.dispatch_new_card_notifications(
+        bot=SimpleNamespace(),
+        results=[result],
+    )
+
+    assert plain_calls == [
+        ("group-a", [summary_key]),
+        ("group-a", [card_key]),
+        ("group-b", [card_key]),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_new_card_notifications_failed_group_does_not_block_others(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    base_key = "rev-2"
+    summary_key = f"{base_key}:summary"
+    card_1_key = f"{base_key}:card:100"
+    card_2_key = f"{base_key}:card:101"
+    result = service_module.RegionUpdateResult(
+        server="jp",
+        updated=True,
+        download_success=True,
+        current_revision=base_key,
+        added_records={"cards": [{"id": 100}, {"id": 101}], "stamps": []},
+    )
+    pending_payload: dict[str, dict[str, dict[str, object]]] = {}
+
+    class DummyPendingStore:
+        def load(self, default):
+            return copy.deepcopy(pending_payload or default)
+
+        def save(self, payload):
+            pending_payload.clear()
+            pending_payload.update(copy.deepcopy(payload))
+
+    async def fake_toggles(*, feature_name: str, server: str):
+        return [
+            SimpleNamespace(platform="qq", group_id="group-a"),
+            SimpleNamespace(platform="qq", group_id="group-b"),
+        ]
+
+    async def fake_sent_keys(**_kwargs):
+        return {
+            ("qq", "group-a"): set(),
+            ("qq", "group-b"): set(),
+        }
+
+    async def fake_batches(*, server: str, specs):
+        assert [spec.key for spec in specs] == [summary_key, card_2_key, card_1_key]
+        yield [
+            service_module._NewCardReminderPreparedItem(
+                key=summary_key,
+                kind="summary",
+                message="summary",
+                estimated_bytes=1,
+            ),
+            service_module._NewCardReminderPreparedItem(
+                key=card_2_key,
+                kind="card",
+                message="card-101",
+                estimated_bytes=1,
+            ),
+        ]
+        yield [
+            service_module._NewCardReminderPreparedItem(
+                key=card_1_key,
+                kind="card",
+                message="card-100",
+                estimated_bytes=1,
+            )
+        ]
+
+    plain_calls: list[tuple[str, list[str], int]] = []
+
+    async def fake_send_plain_items(
+        *,
+        bot,
+        server: str,
+        revision: str | None,
+        target_state,
+        items,
+        batch_index: int,
+        mark_sent: bool = True,
+    ):
+        plain_calls.append((target_state.group_id, [item.key for item in items], batch_index))
+        if target_state.group_id == "group-a" and any(item.kind == "card" for item in items):
+            target_state.aborted = True
+            return
+        target_state.pending_keys.difference_update(item.key for item in items)
+
+    monkeypatch.setattr(
+        service_module,
+        "list_enabled_group_feature_toggles",
+        fake_toggles,
+    )
+    monkeypatch.setattr(service_module, "_NEW_CARD_PENDING_STATE", DummyPendingStore())
+    monkeypatch.setattr(
+        service_module,
+        "list_notification_record_keys_by_groups",
+        fake_sent_keys,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_iter_new_card_batches",
+        fake_batches,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_send_new_card_plain_items",
+        fake_send_plain_items,
+    )
+
+    await service_module.moesekai_app.dispatch_new_card_notifications(
+        bot=SimpleNamespace(),
+        results=[result],
+    )
+
+    assert plain_calls == [
+        ("group-a", [summary_key], 1),
+        ("group-b", [summary_key], 1),
+        ("group-a", [card_2_key, card_1_key], 2),
+        ("group-b", [card_2_key, card_1_key], 2),
+    ]
+
+
+def test_build_new_card_plain_message_batches_separates_cards_and_stamps(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    settings = SimpleNamespace(
+        new_card_plain_card_max_estimated_bytes=10,
+        new_card_plain_stamp_max_estimated_bytes=10,
+    )
+    monkeypatch.setattr(service_module, "get_settings", lambda: settings)
+
+    items = [
+        service_module._NewCardReminderPreparedItem(
+            key="summary",
+            kind="summary",
+            message="summary",
+            estimated_bytes=1,
+        ),
+        service_module._NewCardReminderPreparedItem(
+            key="card-1",
+            kind="card",
+            message="card-1",
+            estimated_bytes=4,
+        ),
+        service_module._NewCardReminderPreparedItem(
+            key="card-2",
+            kind="card",
+            message="card-2",
+            estimated_bytes=4,
+        ),
+        service_module._NewCardReminderPreparedItem(
+            key="stamp-1",
+            kind="stamp",
+            message="stamp-1",
+            estimated_bytes=4,
+        ),
+        service_module._NewCardReminderPreparedItem(
+            key="stamp-2",
+            kind="stamp",
+            message="stamp-2",
+            estimated_bytes=4,
+        ),
+    ]
+
+    batches = service_module.moesekai_app._build_new_card_plain_message_batches(items)
+    assert [[item.key for item in batch] for batch in batches] == [
+        ["summary"],
+        ["card-1", "card-2"],
+        ["stamp-1", "stamp-2"],
+    ]
+
+
+def test_build_new_card_plain_message_batches_splits_cards_on_byte_limit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    settings = SimpleNamespace(
+        new_card_plain_card_max_estimated_bytes=7,
+        new_card_plain_stamp_max_estimated_bytes=10,
+    )
+    monkeypatch.setattr(service_module, "get_settings", lambda: settings)
+
+    items = [
+        service_module._NewCardReminderPreparedItem(
+            key="card-1",
+            kind="card",
+            message="card-1",
+            estimated_bytes=4,
+        ),
+        service_module._NewCardReminderPreparedItem(
+            key="card-2",
+            kind="card",
+            message="card-2",
+            estimated_bytes=4,
+        ),
+    ]
+
+    batches = service_module.moesekai_app._build_new_card_plain_message_batches(items)
+    assert [[item.key for item in batch] for batch in batches] == [["card-1"], ["card-2"]]
+
+
+@pytest.mark.asyncio
+async def test_send_new_card_plain_items_inserts_delay_and_marks_success(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    settings = SimpleNamespace(
+        new_card_send_timeout_seconds=5.0,
+        new_card_send_delay_min_seconds=1.5,
+        new_card_send_delay_max_seconds=3.0,
+        new_card_plain_card_max_estimated_bytes=10,
+        new_card_plain_stamp_max_estimated_bytes=10,
+        new_card_abort_after_consecutive_failures=2,
+    )
+    monkeypatch.setattr(service_module, "get_settings", lambda: settings)
+
+    send_calls: list[str] = []
+    sleep_calls: list[float] = []
+    marked: list[list[str]] = []
+
+    async def fake_send_message(_bot, _user_id, group_id: str, _message):
+        send_calls.append(group_id)
+        return "ok"
+
+    async def fake_mark(*, platform: str, group_id: str, server: str, keys: list[str]):
+        marked.append(keys)
+
+    async def fake_sleep(delay: float):
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(service_module.PlatformUtils, "send_message", fake_send_message)
+    monkeypatch.setattr(service_module.moesekai_app, "_mark_new_card_keys_sent", fake_mark)
+    monkeypatch.setattr(service_module.random, "uniform", lambda _a, _b: 2.25)
+    monkeypatch.setattr(service_module.asyncio, "sleep", fake_sleep)
+
+    target_state = service_module._NewCardReminderTargetState(
+        platform="qq",
+        group_id="group-a",
+        pending_keys={"key-1", "key-2", "key-3", "key-4"},
+    )
+    items = [
+        service_module._NewCardReminderPreparedItem(
+            key="key-1",
+            kind="summary",
+            message="summary",
+            estimated_bytes=1,
+        ),
+        service_module._NewCardReminderPreparedItem(
+            key="key-2",
+            kind="card",
+            message="card-1",
+            estimated_bytes=4,
+        ),
+        service_module._NewCardReminderPreparedItem(
+            key="key-3",
+            kind="card",
+            message="card-2",
+            estimated_bytes=4,
+        ),
+        service_module._NewCardReminderPreparedItem(
+            key="key-4",
+            kind="stamp",
+            message="stamp-1",
+            estimated_bytes=4,
+        ),
+    ]
+
+    await service_module.moesekai_app._send_new_card_plain_items(
+        bot=SimpleNamespace(),
+        server="jp",
+        revision="rev",
+        target_state=target_state,
+        items=items,
+        batch_index=1,
+    )
+
+    assert send_calls == ["group-a", "group-a", "group-a"]
+    assert sleep_calls == [2.25, 2.25]
+    assert marked == [["key-1"], ["key-2", "key-3"], ["key-4"]]
+    assert target_state.pending_keys == set()
+    assert target_state.aborted is False
+
+
+@pytest.mark.asyncio
+async def test_send_new_card_plain_items_aborts_after_consecutive_failures(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    settings = SimpleNamespace(
+        new_card_send_timeout_seconds=5.0,
+        new_card_send_delay_min_seconds=1.5,
+        new_card_send_delay_max_seconds=3.0,
+        new_card_plain_card_max_estimated_bytes=10,
+        new_card_plain_stamp_max_estimated_bytes=10,
+        new_card_abort_after_consecutive_failures=2,
+    )
+    monkeypatch.setattr(service_module, "get_settings", lambda: settings)
+
+    send_attempts: list[str] = []
+
+    async def fake_send_message(_bot, _user_id, group_id: str, _message):
+        send_attempts.append(group_id)
+        raise ActionFailed("onebot", {"retcode": 123, "msg": "blocked"})
+
+    async def fail_mark(**_kwargs):
+        raise AssertionError("连续失败时不应写入成功记录")
+
+    monkeypatch.setattr(service_module.PlatformUtils, "send_message", fake_send_message)
+    monkeypatch.setattr(service_module.moesekai_app, "_mark_new_card_keys_sent", fail_mark)
+
+    target_state = service_module._NewCardReminderTargetState(
+        platform="qq",
+        group_id="group-a",
+        pending_keys={"key-1", "key-2", "key-3"},
+    )
+    items = [
+        service_module._NewCardReminderPreparedItem(
+            key="key-1",
+            kind="summary",
+            message="summary",
+            estimated_bytes=1,
+        ),
+        service_module._NewCardReminderPreparedItem(
+            key="key-2",
+            kind="card",
+            message="card-1",
+            estimated_bytes=4,
+        ),
+        service_module._NewCardReminderPreparedItem(
+            key="key-3",
+            kind="card",
+            message="card-2",
+            estimated_bytes=4,
+        ),
+    ]
+
+    await service_module.moesekai_app._send_new_card_plain_items(
+        bot=SimpleNamespace(),
+        server="jp",
+        revision="rev",
+        target_state=target_state,
+        items=items,
+        batch_index=1,
+    )
+
+    assert send_attempts == ["group-a", "group-a"]
+    assert target_state.aborted is True
+    assert target_state.pending_keys == {"key-1", "key-2", "key-3"}
+
+
+def test_build_new_card_item_specs_skips_summary_when_only_retrying_missing_items():
+    base_key = "rev-3"
+    specs = service_module.moesekai_app._build_new_card_item_specs(
+        server="jp",
+        revision=base_key,
+        base_key=base_key,
+        cards=[{"id": 100}, {"id": 101}],
+        stamps=[{"id": 200}],
+        pending_keys={f"{base_key}:card:101", f"{base_key}:stamp:200"},
+    )
+
+    assert [spec.key for spec in specs] == [f"{base_key}:card:101", f"{base_key}:stamp:200"]

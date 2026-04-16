@@ -67,6 +67,9 @@ class PathBinaryFileStore:
             raise ValueError(f"relative_path 非法: {relative_path}")
         return self.root.joinpath(*normalized.parts)
 
+    def resolve_path(self, relative_path: str) -> Path:
+        return self._resolve_path(relative_path)
+
     def load(
         self,
         relative_path: str,

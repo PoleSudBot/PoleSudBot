@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import time
 from typing import Any
 
@@ -88,6 +88,37 @@ class AssetCacheProvider:
 
     def get_by_relative_path(self, relative_path: str) -> bytes | None:
         return self._store.load(self._normalize_relative_path(relative_path))
+
+    def get_local_path(
+        self,
+        server: str,
+        *,
+        kind: str,
+        assetbundle: str,
+    ) -> Path | None:
+        for relative_path in self.canonical_relative_paths(
+            server,
+            kind=kind,
+            assetbundle=assetbundle,
+            audio_extensions=list(get_settings().audio_format_priority),
+        ):
+            if path := self.get_local_path_by_relative_path(relative_path):
+                return path
+        return None
+
+    def get_local_path_by_relative_path(self, relative_path: str) -> Path | None:
+        normalized_path = self._normalize_relative_path(relative_path)
+        manifest_entry = self._load_manifest().get(normalized_path)
+        if manifest_entry:
+            local_path_value = manifest_entry.get("local_path")
+            if isinstance(local_path_value, str) and local_path_value.strip():
+                local_path = Path(local_path_value)
+                if local_path.is_file():
+                    return local_path
+        # manifest 可能因异常中断而缺失，但缓存文件本体仍在；这里回退到规范缓存路径，
+        # 避免把本可直接走本地文件的图片重新退回 raw/base64 发送。
+        local_path = self._store.resolve_path(normalized_path)
+        return local_path if local_path.is_file() else None
 
     def set(
         self,

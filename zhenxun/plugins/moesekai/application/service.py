@@ -1,20 +1,21 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Literal
+import random
+import time
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal
 
 from nonebot.adapters import Bot
+from nonebot.exception import ActionFailed, AdapterException
 from nonebot_plugin_alconna import At, Image, Text, UniMessage
 from tortoise import Tortoise
 
 from ..adapters.results import (
-    MoeForwardMessage,
     MoeImageTextMessage,
     build_alias_profile_image,
-    build_forward_message,
     build_image_message,
     build_native_image_text_message,
     build_text_block_image,
@@ -60,6 +61,7 @@ from ..repositories import (
     get_group_feature_toggle,
     get_or_create_user_settings,
     get_user_binding,
+    list_notification_record_keys_by_groups,
     get_user_feature_subscription,
     get_user_settings,
     has_notification_record,
@@ -80,13 +82,36 @@ from ..screenshot import ScreenshotError, screenshot_service
 from ..storage.state import JsonStateStore
 
 PREDICTION_RANKS = [50, 100, 200, 300, 500, 1000, 2000, 3000, 5000, 10000]
-NEW_CARD_TEST_CARD_LIMIT = 3
-NEW_CARD_TEST_STAMP_LIMIT = 3
 NEW_CARD_TEST_SCAN_LIMIT = 12
-NEW_CARD_TEST_ASSET_TIMEOUT_SECONDS = 6.0
 ALIAS_IMAGE_TEXT_THRESHOLD = 100
 ALIAS_IMAGE_COUNT_THRESHOLD = 20
 _ALIAS_STATE = JsonStateStore(STATE_DIR / "alias_sync_state.json")
+_NEW_CARD_PENDING_STATE = JsonStateStore(STATE_DIR / "new_card_pending_state.json")
+
+
+@dataclass(frozen=True)
+class _NewCardReminderItemSpec:
+    key: str
+    kind: Literal["summary", "card", "stamp"]
+    payload: Any
+
+
+@dataclass(frozen=True)
+class _NewCardReminderPreparedItem:
+    key: str
+    kind: Literal["summary", "card", "stamp"]
+    message: UniMessage
+    estimated_bytes: int
+
+
+@dataclass
+class _NewCardReminderTargetState:
+    platform: str
+    group_id: str
+    pending_keys: set[str]
+    consecutive_failures: int = 0
+    aborted: bool = False
+    started_at: float = 0.0
 
 
 class MoeSekaiApplication:
@@ -1492,173 +1517,940 @@ class MoeSekaiApplication:
             stamp_id = 0
         return seq, stamp_id
 
-    async def _build_new_card_node(
+    def _new_card_base_record_key(
+        self,
+        *,
+        revision: str | None,
+        version: str | None = None,
+    ) -> str:
+        return str(revision or version or "unknown")
+
+    def _new_card_summary_record_key(self, base_key: str) -> str:
+        return f"{base_key}:summary"
+
+    def _new_card_card_record_key(self, base_key: str, card_id: int | str) -> str:
+        return f"{base_key}:card:{card_id}"
+
+    def _new_card_stamp_record_key(self, base_key: str, stamp_id: int | str) -> str:
+        return f"{base_key}:stamp:{stamp_id}"
+
+    def _normalize_new_card_pending_state(self, payload: Any) -> dict[str, dict[str, dict[str, Any]]]:
+        if not isinstance(payload, dict):
+            return {}
+        normalized: dict[str, dict[str, dict[str, Any]]] = {}
+        for server, snapshots in payload.items():
+            server_text = str(server).strip().lower()
+            if not server_text or not isinstance(snapshots, dict):
+                continue
+            normalized_snapshots: dict[str, dict[str, Any]] = {}
+            for base_key, snapshot in snapshots.items():
+                if not isinstance(snapshot, dict):
+                    continue
+                cards = [
+                    item for item in snapshot.get("cards", [])
+                    if isinstance(item, dict)
+                ]
+                stamps = [
+                    item for item in snapshot.get("stamps", [])
+                    if isinstance(item, dict)
+                ]
+                if not cards and not stamps:
+                    continue
+                normalized_snapshots[str(base_key)] = {
+                    "current_revision": (
+                        str(snapshot.get("current_revision"))
+                        if snapshot.get("current_revision") is not None
+                        else None
+                    ),
+                    "current_version": (
+                        str(snapshot.get("current_version"))
+                        if snapshot.get("current_version") is not None
+                        else None
+                    ),
+                    "cards": cards,
+                    "stamps": stamps,
+                }
+            if normalized_snapshots:
+                normalized[server_text] = normalized_snapshots
+        return normalized
+
+    def _load_new_card_pending_state(self) -> dict[str, dict[str, dict[str, Any]]]:
+        return self._normalize_new_card_pending_state(_NEW_CARD_PENDING_STATE.load({}))
+
+    def _save_new_card_pending_state(self, payload: dict[str, dict[str, dict[str, Any]]]) -> None:
+        _NEW_CARD_PENDING_STATE.save(self._normalize_new_card_pending_state(payload))
+
+    def _store_new_card_pending_snapshot(
+        self,
+        state: dict[str, dict[str, dict[str, Any]]],
+        *,
+        server: str,
+        base_key: str,
+        revision: str | None,
+        version: str | None,
+        cards: list[dict[str, Any]],
+        stamps: list[dict[str, Any]],
+    ) -> None:
+        if not cards and not stamps:
+            return
+        server_state = state.setdefault(server, {})
+        # 这里先持久化“本轮需要补发的原始新增项”，这样即使发送中途失败，
+        # 下一轮普通 probe 也还能继续按现有 notification_records 补发遗漏逻辑项。
+        server_state[base_key] = {
+            "current_revision": revision,
+            "current_version": version,
+            "cards": cards,
+            "stamps": stamps,
+        }
+
+    def _delete_new_card_pending_snapshot(
+        self,
+        state: dict[str, dict[str, dict[str, Any]]],
+        *,
+        server: str,
+        base_key: str,
+    ) -> None:
+        server_state = state.get(server)
+        if not server_state:
+            return
+        server_state.pop(base_key, None)
+        if not server_state:
+            state.pop(server, None)
+
+    def _new_card_summary_lines(self, revision: str | None) -> list[str]:
+        return [
+            f"Revision：{revision or '-'}",
+            "检测到新卡/表情更新",
+        ]
+
+    @staticmethod
+    def _new_card_setting_value(
+        settings: Any,
+        primary_name: str,
+        *,
+        default: int | float,
+        legacy_name: str | None = None,
+    ) -> int | float:
+        value = getattr(settings, primary_name, None)
+        if value is not None:
+            return value
+        if legacy_name:
+            legacy_value = getattr(settings, legacy_name, None)
+            if legacy_value is not None:
+                return legacy_value
+        return default
+
+    def _new_card_rarity_label(self, rarity: str | None) -> str:
+        normalized = str(rarity or "").strip().lower()
+        return {
+            "rarity_4": "🌟4",
+            "rarity_3": "🌟3",
+            "rarity_2": "🌟2",
+            "rarity_1": "🌟1",
+            "rarity_birthday": "生日",
+        }.get(normalized, str(rarity or "-").strip() or "-")
+
+    async def _resolve_new_card_character_name(self, character_id: Any) -> str:
+        character_text = str(character_id or "").strip()
+        if not character_text:
+            return "角色-"
+        profile = await alias_provider.get_character_profile(character_text)
+        if profile and profile.canonical_name:
+            return profile.canonical_name
+        return f"角色{character_text}"
+
+    async def _build_new_card_text_block(self, card: dict[str, Any]) -> str:
+        character_name = await self._resolve_new_card_character_name(card.get("characterId"))
+        card_name = (
+            str(card.get("name") or "").strip()
+            or str(card.get("prefix") or "").strip()
+            or "未知卡牌"
+        )
+        return (
+            f"{card.get('id', '-')}:"
+            f"{self._new_card_rarity_label(card.get('cardRarityType'))}"
+            f"[{card_name}]"
+            f"{character_name}"
+        )
+
+    @staticmethod
+    def _build_new_card_image_segment(
+        *,
+        local_path: Path | None,
+        raw_bytes: bytes | None,
+    ) -> Image | None:
+        if local_path and local_path.is_file():
+            # NapCat/OneBot 直接吃本地路径时，WS 里不需要再塞整段 base64，
+            # 能明显减轻大卡图消息的发送体积；只有路径不可用时才退回 raw。
+            return Image(path=str(local_path))
+        if raw_bytes:
+            return Image(raw=raw_bytes)
+        return None
+
+    def _new_card_message_bytes_limit(self, *, kind: Literal["card", "stamp"]) -> int:
+        settings = get_settings()
+        if kind == "card":
+            return max(
+                1,
+                int(
+                    self._new_card_setting_value(
+                        settings,
+                        "new_card_plain_card_max_estimated_bytes",
+                        default=41_943_040,
+                        legacy_name="new_card_forward_max_estimated_bytes",
+                    )
+                ),
+            )
+        return max(
+            1,
+            int(
+                self._new_card_setting_value(
+                    settings,
+                    "new_card_plain_stamp_max_estimated_bytes",
+                    default=10_485_760,
+                    legacy_name="new_card_forward_max_estimated_bytes",
+                )
+            ),
+        )
+
+    def _build_new_card_plain_message_batches(
+        self,
+        items: list[_NewCardReminderPreparedItem],
+    ) -> list[list[_NewCardReminderPreparedItem]]:
+        def split_items(
+            values: list[_NewCardReminderPreparedItem],
+            *,
+            max_bytes: int,
+        ) -> list[list[_NewCardReminderPreparedItem]]:
+            batches: list[list[_NewCardReminderPreparedItem]] = []
+            current: list[_NewCardReminderPreparedItem] = []
+            current_bytes = 0
+            for item in values:
+                if current and current_bytes + item.estimated_bytes > max_bytes:
+                    batches.append(current)
+                    current = []
+                    current_bytes = 0
+                current.append(item)
+                current_bytes += item.estimated_bytes
+            if current:
+                batches.append(current)
+            return batches
+
+        summary_items = [item for item in items if item.kind == "summary"]
+        card_items = [item for item in items if item.kind == "card"]
+        stamp_items = [item for item in items if item.kind == "stamp"]
+        batches: list[list[_NewCardReminderPreparedItem]] = [[item] for item in summary_items]
+        batches.extend(
+            split_items(
+                card_items,
+                # OneBot 经 WS 发图时还会把原始字节编码成更大的 payload，这里只保留单一字节阈值，
+                # 在尽量少发消息和避免超大消息再次卡死之间取一个简单可调的平衡。
+                max_bytes=self._new_card_message_bytes_limit(kind="card"),
+            )
+        )
+        batches.extend(
+            split_items(
+                stamp_items,
+                max_bytes=self._new_card_message_bytes_limit(kind="stamp"),
+            )
+        )
+        return batches
+
+    def _compose_new_card_plain_message(
+        self,
+        items: list[_NewCardReminderPreparedItem],
+    ) -> UniMessage:
+        message = UniMessage()
+        for index, item in enumerate(items):
+            if index > 0:
+                message += UniMessage([Text("\n")])
+            if isinstance(item.message, UniMessage):
+                message += item.message
+            else:
+                message += MessageUtils.build_message(item.message)
+        return message
+
+    def _build_new_card_dispatch_results(
+        self,
+        results: list[RegionUpdateResult],
+        pending_state: dict[str, dict[str, dict[str, Any]]],
+    ) -> list[RegionUpdateResult]:
+        merged: dict[tuple[str, str], RegionUpdateResult] = {}
+        for server, snapshots in pending_state.items():
+            for base_key, snapshot in snapshots.items():
+                merged[(server, base_key)] = RegionUpdateResult(
+                    server=server,
+                    updated=True,
+                    download_success=True,
+                    current_revision=snapshot.get("current_revision"),
+                    current_version=snapshot.get("current_version"),
+                    added_records={
+                        "cards": list(snapshot.get("cards", [])),
+                        "stamps": list(snapshot.get("stamps", [])),
+                    },
+                )
+        for result in results:
+            if not result.updated or not result.download_success or result.error:
+                continue
+            cards = result.added_records.get("cards", [])
+            stamps = result.added_records.get("stamps", [])
+            if not cards and not stamps:
+                continue
+            base_key = self._new_card_base_record_key(
+                revision=result.current_revision,
+                version=result.current_version,
+            )
+            self._store_new_card_pending_snapshot(
+                pending_state,
+                server=result.server,
+                base_key=base_key,
+                revision=result.current_revision,
+                version=result.current_version,
+                cards=cards,
+                stamps=stamps,
+            )
+            # fresh result 覆盖同 base_key 的旧快照，避免下一轮 pending 重放仍使用旧 payload。
+            merged[(result.server, base_key)] = result
+        return [
+            merged[key]
+            for key in sorted(merged, key=lambda item: (item[0], item[1]))
+        ]
+
+    def _log_new_card_stage(
+        self,
+        server: str,
+        stage: str,
+        started_at: float,
+        *,
+        extra: str | None = None,
+    ) -> None:
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        suffix = f" {extra}" if extra else ""
+        logger.debug(
+            f"MoeSekai 新卡提醒阶段 [{server_label(server)}] {stage} {elapsed_ms:.1f}ms{suffix}",
+            MODULE_NAME,
+        )
+
+    def _extract_new_card_send_error_code(self, exc: Exception) -> str | None:
+        info = getattr(exc, "info", None)
+        if isinstance(info, dict):
+            for key in ("retcode", "code", "status"):
+                value = info.get(key)
+                if value is not None:
+                    return str(value)
+        if exc.args and isinstance(exc.args[0], dict):
+            for key in ("retcode", "code", "status"):
+                value = exc.args[0].get(key)
+                if value is not None:
+                    return str(value)
+        for attr_name in ("status_code", "code"):
+            value = getattr(exc, attr_name, None)
+            if value is not None:
+                return str(value)
+        return None
+
+    def _is_expected_new_card_send_error(self, exc: Exception) -> bool:
+        if exc.__class__.__name__ in {"BridgeConnectionTimeout", "BridgeResponseTimeout"}:
+            return True
+        return isinstance(
+            exc,
+            (
+                asyncio.TimeoutError,
+                ActionFailed,
+                AdapterException,
+            ),
+        )
+
+    def _log_new_card_send_warning(
+        self,
+        *,
+        server: str,
+        revision: str | None,
+        group_id: str,
+        item_key: str,
+        batch_index: int,
+        node_count: int,
+        estimated_bytes: int,
+        mode: str,
+        exc: Exception,
+    ) -> None:
+        error_code = self._extract_new_card_send_error_code(exc)
+        error_code_text = f" error_code={error_code}" if error_code else ""
+        logger.warning(
+            " ".join(
+                [
+                    f"MoeSekai 新卡提醒发送失败({mode})",
+                    f"server={server}",
+                    f"revision={revision or '-'}",
+                    f"group_id={group_id}",
+                    f"item_key={item_key}",
+                    f"batch_index={batch_index}",
+                    f"nodes={node_count}",
+                    f"estimated_bytes={estimated_bytes}",
+                ]
+            )
+            + error_code_text,
+            MODULE_NAME,
+            e=exc,
+        )
+
+    async def _run_new_card_asset_fetch(
+        self,
+        semaphore: asyncio.Semaphore | None,
+        fetcher: Callable[[], Awaitable[bytes | None]],
+    ) -> bytes | None:
+        if semaphore is None:
+            return await fetcher()
+        async with semaphore:
+            return await fetcher()
+
+    async def _build_new_card_segments(
         self,
         server: str,
         card: dict[str, Any],
         *,
         asset_timeout: float | None = None,
-    ) -> tuple[UniMessage, bool]:
-        lines = [
-            f"卡牌ID：{card.get('id')}",
-            f"角色ID：{card.get('characterId', '-')}",
-            f"稀有度：{card.get('cardRarityType', '-')}",
-        ]
-        segments: list[Any] = [Text("\n".join(lines))]
+        semaphore: asyncio.Semaphore | None = None,
+    ) -> tuple[list[Any], bool, int]:
+        text_block = await self._build_new_card_text_block(card)
+        segments: list[Any] = [Text(text_block)]
+        estimated_bytes = len(text_block.encode("utf-8"))
         has_media = False
         assetbundle = str(card.get("assetbundleName", "")).strip()
-        if assetbundle:
-            if not asset_provider.only_has_after_training(card):
-                normal = await asset_provider.get_card_image(
+        if not assetbundle:
+            return segments, has_media, estimated_bytes
+
+        normal_coro: Awaitable[bytes | None] | None = None
+        trained_coro: Awaitable[bytes | None] | None = None
+        if not asset_provider.only_has_after_training(card):
+            normal_coro = self._run_new_card_asset_fetch(
+                semaphore,
+                lambda: asset_provider.get_card_image(
                     server,
                     assetbundle,
                     timeout=asset_timeout or 20,
-                )
-            else:
-                normal = None
-            if normal:
-                segments.append(Image(raw=normal))
-                has_media = True
-            if asset_provider.has_after_training(card):
-                trained = await asset_provider.get_card_image(
+                ),
+            )
+        if asset_provider.has_after_training(card):
+            # 同一卡的普通图和训练后图并发抓取，避免自动提醒在 CDN 较慢时顺序卡两次。
+            trained_coro = self._run_new_card_asset_fetch(
+                semaphore,
+                lambda: asset_provider.get_card_image(
                     server,
                     assetbundle,
                     after_training=True,
                     timeout=asset_timeout or 20,
-                )
-            else:
-                trained = None
-            if trained:
-                segments.append(Image(raw=trained))
-                has_media = True
-        return UniMessage(segments), has_media
+                ),
+            )
 
-    async def _build_new_stamp_node(
+        normal: bytes | None = None
+        trained: bytes | None = None
+        if normal_coro and trained_coro:
+            normal, trained = await asyncio.gather(normal_coro, trained_coro)
+        elif normal_coro:
+            normal = await normal_coro
+        elif trained_coro:
+            trained = await trained_coro
+
+        if normal:
+            normal_segment = self._build_new_card_image_segment(
+                local_path=asset_provider.get_card_image_local_path(
+                    server,
+                    assetbundle,
+                ),
+                raw_bytes=normal,
+            )
+            if normal_segment:
+                segments.append(normal_segment)
+            estimated_bytes += len(normal)
+            has_media = True
+        if trained:
+            trained_segment = self._build_new_card_image_segment(
+                local_path=asset_provider.get_card_image_local_path(
+                    server,
+                    assetbundle,
+                    after_training=True,
+                ),
+                raw_bytes=trained,
+            )
+            if trained_segment:
+                segments.append(trained_segment)
+            estimated_bytes += len(trained)
+            has_media = True
+        return segments, has_media, estimated_bytes
+
+    async def _build_new_stamp_segments(
         self,
         server: str,
         stamp: dict[str, Any],
         *,
         asset_timeout: float | None = None,
-    ) -> UniMessage | None:
+        semaphore: asyncio.Semaphore | None = None,
+    ) -> tuple[list[Any] | None, int]:
         assetbundle = str(stamp.get("assetbundleName", "")).strip()
         if not assetbundle:
-            return None
-        stamp_image = await asset_provider.get_stamp_image(
-            server,
-            assetbundle,
-            timeout=asset_timeout or 20,
+            return None, 0
+        stamp_image = await self._run_new_card_asset_fetch(
+            semaphore,
+            lambda: asset_provider.get_stamp_image(
+                server,
+                assetbundle,
+                timeout=asset_timeout or 20,
+            ),
         )
         if not stamp_image:
-            return None
-        return UniMessage(
+            return None, 0
+        text_block = f"表情ID：{stamp.get('id')}\n名称：{stamp.get('name', '')}"
+        stamp_segment = self._build_new_card_image_segment(
+            local_path=asset_provider.get_stamp_image_local_path(server, assetbundle),
+            raw_bytes=stamp_image,
+        )
+        if not stamp_segment:
+            return None, 0
+        return [
+            Text(text_block),
+            stamp_segment,
+        ], len(text_block.encode("utf-8")) + len(stamp_image)
+
+
+    async def _prepare_new_card_summary_item(
+        self,
+        *,
+        server: str,
+        revision: str | None,
+        key: str,
+    ) -> _NewCardReminderPreparedItem:
+        summary_text = "\n".join(
             [
-                Text(f"表情ID：{stamp.get('id')}\n名称：{stamp.get('name', '')}"),
-                Image(raw=stamp_image),
+                f"{server_label(server)} 新卡上线/表情更新",
+                *self._new_card_summary_lines(revision),
             ]
         )
+        return _NewCardReminderPreparedItem(
+            key=key,
+            kind="summary",
+            message=UniMessage([Text(summary_text)]),
+            estimated_bytes=len(summary_text.encode("utf-8")),
+        )
 
-    async def _collect_new_card_nodes(
+    def _build_new_card_item_specs(
         self,
         *,
         server: str,
-        cards: list[dict[str, Any]],
-        stamps: list[dict[str, Any]],
-        asset_timeout: float | None = None,
-        max_cards: int | None = None,
-        max_stamps: int | None = None,
-        require_media: bool = False,
-    ) -> tuple[list[UniMessage], int, int]:
-        nodes: list[UniMessage] = []
-        card_count = 0
-        stamp_count = 0
-        for card in cards:
-            node, has_media = await self._build_new_card_node(
-                server,
-                card,
-                asset_timeout=asset_timeout,
-            )
-            if require_media and not has_media:
-                continue
-            nodes.append(node)
-            card_count += 1
-            if max_cards and card_count >= max_cards:
-                break
-        for stamp in stamps:
-            node = await self._build_new_stamp_node(
-                server,
-                stamp,
-                asset_timeout=asset_timeout,
-            )
-            if node is None:
-                if require_media:
-                    continue
-            else:
-                nodes.append(node)
-                stamp_count += 1
-            if max_stamps and stamp_count >= max_stamps:
-                break
-        return nodes, card_count, stamp_count
-
-    async def _build_new_card_forward(
-        self,
-        *,
-        server: str,
-        cards: list[dict[str, Any]],
-        stamps: list[dict[str, Any]],
         revision: str | None,
-        asset_timeout: float | None = None,
-        max_cards: int | None = None,
-        max_stamps: int | None = None,
-        require_media: bool = False,
-        prepared_nodes: list[UniMessage] | None = None,
-        prepared_card_count: int | None = None,
-        prepared_stamp_count: int | None = None,
-    ) -> MoeForwardMessage:
-        if (
-            prepared_nodes is not None
-            and prepared_card_count is not None
-            and prepared_stamp_count is not None
-        ):
-            content_nodes = prepared_nodes
-            selected_card_count = prepared_card_count
-            selected_stamp_count = prepared_stamp_count
-        else:
-            content_nodes, selected_card_count, selected_stamp_count = (
-                await self._collect_new_card_nodes(
-                    server=server,
-                    cards=cards,
-                    stamps=stamps,
-                    asset_timeout=asset_timeout,
-                    max_cards=max_cards,
-                    max_stamps=max_stamps,
-                    require_media=require_media,
+        base_key: str,
+        cards: list[dict[str, Any]],
+        stamps: list[dict[str, Any]],
+        pending_keys: set[str],
+    ) -> list[_NewCardReminderItemSpec]:
+        specs: list[_NewCardReminderItemSpec] = []
+        summary_key = self._new_card_summary_record_key(base_key)
+        if summary_key in pending_keys:
+            specs.append(
+                _NewCardReminderItemSpec(
+                    key=summary_key,
+                    kind="summary",
+                    payload={
+                        "server": server,
+                        "revision": revision,
+                    },
                 )
             )
-        nodes: list[UniMessage] = []
-        summary = await render_reminder_card(
-            ReminderCardViewModel(
-                title=f"{server_label(server)} 新卡上线/表情更新",
-                subtitle=f"发现时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}",
-                lines=[
-                    f"Revision：{revision or '-'}",
-                    f"新增卡牌：{selected_card_count}",
-                    f"新增表情：{selected_stamp_count}",
-                ],
-                accent="New Cards",
+        for card in sorted(cards, key=self._new_card_sort_key, reverse=True):
+            card_key = self._new_card_card_record_key(base_key, card.get("id", 0))
+            if card_key in pending_keys:
+                specs.append(
+                    _NewCardReminderItemSpec(
+                        key=card_key,
+                        kind="card",
+                        payload=card,
+                    )
+                )
+        for stamp in sorted(stamps, key=self._new_stamp_sort_key, reverse=True):
+            stamp_key = self._new_card_stamp_record_key(base_key, stamp.get("id", 0))
+            if stamp_key in pending_keys:
+                specs.append(
+                    _NewCardReminderItemSpec(
+                        key=stamp_key,
+                        kind="stamp",
+                        payload=stamp,
+                    )
+                )
+        return specs
+
+    async def _prepare_new_card_item(
+        self,
+        *,
+        server: str,
+        spec: _NewCardReminderItemSpec,
+        asset_timeout: float,
+        semaphore: asyncio.Semaphore,
+    ) -> _NewCardReminderPreparedItem | None:
+        if spec.kind == "summary":
+            payload = spec.payload
+            return await self._prepare_new_card_summary_item(
+                server=payload["server"],
+                revision=payload["revision"],
+                key=spec.key,
             )
+        if spec.kind == "card":
+            segments, has_media, estimated_bytes = await self._build_new_card_segments(
+                server,
+                spec.payload,
+                asset_timeout=asset_timeout,
+                semaphore=semaphore,
+            )
+            if not has_media:
+                return None
+            return _NewCardReminderPreparedItem(
+                key=spec.key,
+                kind="card",
+                message=UniMessage(segments),
+                estimated_bytes=estimated_bytes,
+            )
+        segments, estimated_bytes = await self._build_new_stamp_segments(
+            server,
+            spec.payload,
+            asset_timeout=asset_timeout,
+            semaphore=semaphore,
         )
-        nodes.append(UniMessage([Image(raw=summary)]))
-        nodes.extend(content_nodes)
-        return build_forward_message(nodes, sender_id="10000", sender_name="南极萝卜")
+        if not segments:
+            return None
+        return _NewCardReminderPreparedItem(
+            key=spec.key,
+            kind="stamp",
+            message=UniMessage(segments),
+            estimated_bytes=estimated_bytes,
+        )
+
+    async def _iter_new_card_batches(
+        self,
+        *,
+        server: str,
+        specs: list[_NewCardReminderItemSpec],
+    ) -> AsyncIterator[list[_NewCardReminderPreparedItem]]:
+        settings = get_settings()
+        asset_timeout = max(0.1, float(settings.new_card_auto_asset_timeout_seconds))
+        prepare_chunk_size = max(1, int(settings.new_card_media_fetch_concurrency))
+        semaphore = asyncio.Semaphore(max(1, int(settings.new_card_media_fetch_concurrency)))
+        index = 0
+
+        while index < len(specs):
+            started_at = time.perf_counter()
+            current_specs = specs[index : index + prepare_chunk_size]
+            index += len(current_specs)
+            if current_specs:
+                results = await asyncio.gather(
+                    *(
+                        self._prepare_new_card_item(
+                            server=server,
+                            spec=spec,
+                            asset_timeout=asset_timeout,
+                            semaphore=semaphore,
+                        )
+                        for spec in current_specs
+                    )
+                )
+                prepared_items = [item for item in results if item is not None]
+            else:
+                prepared_items = []
+            if not prepared_items:
+                self._log_new_card_stage(server, "单批媒体准备", started_at, extra="items=0")
+                continue
+
+            batch_bytes = sum(item.estimated_bytes for item in prepared_items)
+            self._log_new_card_stage(
+                server,
+                "单批媒体准备",
+                started_at,
+                extra=f"items={len(prepared_items)} bytes~={batch_bytes}",
+            )
+            yield prepared_items
+
+    @staticmethod
+    def _new_card_targets_finished(target_states: list[_NewCardReminderTargetState]) -> bool:
+        return all(target_state.aborted or not target_state.pending_keys for target_state in target_states)
+
+    async def _flush_new_card_plain_items(
+        self,
+        *,
+        bot: Bot,
+        server: str,
+        revision: str | None,
+        target_states: list[_NewCardReminderTargetState],
+        items: list[_NewCardReminderPreparedItem],
+        batch_index: int,
+        mark_sent: bool,
+    ) -> bool:
+        sent_content = False
+        for target_state in target_states:
+            if target_state.aborted or not target_state.pending_keys:
+                continue
+            group_items = [
+                item for item in items if item.key in target_state.pending_keys
+            ]
+            if not group_items:
+                continue
+            pending_before = set(target_state.pending_keys)
+            group_batch_bytes = sum(item.estimated_bytes for item in group_items)
+            send_started_at = time.perf_counter()
+            await self._send_new_card_plain_items(
+                bot=bot,
+                server=server,
+                revision=revision,
+                target_state=target_state,
+                items=group_items,
+                batch_index=batch_index,
+                mark_sent=mark_sent,
+            )
+            self._log_new_card_stage(
+                server,
+                "单批发送",
+                send_started_at,
+                extra=(
+                    f"group_id={target_state.group_id} mode=plain "
+                    f"batch={batch_index} items={len(group_items)} bytes~={group_batch_bytes}"
+                ),
+            )
+            if any(
+                item.kind != "summary"
+                and item.key in pending_before
+                and item.key not in target_state.pending_keys
+                for item in group_items
+            ):
+                sent_content = True
+        return sent_content
+
+    async def _stream_new_card_plain_items(
+        self,
+        *,
+        bot: Bot,
+        server: str,
+        revision: str | None,
+        target_states: list[_NewCardReminderTargetState],
+        prepared_batches: AsyncIterator[list[_NewCardReminderPreparedItem]],
+        mark_sent: bool,
+        skip_summary_without_media: bool = False,
+    ) -> bool:
+        card_limit = self._new_card_message_bytes_limit(kind="card")
+        stamp_limit = self._new_card_message_bytes_limit(kind="stamp")
+        summary_buffer: list[_NewCardReminderPreparedItem] = []
+        card_buffer: list[_NewCardReminderPreparedItem] = []
+        stamp_buffer: list[_NewCardReminderPreparedItem] = []
+        card_bytes = 0
+        stamp_bytes = 0
+        batch_index = 0
+        sent_content = False
+        saw_media = False
+
+        async def flush(
+            items: list[_NewCardReminderPreparedItem],
+            *,
+            allow_summary_only: bool = True,
+        ) -> None:
+            nonlocal batch_index, sent_content
+            if not items:
+                return
+            if not allow_summary_only and all(item.kind == "summary" for item in items):
+                return
+            batch_index += 1
+            if await self._flush_new_card_plain_items(
+                bot=bot,
+                server=server,
+                revision=revision,
+                target_states=target_states,
+                items=items,
+                batch_index=batch_index,
+                mark_sent=mark_sent,
+            ):
+                sent_content = True
+
+        async for prepared_batch in prepared_batches:
+            if self._new_card_targets_finished(target_states):
+                return sent_content
+            for item in prepared_batch:
+                if item.kind == "summary":
+                    if summary_buffer:
+                        await flush(
+                            summary_buffer,
+                            allow_summary_only=not skip_summary_without_media or saw_media,
+                        )
+                        summary_buffer = []
+                    summary_buffer.append(item)
+                    continue
+
+                if summary_buffer:
+                    # summary 需要保持单独一条，但又不能因为测试路径只有 summary 就误报“发送成功”；
+                    # 因此只有在确认后面确实有媒体项时才立即冲刷它。
+                    await flush(summary_buffer)
+                    summary_buffer = []
+
+                saw_media = True
+                if item.kind == "card":
+                    if stamp_buffer:
+                        await flush(stamp_buffer)
+                        stamp_buffer = []
+                        stamp_bytes = 0
+                    if card_buffer and card_bytes + item.estimated_bytes > card_limit:
+                        await flush(card_buffer)
+                        card_buffer = []
+                        card_bytes = 0
+                    card_buffer.append(item)
+                    card_bytes += item.estimated_bytes
+                    continue
+
+                if card_buffer:
+                    # stamp 永远不和卡图混发；进入 stamp 流前先把已攒好的卡图包冲出去，
+                    # 这样卡图消息边界只受 card_limit 控制，不再受媒体准备窗口影响。
+                    await flush(card_buffer)
+                    card_buffer = []
+                    card_bytes = 0
+                if stamp_buffer and stamp_bytes + item.estimated_bytes > stamp_limit:
+                    await flush(stamp_buffer)
+                    stamp_buffer = []
+                    stamp_bytes = 0
+                stamp_buffer.append(item)
+                stamp_bytes += item.estimated_bytes
+
+        if summary_buffer:
+            await flush(
+                summary_buffer,
+                allow_summary_only=not skip_summary_without_media or saw_media,
+            )
+        if card_buffer:
+            await flush(card_buffer)
+        if stamp_buffer:
+            await flush(stamp_buffer)
+        return sent_content
+
+    async def _mark_new_card_keys_sent(
+        self,
+        *,
+        platform: str,
+        group_id: str,
+        server: str,
+        keys: list[str],
+    ) -> None:
+        # 发送成功后立即写入逻辑项级幂等记录，避免下一轮整批重复推送。
+        for key in keys:
+            await create_notification_record(
+                platform=platform,
+                group_id=group_id,
+                feature_name=FEATURE_NEW_CARD_REMINDER,
+                server=server,
+                record_key=key,
+            )
+
+    async def _send_new_card_plain_items(
+        self,
+        *,
+        bot: Bot,
+        server: str,
+        revision: str | None,
+        target_state: _NewCardReminderTargetState,
+        items: list[_NewCardReminderPreparedItem],
+        batch_index: int,
+        mark_sent: bool = True,
+    ) -> None:
+        settings = get_settings()
+        timeout_seconds = max(0.1, float(settings.new_card_send_timeout_seconds))
+        min_delay = max(
+            0.0,
+            float(
+                self._new_card_setting_value(
+                    settings,
+                    "new_card_send_delay_min_seconds",
+                    default=0.2,
+                    legacy_name="new_card_fallback_delay_min_seconds",
+                )
+            ),
+        )
+        max_delay = max(
+            min_delay,
+            float(
+                self._new_card_setting_value(
+                    settings,
+                    "new_card_send_delay_max_seconds",
+                    default=0.8,
+                    legacy_name="new_card_fallback_delay_max_seconds",
+                )
+            ),
+        )
+        abort_after = max(
+            1,
+            int(
+                self._new_card_setting_value(
+                    settings,
+                    "new_card_abort_after_consecutive_failures",
+                    default=2,
+                    legacy_name="new_card_fallback_abort_after_consecutive_failures",
+                )
+            ),
+        )
+        message_batches = self._build_new_card_plain_message_batches(items)
+        for index, message_batch in enumerate(message_batches):
+            if target_state.aborted:
+                return
+            message = self._compose_new_card_plain_message(message_batch)
+            keys = [item.key for item in message_batch]
+            estimated_bytes = sum(item.estimated_bytes for item in message_batch)
+            try:
+                await asyncio.wait_for(
+                    PlatformUtils.send_message(
+                        bot,
+                        None,
+                        target_state.group_id,
+                        message,
+                    ),
+                    timeout=timeout_seconds,
+                )
+            except Exception as exc:
+                if not self._is_expected_new_card_send_error(exc):
+                    raise
+                target_state.consecutive_failures += 1
+                self._log_new_card_send_warning(
+                    server=server,
+                    revision=revision,
+                    group_id=target_state.group_id,
+                    item_key=keys[0],
+                    batch_index=batch_index,
+                    node_count=len(message_batch),
+                    estimated_bytes=estimated_bytes,
+                    mode="plain",
+                    exc=exc,
+                )
+                if target_state.consecutive_failures >= abort_after:
+                    # 普通消息已经连续失败时继续硬发只会放大刷屏和风控风险，因此直接中止该群本轮剩余发送。
+                    target_state.aborted = True
+                    logger.warning(
+                        f"MoeSekai 新卡提醒已中止该群本轮发送 server={server} group_id={target_state.group_id} batch_index={batch_index}",
+                        MODULE_NAME,
+                    )
+                    return
+                continue
+
+            if mark_sent:
+                await self._mark_new_card_keys_sent(
+                    platform=target_state.platform,
+                    group_id=target_state.group_id,
+                    server=server,
+                    keys=keys,
+                )
+            target_state.pending_keys.difference_update(keys)
+            target_state.consecutive_failures = 0
+            if index < len(message_batches) - 1:
+                await asyncio.sleep(random.uniform(min_delay, max_delay))
 
     async def handle_test_new_card_reminder(
         self,
         *,
+        bot: Bot,
+        group_id: str | None,
         platform: str,
         user_id: str,
         server: str | None,
         card_ids: list[int] | None = None,
-    ) -> MoeForwardMessage | str:
+    ) -> str | None:
         resolved_server, error = await self._resolve_default_server(
             platform,
             user_id,
@@ -1667,14 +2459,11 @@ class MoeSekaiApplication:
         )
         if error or not resolved_server:
             return "请先绑定账号或显式指定区服"
+        if not group_id:
+            return "新卡上线提醒测试仅支持群聊"
+
         cards = await master_data_provider.get_cards(resolved_server)
         stamps = await master_data_provider.get_stamps(resolved_server)
-        selected_cards: list[dict[str, Any]]
-        selected_stamps: list[dict[str, Any]]
-        require_media = False
-        max_cards = None
-        max_stamps = None
-        asset_timeout = NEW_CARD_TEST_ASSET_TIMEOUT_SECONDS
         if card_ids:
             card_id_set = set(card_ids)
             selected_cards = sorted(
@@ -1688,13 +2477,7 @@ class MoeSekaiApplication:
             )
             if not selected_cards:
                 return "未找到指定的新卡测试数据"
-            selected_stamps = sorted(
-                stamps,
-                key=self._new_stamp_sort_key,
-                reverse=True,
-            )[:NEW_CARD_TEST_STAMP_LIMIT]
-            max_cards = len(selected_cards)
-            max_stamps = NEW_CARD_TEST_STAMP_LIMIT
+            selected_stamps: list[dict[str, Any]] = []
         else:
             selected_cards = sorted(
                 cards,
@@ -1706,44 +2489,67 @@ class MoeSekaiApplication:
                 key=self._new_stamp_sort_key,
                 reverse=True,
             )[:NEW_CARD_TEST_SCAN_LIMIT]
-            require_media = True
-            max_cards = NEW_CARD_TEST_CARD_LIMIT
-            max_stamps = NEW_CARD_TEST_STAMP_LIMIT
-            preview_nodes, preview_card_count, preview_stamp_count = (
-                await self._collect_new_card_nodes(
-                    server=resolved_server,
-                    cards=selected_cards,
-                    stamps=selected_stamps,
-                    asset_timeout=asset_timeout,
-                    max_cards=max_cards,
-                    max_stamps=max_stamps,
-                    require_media=True,
-                )
-            )
-            if not preview_nodes and preview_card_count == 0 and preview_stamp_count == 0:
-                return "当前暂无可用的新卡上线提醒测试样本，请稍后重试或显式指定 card_id"
-            return await self._build_new_card_forward(
-                server=resolved_server,
-                cards=selected_cards,
-                stamps=selected_stamps,
-                revision="test",
-                asset_timeout=asset_timeout,
-                max_cards=max_cards,
-                max_stamps=max_stamps,
-                require_media=require_media,
-                prepared_nodes=preview_nodes,
-                prepared_card_count=preview_card_count,
-                prepared_stamp_count=preview_stamp_count,
-            )
-        return await self._build_new_card_forward(
+
+        base_key = "test"
+        pending_keys = {
+            self._new_card_summary_record_key(base_key),
+            *(
+                self._new_card_card_record_key(base_key, card.get("id", 0))
+                for card in selected_cards
+            ),
+            *(
+                self._new_card_stamp_record_key(base_key, stamp.get("id", 0))
+                for stamp in selected_stamps
+            ),
+        }
+        item_specs = self._build_new_card_item_specs(
             server=resolved_server,
+            revision="test",
+            base_key=base_key,
             cards=selected_cards,
             stamps=selected_stamps,
+            pending_keys=pending_keys,
+        )
+        if not item_specs:
+            return "当前暂无可用的新卡上线提醒测试样本，请稍后重试或显式指定 card_id"
+        sent_content = await self._send_test_new_card_batches(
+            bot=bot,
+            group_id=group_id,
+            server=resolved_server,
             revision="test",
-            asset_timeout=asset_timeout,
-            max_cards=max_cards,
-            max_stamps=max_stamps,
-            require_media=require_media,
+            specs=item_specs,
+        )
+        if not sent_content:
+            if card_ids:
+                return "指定卡牌资源暂不可用，请稍后重试"
+            return "当前暂无可用的新卡上线提醒测试样本，请稍后重试或显式指定 card_id"
+        return None
+
+    async def _send_test_new_card_batches(
+        self,
+        *,
+        bot: Bot,
+        group_id: str,
+        server: str,
+        revision: str | None,
+        specs: list[_NewCardReminderItemSpec],
+    ) -> bool:
+        target_state = _NewCardReminderTargetState(
+            platform="test",
+            group_id=group_id,
+            pending_keys={spec.key for spec in specs},
+        )
+        return await self._stream_new_card_plain_items(
+            bot=bot,
+            server=server,
+            revision=revision,
+            target_states=[target_state],
+            prepared_batches=self._iter_new_card_batches(
+                server=server,
+                specs=specs,
+            ),
+            mark_sent=False,
+            skip_summary_without_media=True,
         )
 
     async def build_auto_update_notifications(
@@ -1775,44 +2581,178 @@ class MoeSekaiApplication:
         bot: Bot,
         results: list[RegionUpdateResult],
     ) -> None:
-        for result in results:
-            if not result.updated or not result.download_success or result.error:
-                continue
+        filter_started_at = time.perf_counter()
+        pending_state = self._load_new_card_pending_state()
+        dispatch_results = self._build_new_card_dispatch_results(results, pending_state)
+        self._save_new_card_pending_state(pending_state)
+        if dispatch_results:
+            self._log_new_card_stage(
+                dispatch_results[0].server,
+                "更新结果过滤",
+                filter_started_at,
+                extra=f"results={len(dispatch_results)}",
+            )
+        else:
+            logger.debug("MoeSekai 新卡提醒阶段 无需处理的新卡更新结果", MODULE_NAME)
+            return
+
+        for result in dispatch_results:
+            server_started_at = time.perf_counter()
             cards = result.added_records.get("cards", [])
             stamps = result.added_records.get("stamps", [])
+            base_key = self._new_card_base_record_key(
+                revision=result.current_revision,
+                version=result.current_version,
+            )
             if not cards and not stamps:
+                self._delete_new_card_pending_snapshot(
+                    pending_state,
+                    server=result.server,
+                    base_key=base_key,
+                )
                 continue
+
+            toggle_started_at = time.perf_counter()
             toggles = await list_enabled_group_feature_toggles(
                 feature_name=FEATURE_NEW_CARD_REMINDER,
                 server=result.server,
             )
+            self._log_new_card_stage(
+                result.server,
+                "群开关加载",
+                toggle_started_at,
+                extra=f"toggles={len(toggles)}",
+            )
             if not toggles:
+                self._delete_new_card_pending_snapshot(
+                    pending_state,
+                    server=result.server,
+                    base_key=base_key,
+                )
                 continue
-            forward = await self._build_new_card_forward(
+
+            record_prefix = f"{base_key}:"
+            existing_started_at = time.perf_counter()
+            sent_key_map = await list_notification_record_keys_by_groups(
+                feature_name=FEATURE_NEW_CARD_REMINDER,
                 server=result.server,
+                record_key_prefix=record_prefix,
+                groups=[(toggle.platform, toggle.group_id) for toggle in toggles],
+            )
+            self._log_new_card_stage(
+                result.server,
+                "已发送记录批量读取",
+                existing_started_at,
+                extra=f"groups={len(sent_key_map)}",
+            )
+
+            target_states: list[_NewCardReminderTargetState] = []
+            required_keys: set[str] = set()
+            for toggle in toggles:
+                group_key = (toggle.platform, toggle.group_id)
+                sent_keys = sent_key_map.get(group_key, set())
+                pending_keys: set[str] = set()
+                summary_key = self._new_card_summary_record_key(base_key)
+                if summary_key not in sent_keys:
+                    pending_keys.add(summary_key)
+                for card in cards:
+                    pending_key = self._new_card_card_record_key(
+                        base_key,
+                        card.get("id", 0),
+                    )
+                    if pending_key not in sent_keys:
+                        pending_keys.add(pending_key)
+                for stamp in stamps:
+                    pending_key = self._new_card_stamp_record_key(
+                        base_key,
+                        stamp.get("id", 0),
+                    )
+                    if pending_key not in sent_keys:
+                        pending_keys.add(pending_key)
+                if not pending_keys:
+                    continue
+                target_states.append(
+                    _NewCardReminderTargetState(
+                        platform=toggle.platform,
+                        group_id=toggle.group_id,
+                        pending_keys=pending_keys,
+                        started_at=time.perf_counter(),
+                    )
+                )
+                # 这里先合并所有群的待发送逻辑项，只准备一次媒体；真正发消息时再按群过滤，避免重复抓图。
+                required_keys.update(pending_keys)
+
+            if not target_states or not required_keys:
+                self._delete_new_card_pending_snapshot(
+                    pending_state,
+                    server=result.server,
+                    base_key=base_key,
+                )
+                continue
+
+            item_specs = self._build_new_card_item_specs(
+                server=result.server,
+                revision=result.current_revision,
+                base_key=base_key,
                 cards=cards,
                 stamps=stamps,
-                revision=result.current_revision,
+                pending_keys=required_keys,
             )
-            for toggle in toggles:
-                record_key = f"{result.current_revision or result.current_version or 'unknown'}"
-                if await has_notification_record(
-                    platform=toggle.platform,
-                    group_id=toggle.group_id,
-                    feature_name=FEATURE_NEW_CARD_REMINDER,
+            if not item_specs:
+                self._delete_new_card_pending_snapshot(
+                    pending_state,
                     server=result.server,
-                    record_key=record_key,
-                ):
-                    continue
-                for node in forward.nodes:
-                    await PlatformUtils.send_message(bot, None, toggle.group_id, node)
-                await create_notification_record(
-                    platform=toggle.platform,
-                    group_id=toggle.group_id,
-                    feature_name=FEATURE_NEW_CARD_REMINDER,
-                    server=result.server,
-                    record_key=record_key,
+                    base_key=base_key,
                 )
+                continue
+
+            await self._stream_new_card_plain_items(
+                bot=bot,
+                server=result.server,
+                revision=result.current_revision,
+                target_states=target_states,
+                prepared_batches=self._iter_new_card_batches(
+                    server=result.server,
+                    specs=item_specs,
+                ),
+                mark_sent=True,
+            )
+
+            for target_state in target_states:
+                self._log_new_card_stage(
+                    result.server,
+                    "单群总耗时",
+                    target_state.started_at,
+                    extra=(
+                        f"group_id={target_state.group_id} pending={len(target_state.pending_keys)} "
+                        f"aborted={target_state.aborted}"
+                    ),
+                )
+            if any(target_state.pending_keys for target_state in target_states):
+                self._store_new_card_pending_snapshot(
+                    pending_state,
+                    server=result.server,
+                    base_key=base_key,
+                    revision=result.current_revision,
+                    version=result.current_version,
+                    cards=cards,
+                    stamps=stamps,
+                )
+            else:
+                self._delete_new_card_pending_snapshot(
+                    pending_state,
+                    server=result.server,
+                    base_key=base_key,
+                )
+            self._log_new_card_stage(
+                result.server,
+                "单区服总耗时",
+                server_started_at,
+                extra=(
+                    f"cards={len(cards)} stamps={len(stamps)} groups={len(target_states)}"
+                ),
+            )
+        self._save_new_card_pending_state(pending_state)
 
     async def dispatch_live_reminders(self, bot: Bot) -> None:
         now = datetime.now()
