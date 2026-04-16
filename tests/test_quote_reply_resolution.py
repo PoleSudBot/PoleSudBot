@@ -273,6 +273,103 @@ def test_make_record_alc_supports_compact_no_space_input():
     )
 
 
+def test_delete_quote_reply_command_has_high_priority():
+    assert manage_commands.delete_quote_reply_cmd.priority == 0
+
+
+@pytest.mark.asyncio
+async def test_match_reply_quote_delete_matches_exact_delete_and_caches_quote(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    quote = SimpleNamespace(id=7)
+
+    class _FakeMessageEvent:
+        def __init__(self, text: str):
+            self._text = text
+
+        def get_plaintext(self):
+            return self._text
+
+    async def _fake_get_quote_from_reply(bot, event, session):
+        return quote
+
+    monkeypatch.setattr(manage_commands, "MessageEvent", _FakeMessageEvent)
+    monkeypatch.setattr(manage_commands, "_get_quote_from_reply", _fake_get_quote_from_reply)
+
+    state = {}
+    matched = await manage_commands._match_reply_quote_delete(
+        SimpleNamespace(),
+        _FakeMessageEvent("删除"),
+        SimpleNamespace(group=SimpleNamespace(id="123")),
+        state,
+    )
+
+    assert matched is True
+    assert state["reply_quote"] is quote
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["删除语录", "删除 test", " test 删除 "])
+async def test_match_reply_quote_delete_rejects_non_exact_delete_without_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    text: str,
+):
+    calls = 0
+
+    class _FakeMessageEvent:
+        def __init__(self, plain_text: str):
+            self._plain_text = plain_text
+
+        def get_plaintext(self):
+            return self._plain_text
+
+    async def _fake_get_quote_from_reply(bot, event, session):
+        nonlocal calls
+        calls += 1
+        return SimpleNamespace(id=1)
+
+    monkeypatch.setattr(manage_commands, "MessageEvent", _FakeMessageEvent)
+    monkeypatch.setattr(manage_commands, "_get_quote_from_reply", _fake_get_quote_from_reply)
+
+    state = {}
+    matched = await manage_commands._match_reply_quote_delete(
+        SimpleNamespace(),
+        _FakeMessageEvent(text),
+        SimpleNamespace(group=SimpleNamespace(id="123")),
+        state,
+    )
+
+    assert matched is False
+    assert calls == 0
+    assert "reply_quote" not in state
+
+
+@pytest.mark.asyncio
+async def test_match_reply_quote_delete_rejects_when_reply_is_not_quote(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class _FakeMessageEvent:
+        def get_plaintext(self):
+            return "删除"
+
+    async def _fake_get_quote_from_reply(bot, event, session):
+        return None
+
+    monkeypatch.setattr(manage_commands, "MessageEvent", _FakeMessageEvent)
+    monkeypatch.setattr(manage_commands, "_get_quote_from_reply", _fake_get_quote_from_reply)
+
+    state = {}
+    matched = await manage_commands._match_reply_quote_delete(
+        SimpleNamespace(),
+        _FakeMessageEvent(),
+        SimpleNamespace(group=SimpleNamespace(id="123")),
+        state,
+    )
+
+    assert matched is False
+    assert "reply_quote" not in state
+
+
 @pytest.mark.asyncio
 async def test_set_pending_emoji_like_calls_napcat_api(monkeypatch):
     monkeypatch.setattr(upload_commands.Config, "get_config", lambda *args, **kwargs: "10024")
@@ -379,3 +476,59 @@ async def test_delete_quote_standalone_falls_back_to_last_quote(monkeypatch):
     )
 
     assert calls == {"reply": 0, "last": 1}
+
+
+@pytest.mark.asyncio
+async def test_handle_delete_reply_quote_reuses_cached_state_quote(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    cached_quote = SimpleNamespace(id=9, uploader_user_id="456")
+    lookup_calls = 0
+    deleted_quotes: list[SimpleNamespace] = []
+    sent_messages: list[object] = []
+
+    async def _fake_get_quote_from_reply(bot, event, session):
+        nonlocal lookup_calls
+        lookup_calls += 1
+        return None
+
+    async def _fake_uploader_or_admin_check(bot, event, session, quote=None):
+        return quote is cached_quote
+
+    async def _fake_delete_quote_instance(quote):
+        deleted_quotes.append(quote)
+        return True
+
+    class _FakeMessage:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def send(self, target=None, bot=None):
+            sent_messages.append(self.payload)
+
+    monkeypatch.setattr(manage_commands, "_get_quote_from_reply", _fake_get_quote_from_reply)
+    monkeypatch.setattr(
+        manage_commands, "uploader_or_admin_check", _fake_uploader_or_admin_check
+    )
+    monkeypatch.setattr(
+        manage_commands.QuoteService, "delete_quote_instance", _fake_delete_quote_instance
+    )
+    monkeypatch.setattr(
+        manage_commands.MessageUtils, "build_message", lambda payload: _FakeMessage(payload)
+    )
+
+    session = SimpleNamespace(
+        group=SimpleNamespace(id="123"),
+        user=SimpleNamespace(id="456"),
+    )
+
+    await manage_commands._handle_delete_reply_quote(
+        SimpleNamespace(),
+        SimpleNamespace(),
+        session,
+        state={"reply_quote": cached_quote},
+    )
+
+    assert lookup_calls == 0
+    assert deleted_quotes == [cached_quote]
+    assert sent_messages

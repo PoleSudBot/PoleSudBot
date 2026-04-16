@@ -3,8 +3,10 @@ import re
 from pathlib import Path
 from urllib.parse import urlparse
 from typing import Optional, Literal, Union
+from nonebot import on_message
 from nonebot.permission import SUPERUSER
 from nonebot.rule import Rule
+from nonebot.typing import T_State
 from arclet.alconna import Alconna, Args, Arparma, MultiVar, Option, Subcommand
 from nonebot.adapters.onebot.v11 import (
     Bot,
@@ -31,6 +33,7 @@ from ..config import QUOTE_ASSETS_PATH
 from ..utils.tag_utils import extract_manual_tags
 
 _IMAGE_STEM_MD5_RE = re.compile(r"(?i)[0-9a-f]{32}")
+_REPLY_QUOTE_STATE_KEY = "reply_quote"
 
 
 async def _get_image_from_reply(event: Event, bot: Bot) -> Optional[Image]:
@@ -198,6 +201,40 @@ def reply_to_quote_rule() -> Rule:
     return Rule(_rule)
 
 
+async def _match_reply_quote_delete(
+    bot: Bot,
+    event: Event,
+    session: Uninfo,
+    state: T_State,
+) -> bool:
+    """
+    判断当前消息是否应由语录插件接管“回复删除”。
+
+    这里必须先把纯文本严格收窄为“删除”，再确认回复目标确实能解析到语录，
+    否则会误拦普通聊天里的“删除”，或者抢走其他插件自己的回复删除逻辑。
+    """
+    if not isinstance(event, MessageEvent):
+        return False
+
+    if event.get_plaintext().strip() != "删除":
+        return False
+
+    if quote := await _get_quote_from_reply(bot, event, session):
+        # 规则阶段就已经完成一次回复解析，缓存下来可以避免同一条消息重复 get_msg / 查库。
+        state[_REPLY_QUOTE_STATE_KEY] = quote
+        return True
+    return False
+
+
+def reply_to_quote_delete_rule() -> Rule:
+    """仅在纯文本为“删除”且回复目标确实是语录图时匹配"""
+
+    async def _rule(bot: Bot, event: Event, session: Uninfo, state: T_State):
+        return await _match_reply_quote_delete(bot, event, session, state)
+
+    return Rule(_rule)
+
+
 async def _require_reply_quote(
     bot: Bot, event: MessageEvent, session: Uninfo
 ) -> Quote | None:
@@ -275,13 +312,15 @@ async def _handle_delete_reply_quote(
     event: MessageEvent,
     session: Uninfo,
     quote: Quote | None = None,
+    state: T_State | None = None,
 ):
     """处理回复语录图片后的删除逻辑"""
     group_id = session.group.id
     user_id = session.user.id
 
-    # 回复删除只在已确认回复语录图片时接管，避免和其他插件的“删除”命令互相抢占。
-    quote = quote or await _get_quote_from_reply(bot, event, session)
+    # 回复删除的规则阶段已经做过一次解析，这里优先复用缓存，避免重复请求历史消息。
+    cached_quote = state.get(_REPLY_QUOTE_STATE_KEY) if state else None
+    quote = quote or cached_quote or await _get_quote_from_reply(bot, event, session)
     if not quote:
         logger.info(
             f"尝试删除语录失败，回复内容未能定位到群组 {group_id} 中的语录。",
@@ -333,8 +372,14 @@ async def _handle_delete_last_quote(bot: Bot, event: MessageEvent, session: Unin
     await MessageUtils.build_message("删除失败，可能语录已被手动删除").send()
 
 
-delete_quote_reply_cmd = on_alconna(
-    Alconna("删除"), priority=11, block=True, rule=reply_to_quote_rule()
+# 这里不能继续用 Alconna("删除")，因为同名短命令已经被其他插件占用，
+# 单纯提高优先级并不能保证一定进入语录插件自己的 handler。
+# 改成纯消息 matcher 后，只有“纯文本恰好是删除 + 回复目标确实是语录图”才会接管，
+# 这样既能绕开同名命令冲突，也不会误拦其他插件的回复删除。
+delete_quote_reply_cmd = on_message(
+    priority=0,
+    block=True,
+    rule=reply_to_quote_delete_rule(),
 )
 delete_quote_cmd = on_alconna(Alconna("删除语录"), aliases={"del"}, priority=11, block=True)
 quote_tag_cmd = on_alconna(
@@ -364,14 +409,14 @@ quote_deltag_cmd = on_alconna(
 
 @delete_quote_reply_cmd.handle()
 async def handle_delete_quote_reply(
-    bot: Bot, event: MessageEvent, session: Uninfo
+    bot: Bot, event: MessageEvent, session: Uninfo, state: T_State
 ):
     """处理回复语录图片后发送“删除”的情况"""
     if not session.group:
         logger.debug("删除命令在非群聊环境中使用，已忽略。", "群聊语录")
         return
 
-    await _handle_delete_reply_quote(bot, event, session)
+    await _handle_delete_reply_quote(bot, event, session, state=state)
 
 
 @delete_quote_cmd.handle()
@@ -385,7 +430,12 @@ async def handle_delete_quote_standalone(
 
     reply_quote = await _get_quote_from_reply(bot, event, session)
     if reply_quote is not None:
-        await _handle_delete_reply_quote(bot, event, session, quote=reply_quote)
+        await _handle_delete_reply_quote(
+            bot,
+            event,
+            session,
+            quote=reply_quote,
+        )
         return
 
     await _handle_delete_last_quote(bot, event, session)
