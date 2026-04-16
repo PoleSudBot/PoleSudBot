@@ -68,31 +68,61 @@ Image = manage_commands.Image
 
 
 class _FakeQuery:
-    def __init__(self, rows: list[SimpleNamespace]):
+    def __init__(
+        self,
+        rows: list[SimpleNamespace],
+        *,
+        update_calls: list[dict] | None = None,
+    ):
         self._rows = rows
         self._limit: int | None = None
+        self._values_field: str | None = None
+        self._values_flat = False
+        self._update_calls = update_calls
 
     def limit(self, count: int):
         self._limit = count
         return self
+
+    def values_list(self, field: str, flat: bool = False):
+        self._values_field = field
+        self._values_flat = flat
+        return self
+
+    async def update(self, **kwargs):
+        if self._update_calls is not None:
+            self._update_calls.append(kwargs)
+        return len(self._rows)
 
     def __await__(self):
         async def _resolve():
             rows = list(self._rows)
             if self._limit is not None:
                 rows = rows[: self._limit]
+            if self._values_field is not None:
+                if self._values_flat:
+                    return [getattr(row, self._values_field) for row in rows]
+                return [(getattr(row, self._values_field),) for row in rows]
             return rows
 
         return _resolve().__await__()
 
 
-def _build_filter(quotes: list[SimpleNamespace]):
+def _build_filter(
+    quotes: list[SimpleNamespace], *, update_calls: list[dict] | None = None
+):
     def _filter(**kwargs):
         group_id = kwargs.get("group_id")
+        ids = kwargs.get("id__in")
         image_path_iendswith = kwargs.get("image_path__iendswith")
         image_path_icontains = kwargs.get("image_path__icontains")
 
-        results = [quote for quote in quotes if quote.group_id == group_id]
+        results = list(quotes)
+        if group_id is not None:
+            results = [quote for quote in results if quote.group_id == group_id]
+        if ids is not None:
+            id_set = set(ids)
+            results = [quote for quote in results if quote.id in id_set]
         if image_path_iendswith is not None:
             suffix = str(image_path_iendswith).lower()
             results = [
@@ -105,7 +135,7 @@ def _build_filter(quotes: list[SimpleNamespace]):
             results = [
                 quote for quote in results if keyword in str(quote.image_path).lower()
             ]
-        return _FakeQuery(results)
+        return _FakeQuery(results, update_calls=update_calls)
 
     return _filter
 
@@ -299,6 +329,35 @@ def test_compact_quote_shortcut_matches_regular_queries_only():
         assert query_commands.quote_alc.parse(text).matched is False
 
 
+def test_quote_query_num_option_parses():
+    arp = query_commands.quote_alc.parse("语录 -n 3 1969")
+
+    assert arp.matched is True
+    assert arp.query("num.count") == 3
+    assert arp.all_matched_args["search_keywords"] == ("1969",)
+
+
+@pytest.mark.parametrize(
+    ("keywords", "option_count", "expected"),
+    [
+        (["五连"], None, ("", 5)),
+        (["1969", "五连"], None, ("1969", 5)),
+        (["1969五连"], None, ("1969", 5)),
+        (["五连发"], None, ("五连发", 1)),
+        (["10连续查询"], None, ("10连续查询", 1)),
+        (["五连"], 1, ("五连", 1)),
+    ],
+)
+def test_extract_quote_query_and_count_cases(
+    keywords: list[str],
+    option_count: int | None,
+    expected: tuple[str, int],
+):
+    assert (
+        query_commands._extract_quote_query_and_count(keywords, option_count) == expected
+    )
+
+
 def test_make_record_alc_supports_compact_no_space_input():
     result = upload_commands.make_record_alc.parse("记录aaa bbb")
 
@@ -307,6 +366,62 @@ def test_make_record_alc_supports_compact_no_space_input():
         "aaa",
         "bbb",
     )
+
+
+@pytest.mark.asyncio
+async def test_get_quotes_by_ids_in_order_preserves_input_order(monkeypatch):
+    quotes = [
+        SimpleNamespace(id=1, group_id="123"),
+        SimpleNamespace(id=2, group_id="123"),
+        SimpleNamespace(id=3, group_id="123"),
+    ]
+
+    monkeypatch.setattr(quote_service_module.Quote, "filter", _build_filter(quotes))
+
+    result = await QuoteService.get_quotes_by_ids_in_order([3, 1, 2])
+
+    assert [quote.id for quote in result] == [3, 1, 2]
+
+
+def test_select_quote_ids_without_record_prefers_unseen(monkeypatch):
+    monkeypatch.setattr(QuoteService, "_recent_quotes", {})
+    monkeypatch.setattr(quote_service_module.random, "shuffle", lambda seq: None)
+    QuoteService._recent_quotes["group_all"] = [1, 2]
+
+    result = QuoteService.select_quote_ids_without_record(
+        "group_all", [1, 2, 3, 4], 2
+    )
+
+    assert result == [3, 4]
+
+
+def test_record_recent_quote_ids_trims_history_window(monkeypatch):
+    monkeypatch.setattr(QuoteService, "_recent_quotes", {})
+
+    QuoteService.record_recent_quote_ids(
+        "group_all", list(range(1, QuoteService._max_history_per_key + 5))
+    )
+
+    assert len(QuoteService._recent_quotes["group_all"]) == QuoteService._max_history_per_key
+    assert QuoteService._recent_quotes["group_all"][0] == 5
+
+
+@pytest.mark.asyncio
+async def test_increment_view_counts_uses_single_bulk_update(monkeypatch):
+    quotes = [
+        SimpleNamespace(id=1, group_id="123"),
+        SimpleNamespace(id=2, group_id="123"),
+    ]
+    update_calls: list[dict] = []
+
+    monkeypatch.setattr(
+        quote_service_module.Quote, "filter", _build_filter(quotes, update_calls=update_calls)
+    )
+
+    await QuoteService.increment_view_counts([1, 2, 2])
+
+    assert len(update_calls) == 1
+    assert "view_count" in update_calls[0]
 
 
 def test_delete_quote_reply_command_has_high_priority():

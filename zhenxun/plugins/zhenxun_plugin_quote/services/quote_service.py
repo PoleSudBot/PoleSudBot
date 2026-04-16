@@ -9,7 +9,7 @@ from typing import Any, ClassVar
 from cachetools import TTLCache
 from nonebot.adapters.onebot.v11 import Bot
 from nonebot_plugin_alconna import At, Text
-from tortoise.expressions import Q
+from tortoise.expressions import F, Q
 from tortoise.functions import Count
 
 from zhenxun import ui
@@ -44,7 +44,7 @@ class QuoteService:
     """语录服务类"""
 
     _recent_quotes: ClassVar[TTLCache] = TTLCache(maxsize=1000, ttl=600)
-    _max_history_per_key: ClassVar[int] = 10
+    _max_history_per_key: ClassVar[int] = 30
     _user_tag_prefix: ClassVar[str] = "user:"
 
     @classmethod
@@ -381,6 +381,37 @@ class QuoteService:
         return final_matches
 
     @classmethod
+    async def search_quotes(
+        cls, group_id: str, keyword: str, user_id_filter: str | None = None
+    ) -> list[Quote]:
+        """根据关键词搜索语录并返回完整命中集。"""
+        logger.info(
+            f"开始搜索语录 - 群组: {group_id}, 关键词: {keyword}, 用户筛选: {user_id_filter}",
+            "群聊语录",
+        )
+
+        try:
+            all_matches = await cls._search_quotes_by_text_and_filter_by_tags(
+                group_id, keyword, user_id_filter
+            )
+            if all_matches:
+                logger.info(f"总共找到匹配的语录 {len(all_matches)} 条", "群聊语录")
+            else:
+                logger.info(
+                    f"群组 {group_id} (用户: {user_id_filter or '任意'}) 中未找到与 '{keyword}' 相关的语录。",
+                    "群聊语录",
+                )
+            return all_matches
+        except Exception as e:
+            logger.error(
+                f"搜索语录时发生错误 - 群组: {group_id}, 关键词: {keyword}, "
+                f"用户筛选: {user_id_filter}, 错误: {e}",
+                "群聊语录",
+                e=e,
+            )
+            return []
+
+    @classmethod
     def _check_exact_keyword_in_quote(cls, keyword: str, quote: Quote) -> bool:
         """
         检查完整关键词是否直接命中语录文本或任一 tag。
@@ -431,20 +462,13 @@ class QuoteService:
     async def search_quote(
         cls, group_id: str, keyword: str, user_id_filter: str | None = None
     ) -> Quote | None:
-        """根据关键词搜索语录，可根据用户筛选。已重构为使用两阶段查询方法。"""
-        logger.info(
-            f"开始搜索语录 - 群组: {group_id}, 关键词: {keyword}, 用户筛选: {user_id_filter}",
-            "群聊语录",
-        )
+        """根据关键词搜索单条语录，可根据用户筛选。"""
         memory_key = f"{group_id}_{user_id_filter or 'all'}_{keyword}"
 
         try:
-            all_matches = await cls._search_quotes_by_text_and_filter_by_tags(
-                group_id, keyword, user_id_filter
-            )
+            all_matches = await cls.search_quotes(group_id, keyword, user_id_filter)
 
             if all_matches:
-                logger.info(f"总共找到匹配的语录 {len(all_matches)} 条", "群聊语录")
                 random_quote = cls._select_and_record_quote(memory_key, all_matches)
                 logger.info(
                     f"搜索到语录 ID: {random_quote.id} (路径: {random_quote.image_path})",
@@ -452,10 +476,6 @@ class QuoteService:
                 )
                 return random_quote
 
-            logger.info(
-                f"群组 {group_id} (用户: {user_id_filter or '任意'}) 中未找到与 '{keyword}' 相关的语录。",
-                "群聊语录",
-            )
             return None
         except Exception as e:
             logger.error(
@@ -465,6 +485,41 @@ class QuoteService:
                 e=e,
             )
             return None
+
+    @staticmethod
+    async def get_random_quote_ids(group_id: str) -> list[int]:
+        """仅拉取语录 ID，避免随机多张时把整群 ORM 实体化到内存。"""
+        try:
+            return list(
+                await Quote.filter(group_id=group_id).values_list("id", flat=True)
+            )
+        except Exception as e:
+            logger.error(
+                f"获取随机语录 ID 列表失败 - 群组: {group_id}, 错误: {e}",
+                "群聊语录",
+                e=e,
+            )
+            return []
+
+    @staticmethod
+    async def get_quotes_by_ids_in_order(ids: list[int]) -> list[Quote]:
+        """按输入 ID 顺序返回语录，避免 id__in 查询结果顺序不稳定。"""
+        if not ids:
+            return []
+
+        try:
+            quotes = await Quote.filter(id__in=ids)
+            quote_by_id = {quote.id: quote for quote in quotes}
+            # SQL 的 IN 查询不保证结果顺序，这里按输入顺序重排，
+            # 否则多张发送时会把前面挑好的去重/随机顺序打乱。
+            return [quote_by_id[quote_id] for quote_id in ids if quote_id in quote_by_id]
+        except Exception as e:
+            logger.error(
+                f"根据 ID 列表获取语录失败 - IDs: {ids}, 错误: {e}",
+                "群聊语录",
+                e=e,
+            )
+            return []
 
     @staticmethod
     async def find_quote_by_basename(
@@ -677,28 +732,94 @@ class QuoteService:
             return cls.get_manual_tags(quote)
 
     @classmethod
+    def _select_ids_without_record(
+        cls, memory_key: str, candidate_ids: list[int], limit: int
+    ) -> list[int]:
+        """按 unseen-first 规则挑选 ID，但把写入历史延后到真正发送成功之后。"""
+        if not candidate_ids or limit <= 0:
+            return []
+
+        recent_ids = cls._recent_quotes.get(memory_key) or []
+        unseen_ids = [quote_id for quote_id in candidate_ids if quote_id not in recent_ids]
+        selected_ids = list(unseen_ids) if unseen_ids else list(candidate_ids)
+        random.shuffle(selected_ids)
+        selected_ids = selected_ids[:limit]
+
+        if len(selected_ids) < limit:
+            # 当未看过的候选不足时再回填历史记录内的语录，
+            # 这样一次多张请求也尽量保持“先展示没发过的内容”。
+            fallback_ids = [
+                quote_id for quote_id in candidate_ids if quote_id not in selected_ids
+            ]
+            random.shuffle(fallback_ids)
+            selected_ids.extend(fallback_ids[: limit - len(selected_ids)])
+
+        return selected_ids
+
+    @classmethod
+    def select_quote_ids_without_record(
+        cls, memory_key: str, candidate_ids: list[int], limit: int
+    ) -> list[int]:
+        """为随机多张路径挑选 ID，避免把整群 ORM 实体一次性加载到内存。"""
+        return cls._select_ids_without_record(memory_key, candidate_ids, limit)
+
+    @classmethod
+    def select_quotes_without_record(
+        cls, memory_key: str, quotes: list[Quote], limit: int
+    ) -> list[Quote]:
+        """在完成文件校验前先挑选候选，避免坏文件污染最近记录。"""
+        if not quotes or limit <= 0:
+            return []
+
+        quote_by_id = {quote.id: quote for quote in quotes}
+        candidate_ids = [quote.id for quote in quotes]
+        selected_ids = cls._select_ids_without_record(memory_key, candidate_ids, limit)
+        return [quote_by_id[quote_id] for quote_id in selected_ids if quote_id in quote_by_id]
+
+    @classmethod
+    def record_recent_quote_ids(cls, memory_key: str, quote_ids: list[int]) -> None:
+        """只有真正发送成功的语录才写入去重历史，避免无效记录污染最近窗口。"""
+        if not quote_ids:
+            return
+
+        history = list(cls._recent_quotes.get(memory_key) or [])
+        history.extend(quote_ids)
+        # 多张请求会一次写入多个 ID，这里统一只保留最近窗口，
+        # 防止一次 10 连立刻把同 key 的去重历史撑爆。
+        cls._recent_quotes[memory_key] = history[-cls._max_history_per_key :]
+
+    @classmethod
     def _select_and_record_quote(cls, memory_key: str, quotes: list[Quote]) -> Quote:
-        """选择并记录语录"""
+        """选择并记录单条语录。"""
         if not quotes:
             raise ValueError("语录列表为空")
 
-        recent_ids = cls._recent_quotes.get(memory_key) or []
-        unseen_quotes = [q for q in quotes if q.id not in recent_ids]
-
-        if unseen_quotes:
-            selected_quote = random.choice(unseen_quotes)
-        else:
-            selected_quote = random.choice(quotes)
-
-        if memory_key not in cls._recent_quotes:
-            cls._recent_quotes[memory_key] = []
-
-        cls._recent_quotes[memory_key].append(selected_quote.id)
-
-        if len(cls._recent_quotes[memory_key]) > cls._max_history_per_key:
-            cls._recent_quotes[memory_key].pop(0)
-
+        selected_quotes = cls.select_quotes_without_record(memory_key, quotes, 1)
+        if not selected_quotes:
+            raise ValueError("语录列表为空")
+        selected_quote = selected_quotes[0]
+        cls.record_recent_quote_ids(memory_key, [selected_quote.id])
         return selected_quote
+
+    @classmethod
+    async def increment_view_counts(cls, quote_ids: list[int]) -> None:
+        """批量增加查看次数，避免多图发送时逐条 UPDATE 放大写压力。"""
+        if not quote_ids:
+            return
+
+        try:
+            unique_ids = list(dict.fromkeys(quote_ids))
+            await Quote.filter(id__in=unique_ids).update(view_count=F("view_count") + 1)
+            logger.debug(
+                f"批量增加语录查看次数成功 - IDs: {unique_ids}",
+                "群聊语录",
+            )
+        except Exception as e:
+            logger.error(
+                f"批量增加语录查看次数失败 - IDs: {quote_ids}, 错误: {e}",
+                "群聊语录",
+                e=e,
+            )
 
     @classmethod
     async def search_quotes_for_deletion(
@@ -826,18 +947,7 @@ class QuoteService:
     @staticmethod
     async def increment_view_count(quote_id: int) -> None:
         """增加语录的查看次数"""
-        try:
-            quote = await Quote.get_or_none(id=quote_id)
-            if quote:
-                quote.view_count += 1
-                await quote.save(update_fields=["view_count"])
-                logger.debug(
-                    f"语录ID {quote_id} 查看次数增加到 {quote.view_count}", "群聊语录"
-                )
-        except Exception as e:
-            logger.error(
-                f"增加语录查看次数失败 - ID: {quote_id}, 错误: {e}", "群聊语录", e=e
-            )
+        await QuoteService.increment_view_counts([quote_id])
 
     @staticmethod
     async def get_hottest_quotes(group_id: str, limit: int = 10) -> list[Quote]:
