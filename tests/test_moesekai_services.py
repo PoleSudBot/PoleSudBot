@@ -326,11 +326,21 @@ async def test_handle_test_live_reminder_defaults_to_jp_when_unbound(
         assert server == "jp"
         return [{"id": 999, "name": "测试 Live"}]
 
-    async def fake_build_live_message(server: str, live: dict, *, remind_start: datetime, title: str):
+    async def fake_build_live_message(
+        server: str,
+        live: dict,
+        *,
+        start_time: datetime,
+        countdown_minutes: int,
+        title: str,
+        remaining_count: int | None = None,
+    ):
         assert server == "jp"
         assert live["id"] == 999
         assert title == "Live 提醒测试"
-        assert remind_start > datetime.now()
+        assert start_time > datetime.now()
+        assert countdown_minutes == 3
+        assert remaining_count is None
         return "live-message"
 
     monkeypatch.setattr(
@@ -356,6 +366,484 @@ async def test_handle_test_live_reminder_defaults_to_jp_when_unbound(
     )
 
     assert result == "live-message"
+
+
+@pytest.mark.asyncio
+async def test_build_live_message_uses_new_start_time_copy_and_remaining_count(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, object] = {}
+
+    async def fake_get_virtual_live_banner(server: str, assetbundle_name: str):
+        assert server == "jp"
+        assert assetbundle_name == "banner001"
+        return b"banner"
+
+    async def fake_render_reminder_card(view_model):
+        captured["view_model"] = view_model
+        return b"rendered"
+
+    monkeypatch.setattr(
+        service_module.asset_provider,
+        "get_virtual_live_banner",
+        fake_get_virtual_live_banner,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "render_reminder_card",
+        fake_render_reminder_card,
+    )
+
+    result = await service_module.moesekai_app._build_live_message(
+        "jp",
+        {"name": "测试 Live", "assetbundleName": "banner001"},
+        start_time=datetime(2026, 4, 14, 20, 0),
+        countdown_minutes=3,
+        title="Live 即将开始",
+        remaining_count=2,
+    )
+
+    view_model = captured["view_model"]
+    assert view_model.title == "Live 即将开始"
+    assert view_model.subtitle == "测试 Live"
+    assert view_model.lines == [
+        "【开始时间】2026-4-14 20:00（3分钟后）",
+        "【剩余场数】2",
+    ]
+    assert "区服" not in "".join(view_model.lines)
+    assert "提醒时间" not in "".join(view_model.lines)
+    segments = list(result)
+    assert len(segments) == 1
+    assert segments[0].type == "image"
+
+
+@pytest.mark.asyncio
+async def test_build_live_message_omits_remaining_count_when_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, object] = {}
+
+    async def fake_render_reminder_card(view_model):
+        captured["view_model"] = view_model
+        return b"rendered"
+
+    monkeypatch.setattr(
+        service_module,
+        "render_reminder_card",
+        fake_render_reminder_card,
+    )
+
+    await service_module.moesekai_app._build_live_message(
+        "jp",
+        {"name": "测试 Live"},
+        start_time=datetime(2026, 4, 14, 20, 0),
+        countdown_minutes=3,
+        title="Live 即将开始",
+    )
+
+    view_model = captured["view_model"]
+    assert view_model.lines == ["【开始时间】2026-4-14 20:00（3分钟后）"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_live_reminders_sends_start_reminder_image_before_mentions(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    now = datetime.now()
+    first_start = now + timedelta(minutes=2, seconds=10)
+    second_start = now + timedelta(minutes=20)
+    third_start = now + timedelta(minutes=40)
+    expected_first_start = datetime.fromtimestamp(int(first_start.timestamp() * 1000) / 1000)
+    sent: dict[str, object] = {}
+    build_calls: list[dict[str, object]] = []
+    records: list[str] = []
+
+    async def fake_toggles(*, feature_name: str):
+        assert feature_name == service_module.FEATURE_LIVE_REMINDER
+        return [SimpleNamespace(platform="qq", group_id="group-a", server="jp")]
+
+    async def fake_get_virtual_lives(server: str):
+        assert server == "jp"
+        return [
+            {
+                "id": 100,
+                "name": "测试 Live",
+                "virtualLiveSchedules": [
+                    {"startAt": int(first_start.timestamp() * 1000)},
+                    {"startAt": int(second_start.timestamp() * 1000)},
+                    {"startAt": int(third_start.timestamp() * 1000)},
+                ],
+            }
+        ]
+
+    async def fake_has_notification_record(**_kwargs):
+        return False
+
+    async def fake_list_subscribers(**_kwargs):
+        return [SimpleNamespace(user_id="1001"), SimpleNamespace(user_id="1002")]
+
+    async def fake_build_live_message(
+        server: str,
+        live: dict,
+        *,
+        start_time: datetime,
+        countdown_minutes: int,
+        title: str,
+        remaining_count: int | None = None,
+    ):
+        assert server == "jp"
+        assert live["id"] == 100
+        build_calls.append(
+            {
+                "start_time": start_time,
+                "countdown_minutes": countdown_minutes,
+                "title": title,
+                "remaining_count": remaining_count,
+            }
+        )
+        return service_module.UniMessage([service_module.Image(raw=b"image-bytes")])
+
+    async def fake_send_message(_bot, _user_id, group_id: str, message):
+        sent["group_id"] = group_id
+        sent["message"] = message
+
+    async def fake_create_notification_record(*, record_key: str, **_kwargs):
+        records.append(record_key)
+
+    monkeypatch.setattr(
+        service_module,
+        "list_enabled_group_feature_toggles",
+        fake_toggles,
+    )
+    monkeypatch.setattr(
+        service_module.master_data_provider,
+        "get_virtual_lives",
+        fake_get_virtual_lives,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "has_notification_record",
+        fake_has_notification_record,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "list_user_feature_subscriptions",
+        fake_list_subscribers,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_build_live_message",
+        fake_build_live_message,
+    )
+    monkeypatch.setattr(
+        service_module.PlatformUtils,
+        "send_message",
+        fake_send_message,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "create_notification_record",
+        fake_create_notification_record,
+    )
+
+    await service_module.moesekai_app.dispatch_live_reminders(bot=SimpleNamespace())
+
+    assert build_calls == [
+        {
+            "start_time": expected_first_start,
+            "countdown_minutes": 3,
+            "title": "Live 即将开始",
+            "remaining_count": 3,
+        }
+    ]
+    assert sent["group_id"] == "group-a"
+    segments = list(sent["message"])
+    assert [segment.type for segment in segments] == ["image", "text", "at", "text", "at"]
+    assert segments[1].text == "\n"
+    assert segments[2].target == "1001"
+    assert segments[3].text == " "
+    assert segments[4].target == "1002"
+    assert records == [f"100:first:{expected_first_start.isoformat()}"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_live_reminders_sends_second_last_stage_as_end_reminder(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    now = datetime.now()
+    first_start = now + timedelta(minutes=1)
+    second_last_start = now + timedelta(minutes=9, seconds=20)
+    last_start = now + timedelta(minutes=30)
+    expected_second_last_start = datetime.fromtimestamp(
+        int(second_last_start.timestamp() * 1000) / 1000
+    )
+    build_calls: list[dict[str, object]] = []
+    records: list[str] = []
+
+    async def fake_toggles(*, feature_name: str):
+        assert feature_name == service_module.FEATURE_LIVE_REMINDER
+        return [SimpleNamespace(platform="qq", group_id="group-a", server="jp")]
+
+    async def fake_get_virtual_lives(_server: str):
+        return [
+            {
+                "id": 200,
+                "name": "结束提醒测试",
+                "virtualLiveSchedules": [
+                    {"startAt": int(first_start.timestamp() * 1000)},
+                    {"startAt": int(second_last_start.timestamp() * 1000)},
+                    {"startAt": int(last_start.timestamp() * 1000)},
+                ],
+            }
+        ]
+
+    async def fake_has_notification_record(**_kwargs):
+        return False
+
+    async def fake_list_subscribers(**_kwargs):
+        return []
+
+    async def fake_build_live_message(
+        _server: str,
+        _live: dict,
+        *,
+        start_time: datetime,
+        countdown_minutes: int,
+        title: str,
+        remaining_count: int | None = None,
+    ):
+        build_calls.append(
+            {
+                "start_time": start_time,
+                "countdown_minutes": countdown_minutes,
+                "title": title,
+                "remaining_count": remaining_count,
+            }
+        )
+        return service_module.UniMessage([service_module.Image(raw=b"image-bytes")])
+
+    async def fake_send_message(_bot, _user_id, _group_id: str, message):
+        segments = list(message)
+        assert [segment.type for segment in segments] == ["image"]
+
+    async def fake_create_notification_record(*, record_key: str, **_kwargs):
+        records.append(record_key)
+
+    monkeypatch.setattr(
+        service_module,
+        "list_enabled_group_feature_toggles",
+        fake_toggles,
+    )
+    monkeypatch.setattr(
+        service_module.master_data_provider,
+        "get_virtual_lives",
+        fake_get_virtual_lives,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "has_notification_record",
+        fake_has_notification_record,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "list_user_feature_subscriptions",
+        fake_list_subscribers,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_build_live_message",
+        fake_build_live_message,
+    )
+    monkeypatch.setattr(
+        service_module.PlatformUtils,
+        "send_message",
+        fake_send_message,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "create_notification_record",
+        fake_create_notification_record,
+    )
+
+    await service_module.moesekai_app.dispatch_live_reminders(bot=SimpleNamespace())
+
+    assert build_calls == [
+        {
+            "start_time": expected_second_last_start,
+            "countdown_minutes": 10,
+            "title": "Live 即将结束",
+            "remaining_count": 2,
+        }
+    ]
+    assert records == [f"200:second_last:{expected_second_last_start.isoformat()}"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_live_reminders_single_schedule_only_emits_start_stage(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    now = datetime.now()
+    schedule_start = now + timedelta(minutes=2, seconds=5)
+    expected_start_time = datetime.fromtimestamp(int(schedule_start.timestamp() * 1000) / 1000)
+    build_titles: list[str] = []
+
+    async def fake_toggles(*, feature_name: str):
+        assert feature_name == service_module.FEATURE_LIVE_REMINDER
+        return [SimpleNamespace(platform="qq", group_id="group-a", server="jp")]
+
+    async def fake_get_virtual_lives(_server: str):
+        return [
+            {
+                "id": 300,
+                "name": "单场 Live",
+                "virtualLiveSchedules": [
+                    {"startAt": int(schedule_start.timestamp() * 1000)},
+                ],
+            }
+        ]
+
+    async def fake_has_notification_record(**_kwargs):
+        return False
+
+    async def fake_list_subscribers(**_kwargs):
+        return []
+
+    async def fake_build_live_message(
+        _server: str,
+        _live: dict,
+        *,
+        start_time: datetime,
+        countdown_minutes: int,
+        title: str,
+        remaining_count: int | None = None,
+    ):
+        assert start_time == expected_start_time
+        assert countdown_minutes == 3
+        assert remaining_count == 1
+        build_titles.append(title)
+        return service_module.UniMessage([service_module.Image(raw=b"image-bytes")])
+
+    async def fake_send_message(_bot, _user_id, _group_id: str, _message):
+        return None
+
+    async def fake_create_notification_record(**_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        service_module,
+        "list_enabled_group_feature_toggles",
+        fake_toggles,
+    )
+    monkeypatch.setattr(
+        service_module.master_data_provider,
+        "get_virtual_lives",
+        fake_get_virtual_lives,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "has_notification_record",
+        fake_has_notification_record,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "list_user_feature_subscriptions",
+        fake_list_subscribers,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_build_live_message",
+        fake_build_live_message,
+    )
+    monkeypatch.setattr(
+        service_module.PlatformUtils,
+        "send_message",
+        fake_send_message,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "create_notification_record",
+        fake_create_notification_record,
+    )
+
+    await service_module.moesekai_app.dispatch_live_reminders(bot=SimpleNamespace())
+
+    assert build_titles == ["Live 即将开始"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_live_reminders_skips_when_notification_record_exists(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    now = datetime.now()
+    start_time = now + timedelta(minutes=2, seconds=10)
+
+    async def fake_toggles(*, feature_name: str):
+        assert feature_name == service_module.FEATURE_LIVE_REMINDER
+        return [SimpleNamespace(platform="qq", group_id="group-a", server="jp")]
+
+    async def fake_get_virtual_lives(_server: str):
+        return [
+            {
+                "id": 400,
+                "name": "已提醒 Live",
+                "virtualLiveSchedules": [
+                    {"startAt": int(start_time.timestamp() * 1000)},
+                ],
+            }
+        ]
+
+    async def fake_has_notification_record(**_kwargs):
+        return True
+
+    async def fail_list_subscribers(**_kwargs):
+        raise AssertionError("已存在记录时不应再读取订阅")
+
+    async def fail_build_message(*_args, **_kwargs):
+        raise AssertionError("已存在记录时不应构建提醒消息")
+
+    async def fail_send_message(_bot, _user_id, _group_id: str, _message):
+        raise AssertionError("已存在记录时不应发送消息")
+
+    async def fail_create_record(**_kwargs):
+        raise AssertionError("已存在记录时不应重复写入记录")
+
+    monkeypatch.setattr(
+        service_module,
+        "list_enabled_group_feature_toggles",
+        fake_toggles,
+    )
+    monkeypatch.setattr(
+        service_module.master_data_provider,
+        "get_virtual_lives",
+        fake_get_virtual_lives,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "has_notification_record",
+        fake_has_notification_record,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "list_user_feature_subscriptions",
+        fail_list_subscribers,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_build_live_message",
+        fail_build_message,
+    )
+    monkeypatch.setattr(
+        service_module.PlatformUtils,
+        "send_message",
+        fail_send_message,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "create_notification_record",
+        fail_create_record,
+    )
+
+    await service_module.moesekai_app.dispatch_live_reminders(bot=SimpleNamespace())
 
 
 @pytest.mark.asyncio

@@ -87,6 +87,9 @@ ALIAS_IMAGE_TEXT_THRESHOLD = 100
 ALIAS_IMAGE_COUNT_THRESHOLD = 20
 _ALIAS_STATE = JsonStateStore(STATE_DIR / "alias_sync_state.json")
 _NEW_CARD_PENDING_STATE = JsonStateStore(STATE_DIR / "new_card_pending_state.json")
+_LIVE_REMINDER_START_LEAD = timedelta(minutes=3)
+_LIVE_REMINDER_END_LEAD = timedelta(minutes=10)
+_LIVE_REMINDER_TRIGGER_WINDOW = timedelta(seconds=90)
 
 
 @dataclass(frozen=True)
@@ -112,6 +115,15 @@ class _NewCardReminderTargetState:
     consecutive_failures: int = 0
     aborted: bool = False
     started_at: float = 0.0
+
+
+@dataclass(frozen=True)
+class _LiveReminderCheckpoint:
+    stage: Literal["first", "second_last"]
+    title: str
+    start_time: datetime
+    remind_at: datetime
+    remaining_count: int | None
 
 
 class MoeSekaiApplication:
@@ -1442,27 +1454,103 @@ class MoeSekaiApplication:
         server: str,
         live: dict[str, Any],
         *,
-        remind_start: datetime,
+        start_time: datetime,
+        countdown_minutes: int,
         title: str,
+        remaining_count: int | None = None,
     ) -> UniMessage:
         banner = None
         if live.get("assetbundleName"):
             banner = await asset_provider.get_virtual_live_banner(
                 server, str(live["assetbundleName"])
             )
+        lines = [
+            f"【开始时间】{self._format_live_start_time(start_time)}"
+            f"（{max(1, countdown_minutes)}分钟后）"
+        ]
+        if remaining_count:
+            lines.append(f"【剩余场数】{remaining_count}")
         image = await render_reminder_card(
             ReminderCardViewModel(
                 title=title,
                 subtitle=str(live.get("name", "")).strip() or None,
-                lines=[
-                    f"区服：{server_label(server)}",
-                    f"提醒时间：{remind_start.strftime('%Y-%m-%d %H:%M')}",
-                ],
+                lines=lines,
                 banner=banner,
                 accent="Live Reminder",
             )
         )
         return UniMessage([Image(raw=image)])
+
+    def _collect_live_schedule_starts(self, live: dict[str, Any]) -> list[datetime]:
+        starts: list[datetime] = []
+        for item in live.get("virtualLiveSchedules", []):
+            raw_start = item.get("startAt")
+            if not raw_start:
+                continue
+            try:
+                starts.append(datetime.fromtimestamp(int(raw_start) / 1000))
+            except (TypeError, ValueError, OSError):
+                continue
+        starts.sort()
+        return starts
+
+    def _calculate_live_remaining_count(
+        self, schedule_starts: list[datetime], checkpoint_start: datetime
+    ) -> int | None:
+        # 剩余场数跟随当前提醒 checkpoint 计算，这样“开始提醒”和“结束提醒”
+        # 都能展示对应该阶段还剩几场，而不是固定展示全量场次。
+        remaining = sum(1 for start in schedule_starts if start >= checkpoint_start)
+        return remaining or None
+
+    def _build_live_reminder_checkpoints(
+        self, live: dict[str, Any]
+    ) -> list[_LiveReminderCheckpoint]:
+        schedule_starts = self._collect_live_schedule_starts(live)
+        if not schedule_starts:
+            return []
+        checkpoints = [
+            _LiveReminderCheckpoint(
+                stage="first",
+                title="Live 即将开始",
+                start_time=schedule_starts[0],
+                remind_at=schedule_starts[0] - _LIVE_REMINDER_START_LEAD,
+                remaining_count=self._calculate_live_remaining_count(
+                    schedule_starts, schedule_starts[0]
+                ),
+            )
+        ]
+        if len(schedule_starts) >= 2:
+            second_last_start = schedule_starts[-2]
+            # 结束提醒继续沿用当前插件已有的“倒数第二场”语义，只调整提前量。
+            # 这里不切到整体 endAt，是为了保持和现有提醒对象一致，避免提醒时点跳变。
+            checkpoints.append(
+                _LiveReminderCheckpoint(
+                    stage="second_last",
+                    title="Live 即将结束",
+                    start_time=second_last_start,
+                    remind_at=second_last_start - _LIVE_REMINDER_END_LEAD,
+                    remaining_count=self._calculate_live_remaining_count(
+                        schedule_starts, second_last_start
+                    ),
+                )
+            )
+        return checkpoints
+
+    def _is_live_reminder_due(self, *, now: datetime, remind_at: datetime) -> bool:
+        # 轮询每 60 秒执行一次，这里额外留 90 秒窗口是为了吸收调度抖动，
+        # 避免任务晚跑几十秒就直接错过提醒时点。
+        return remind_at <= now < remind_at + _LIVE_REMINDER_TRIGGER_WINDOW
+
+    def _format_live_start_time(self, value: datetime) -> str:
+        local_value = value.astimezone() if value.tzinfo else value
+        return (
+            f"{local_value.year}-{local_value.month}-{local_value.day} "
+            f"{local_value.hour:02d}:{local_value.minute:02d}"
+        )
+
+    def _get_live_countdown_minutes(self, *, now: datetime, start_time: datetime) -> int:
+        total_seconds = max(0, int((start_time - now).total_seconds()))
+        return max(1, (total_seconds + 59) // 60)
 
     async def handle_test_live_reminder(
         self,
@@ -1488,10 +1576,12 @@ class MoeSekaiApplication:
             target = lives[-1]
         if not target:
             return "未找到可测试的 live 数据"
+        start_time = datetime.now() + _LIVE_REMINDER_START_LEAD
         return await self._build_live_message(
             resolved_server,
             target,
-            remind_start=datetime.now() + timedelta(minutes=5),
+            start_time=start_time,
+            countdown_minutes=int(_LIVE_REMINDER_START_LEAD.total_seconds() // 60),
             title="Live 提醒测试",
         )
 
@@ -2762,23 +2852,16 @@ class MoeSekaiApplication:
         for toggle in toggles:
             lives = await master_data_provider.get_virtual_lives(toggle.server)
             for live in lives:
-                schedules = sorted(
-                    [
-                        datetime.fromtimestamp(item["startAt"] / 1000)
-                        for item in live.get("virtualLiveSchedules", [])
-                        if item.get("startAt")
-                    ]
-                )
-                if not schedules:
-                    continue
-                checkpoints = [("first", schedules[0])]
-                if len(schedules) >= 2:
-                    checkpoints.append(("second_last", schedules[-2]))
-                for stage, start_time in checkpoints:
-                    remind_at = start_time - timedelta(minutes=5)
-                    if not (timedelta(minutes=0) <= start_time - now <= timedelta(minutes=6)):
+                for checkpoint in self._build_live_reminder_checkpoints(live):
+                    if not self._is_live_reminder_due(
+                        now=now,
+                        remind_at=checkpoint.remind_at,
+                    ):
                         continue
-                    record_key = f"{live.get('id')}:{stage}:{start_time.isoformat()}"
+                    record_key = (
+                        f"{live.get('id')}:{checkpoint.stage}:"
+                        f"{checkpoint.start_time.isoformat()}"
+                    )
                     if await has_notification_record(
                         platform=toggle.platform,
                         group_id=toggle.group_id,
@@ -2796,15 +2879,22 @@ class MoeSekaiApplication:
                     reminder = await self._build_live_message(
                         toggle.server,
                         live,
-                        remind_start=remind_at,
-                        title="Live 即将开始",
+                        start_time=checkpoint.start_time,
+                        countdown_minutes=self._get_live_countdown_minutes(
+                            now=now,
+                            start_time=checkpoint.start_time,
+                        ),
+                        title=checkpoint.title,
+                        remaining_count=checkpoint.remaining_count,
                     )
                     if subscribers:
-                        at_message = UniMessage()
-                        for subscription in subscribers:
-                            at_message += UniMessage([At(flag="user", target=subscription.user_id)])
-                        at_message += UniMessage([Text("\n")])
-                        reminder = at_message + reminder
+                        reminder += UniMessage([Text("\n")])
+                        for index, subscription in enumerate(subscribers):
+                            reminder += UniMessage(
+                                [At(flag="user", target=subscription.user_id)]
+                            )
+                            if index < len(subscribers) - 1:
+                                reminder += UniMessage([Text(" ")])
                     await PlatformUtils.send_message(bot, None, toggle.group_id, reminder)
                     await create_notification_record(
                         platform=toggle.platform,
