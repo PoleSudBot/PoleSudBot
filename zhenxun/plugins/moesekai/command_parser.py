@@ -46,11 +46,14 @@ def normalize_text(text: str) -> str:
 
 def extract_at_targets(event: MessageEvent) -> list[str]:
     targets: list[str] = []
+    self_id = str(getattr(event, "self_id", "") or "")
     for segment in event.get_message():
         if segment.type != "at":
             continue
         qq = segment.data.get("qq")
-        if qq and qq != "all":
+        # 群里常见的“@bot + 指令”不应该被当作档案查询目标，
+        # 否则会把显式 UID 误判成“UID 与 @ 同时指定”。
+        if qq and qq != "all" and str(qq) != self_id:
             targets.append(str(qq))
     return targets
 
@@ -148,6 +151,35 @@ def _parse_live_subscription(text: str) -> ParsedCommand | None:
             return ParsedCommand("live_subscribe", text, server=server, error="用法: 取消订阅live提醒 [区服]")
         return ParsedCommand("live_subscribe", text, server=server, admin_subaction="unsubscribe")
     return None
+
+
+def _parse_archive_query(text: str, at_targets: list[str]) -> ParsedCommand | None:
+    matched = _match_command(text, ("个人档案", "查询档案", "档案查询"))
+    if not matched:
+        return None
+    prefix, raw_rest = matched
+    compact_suffix = bool(raw_rest) and not raw_rest[:1].isspace()
+    server, rest = _consume_server(prefix, raw_rest)
+    # 三个命令名统一走同一条查询链路，避免“查自己”和“查别人”
+    # 在解析层继续分叉成两套 action。
+    if len(at_targets) > 1:
+        return ParsedCommand("query_archive", text, server=server, error="档案查询最多只能指定一个 @ 用户")
+    rest = rest.strip()
+    if at_targets and rest:
+        if compact_suffix:
+            return None
+        return ParsedCommand("query_archive", text, server=server, error="档案查询不能同时指定游戏ID和 @用户")
+    if at_targets:
+        return ParsedCommand("query_archive", text, server=server, target_user_id=at_targets[0])
+    # 对“个人档案123...”这种紧跟写法，只接受纯数字 UID；
+    # 其它尾随文本或位数明显不合法的数字都直接忽略，
+    # 避免普通聊天或短数字片段被误识别成档案查询并回错误提示。
+    if compact_suffix and rest:
+        if not rest.isdigit():
+            return None
+        if not 13 <= len(rest) <= 20:
+            return None
+    return ParsedCommand("query_archive", text, server=server, game_id=rest or None)
 
 
 def _parse_story(text: str) -> ParsedCommand | None:
@@ -490,28 +522,9 @@ def parse_command(event: MessageEvent) -> ParsedCommand | None:
     if admin:
         return admin
 
-    matched = _match_command(text, ("个人档案",))
-    if matched:
-        prefix, rest = matched
-        server, rest = _consume_server(prefix, rest)
-        if rest:
-            return ParsedCommand("personal_archive", text, server=server, error="个人档案不需要额外参数")
-        return ParsedCommand("personal_archive", text, server=server)
-
-    matched = _match_command(text, ("查询档案", "档案查询"))
-    if matched:
-        prefix, rest = matched
-        server, rest = _consume_server(prefix, rest)
-        if len(at_targets) > 1:
-            return ParsedCommand("query_archive", text, server=server, error="查询档案最多只能指定一个 @ 用户")
-        rest = rest.strip()
-        if at_targets and rest:
-            return ParsedCommand("query_archive", text, server=server, error="查询档案不能同时指定游戏ID和 @用户")
-        if not at_targets and not rest:
-            return ParsedCommand("query_archive", text, server=server, error="请提供游戏ID或 @用户")
-        if at_targets:
-            return ParsedCommand("query_archive", text, server=server, target_user_id=at_targets[0])
-        return ParsedCommand("query_archive", text, server=server, game_id=rest)
+    archive = _parse_archive_query(text, at_targets)
+    if archive:
+        return archive
 
     matched = _match_command(text, ("绑定",))
     if matched:

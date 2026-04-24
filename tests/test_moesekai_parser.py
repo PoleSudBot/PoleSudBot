@@ -17,9 +17,16 @@ class FakeSegment:
 
 
 class FakeEvent:
-    def __init__(self, text: str, segments: list[FakeSegment] | None = None):
+    def __init__(
+        self,
+        text: str,
+        segments: list[FakeSegment] | None = None,
+        *,
+        self_id: str = "999999",
+    ):
         self._text = text
         self._segments = segments or []
+        self.self_id = self_id
 
     def get_plaintext(self) -> str:
         return self._text
@@ -31,8 +38,10 @@ class FakeEvent:
 def test_parse_personal_archive_with_prefix():
     parsed = parse_command(FakeEvent("cn个人档案"))  # type: ignore[arg-type]
     assert parsed is not None
-    assert parsed.action == "personal_archive"
+    assert parsed.action == "query_archive"
     assert parsed.server == "cn"
+    assert parsed.game_id is None
+    assert parsed.target_user_id is None
 
 
 def test_parse_query_archive_with_at_target():
@@ -43,6 +52,46 @@ def test_parse_query_archive_with_at_target():
     assert parsed.action == "query_archive"
     assert parsed.target_user_id == "123456"
     assert parsed.game_id is None
+
+
+def test_parse_personal_archive_with_at_target():
+    parsed = parse_command(
+        FakeEvent("个人档案", [FakeSegment("at", {"qq": "123456"})])  # type: ignore[arg-type]
+    )
+    assert parsed is not None
+    assert parsed.action == "query_archive"
+    assert parsed.target_user_id == "123456"
+    assert parsed.game_id is None
+
+
+def test_parse_personal_archive_with_uid_target_without_space():
+    parsed = parse_command(FakeEvent("个人档案1234567890123"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "query_archive"
+    assert parsed.server is None
+    assert parsed.game_id == "1234567890123"
+
+
+def test_parse_personal_archive_with_uid_target_ignores_bot_at():
+    parsed = parse_command(
+        FakeEvent(
+            "个人档案1234567890123",
+            [FakeSegment("at", {"qq": "114514"})],
+            self_id="114514",
+        )  # type: ignore[arg-type]
+    )
+    assert parsed is not None
+    assert parsed.action == "query_archive"
+    assert parsed.game_id == "1234567890123"
+    assert parsed.target_user_id is None
+
+
+def test_parse_personal_archive_compact_non_digit_suffix_is_ignored():
+    assert parse_command(FakeEvent("个人档案abc")) is None  # type: ignore[arg-type]
+
+
+def test_parse_personal_archive_compact_short_numeric_suffix_is_ignored():
+    assert parse_command(FakeEvent("个人档案123")) is None  # type: ignore[arg-type]
 
 
 def test_parse_bind_with_server_after_command():
@@ -513,6 +562,46 @@ def test_parse_query_archive_without_space_before_game_id():
     assert parsed.action == "query_archive"
     assert parsed.server is None
     assert parsed.game_id == "1234567890123"
+
+
+def test_parse_query_archive_compact_short_numeric_suffix_is_ignored():
+    assert parse_command(FakeEvent("查询档案123")) is None  # type: ignore[arg-type]
+
+
+def test_parse_query_archive_without_target_defaults_to_self_query():
+    parsed = parse_command(FakeEvent("查询档案"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "query_archive"
+    assert parsed.server is None
+    assert parsed.game_id is None
+    assert parsed.target_user_id is None
+
+
+def test_parse_archive_query_rejects_mixed_uid_and_at_target():
+    parsed = parse_command(
+        FakeEvent(
+            "个人档案 1234567890123",
+            [FakeSegment("at", {"qq": "123456"})],
+        )  # type: ignore[arg-type]
+    )
+    assert parsed is not None
+    assert parsed.action == "query_archive"
+    assert parsed.error == "档案查询不能同时指定游戏ID和 @用户"
+
+
+def test_parse_archive_query_rejects_multiple_at_targets():
+    parsed = parse_command(
+        FakeEvent(
+            "查询档案",
+            [
+                FakeSegment("at", {"qq": "123456"}),
+                FakeSegment("at", {"qq": "654321"}),
+            ],
+        )  # type: ignore[arg-type]
+    )
+    assert parsed is not None
+    assert parsed.action == "query_archive"
+    assert parsed.error == "档案查询最多只能指定一个 @ 用户"
 
 
 def test_parse_default_server_without_space_before_server():

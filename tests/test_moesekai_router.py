@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import nonebot
 from nonebot.adapters.onebot.v11 import Message, MessageSegment
 import pytest
@@ -7,6 +9,7 @@ import pytest
 nonebot.init()
 
 from zhenxun.plugins.moesekai.adapters.results import MoeImageTextMessage
+from zhenxun.plugins.moesekai.command_parser import ParsedCommand
 from zhenxun.plugins.moesekai.commands import router as router_module
 
 
@@ -47,3 +50,62 @@ async def test_send_result_uses_single_native_onebot_message_for_image_text():
     assert sent_message[2].type == "text"
     assert sent_message[2].data["text"].startswith("\nB站链接：")
     assert MessageSegment.image(b"manga-image").data["file"] == sent_message[1].data["file"]
+
+
+@pytest.mark.asyncio
+async def test_query_archive_router_does_not_inject_requester_for_explicit_uid(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, object] = {}
+
+    async def fake_superuser(_bot, _event):
+        return False
+
+    async def fake_handle_query_archive(
+        platform: str,
+        requester_user_id: str,
+        *,
+        server: str | None,
+        game_id: str | None,
+        target_user_id: str | None,
+        is_superuser: bool,
+    ):
+        captured["platform"] = platform
+        captured["requester_user_id"] = requester_user_id
+        captured["server"] = server
+        captured["game_id"] = game_id
+        captured["target_user_id"] = target_user_id
+        captured["is_superuser"] = is_superuser
+        return None
+
+    async def fake_send_result(_result, *, bot=None, event=None):
+        raise AssertionError("handle_query_archive 返回 None 时不应回消息")
+
+    monkeypatch.setattr(router_module, "SUPERUSER", fake_superuser)
+    monkeypatch.setattr(router_module.PlatformUtils, "get_platform", lambda _session: "qq")
+    monkeypatch.setattr(router_module, "handle_query_archive", fake_handle_query_archive)
+    monkeypatch.setattr(router_module, "_send_result", fake_send_result)
+
+    parsed = ParsedCommand(
+        action="query_archive",
+        raw_text="个人档案26958722584772616",
+        game_id="26958722584772616",
+    )
+    session = SimpleNamespace(user=SimpleNamespace(id="1163272259"), group=None)
+    state = {"moesekai_parsed_command": parsed}
+
+    await router_module._(
+        bot=SimpleNamespace(),
+        event=SimpleNamespace(),
+        session=session,
+        state=state,
+    )
+
+    assert captured == {
+        "platform": "qq",
+        "requester_user_id": "1163272259",
+        "server": None,
+        "game_id": "26958722584772616",
+        "target_user_id": None,
+        "is_superuser": False,
+    }

@@ -899,7 +899,54 @@ async def test_handle_test_new_card_reminder_defaults_to_jp_when_unbound(
 
 
 @pytest.mark.asyncio
-async def test_handle_personal_archive_still_requires_binding(
+async def test_handle_personal_archive_wraps_query_archive(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, object] = {}
+
+    async def fake_handle_query_archive(
+        platform: str,
+        requester_user_id: str,
+        *,
+        server: str | None,
+        game_id: str | None,
+        target_user_id: str | None,
+        is_superuser: bool,
+    ):
+        captured["platform"] = platform
+        captured["requester_user_id"] = requester_user_id
+        captured["server"] = server
+        captured["game_id"] = game_id
+        captured["target_user_id"] = target_user_id
+        captured["is_superuser"] = is_superuser
+        return "profile"
+
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "handle_query_archive",
+        fake_handle_query_archive,
+    )
+
+    result = await service_module.moesekai_app.handle_personal_archive(
+        "qq",
+        "123456",
+        None,
+        is_superuser=False,
+    )
+
+    assert result == "profile"
+    assert captured == {
+        "platform": "qq",
+        "requester_user_id": "123456",
+        "server": None,
+        "game_id": None,
+        "target_user_id": "123456",
+        "is_superuser": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_handle_query_archive_without_target_defaults_to_self_binding(
     monkeypatch: pytest.MonkeyPatch,
 ):
     async def fake_is_qq_blacklisted(*_args, **_kwargs):
@@ -908,7 +955,24 @@ async def test_handle_personal_archive_still_requires_binding(
     async def fake_resolve_default_server(*_args, **kwargs):
         assert kwargs["explicit_server"] is None
         assert kwargs["fallback_jp"] is False
-        return None, "未绑定"
+        return "jp", None
+
+    async def fake_get_user_binding(platform: str, user_id: str, server: str):
+        assert platform == "qq"
+        assert user_id == "123456"
+        assert server == "jp"
+        return SimpleNamespace(server="jp", game_id="1234567890123")
+
+    async def fake_is_uid_blacklisted(*_args, **_kwargs):
+        return None
+
+    async def fake_capture_profile_image(server: str, game_id: str):
+        assert server == "jp"
+        assert game_id == "1234567890123"
+        return b"profile-image"
+
+    async def fail_resolve_binding_for_user(*_args, **_kwargs):
+        raise AssertionError("查自己时不应走公开档案分享校验")
 
     monkeypatch.setattr(
         service_module.moesekai_app,
@@ -920,15 +984,37 @@ async def test_handle_personal_archive_still_requires_binding(
         "_resolve_default_server",
         fake_resolve_default_server,
     )
+    monkeypatch.setattr(
+        service_module,
+        "get_user_binding",
+        fake_get_user_binding,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_is_uid_blacklisted",
+        fake_is_uid_blacklisted,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_capture_profile_image",
+        fake_capture_profile_image,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_resolve_binding_for_user",
+        fail_resolve_binding_for_user,
+    )
 
-    result = await service_module.moesekai_app.handle_personal_archive(
-        "qq",
-        "123456",
-        None,
+    result = await service_module.moesekai_app.handle_query_archive(
+        platform="qq",
+        requester_user_id="123456",
+        server=None,
+        game_id=None,
+        target_user_id=None,
         is_superuser=False,
     )
 
-    assert result == "你还没有绑定任何账号，请先使用“绑定 [区服] <游戏ID>”"
+    assert result == b"profile-image"
 
 
 @pytest.mark.asyncio

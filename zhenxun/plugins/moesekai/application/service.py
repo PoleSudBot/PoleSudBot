@@ -413,25 +413,14 @@ class MoeSekaiApplication:
         *,
         is_superuser: bool,
     ) -> bytes | str:
-        if error := await self._is_qq_blacklisted(platform, user_id, is_superuser):
-            return error
-        resolved_server, error = await self._resolve_default_server(
+        return await self.handle_query_archive(
             platform,
             user_id,
-            explicit_server=server,
-            fallback_jp=False,
+            server=server,
+            game_id=None,
+            target_user_id=user_id,
+            is_superuser=is_superuser,
         )
-        if error or not resolved_server:
-            return "你还没有绑定任何账号，请先使用“绑定 [区服] <游戏ID>”"
-        binding = await get_user_binding(platform, user_id, resolved_server)
-        if not binding:
-            return f"你还没有绑定{server_label(resolved_server)}账号"
-        if error := await self._is_uid_blacklisted(binding.server, binding.game_id, is_superuser):
-            return error
-        try:
-            return await self._capture_profile_image(binding.server, binding.game_id)
-        except ScreenshotError as exc:
-            return exc.to_user_message()
 
     async def handle_query_archive(
         self,
@@ -459,8 +448,30 @@ class MoeSekaiApplication:
                 return await self._capture_profile_image(resolved_server, game_id)
             except ScreenshotError as exc:
                 return exc.to_user_message()
-        if not target_user_id:
-            return "请提供游戏ID或 @用户"
+        # “个人档案”和“查询档案”已经合并，无参数时默认视为查询发送者自己，
+        # 这样两个入口都能复用同一条档案查询链路。
+        query_self = target_user_id is None or target_user_id == requester_user_id
+        if query_self:
+            resolved_server, error = await self._resolve_default_server(
+                platform,
+                requester_user_id,
+                explicit_server=server,
+                fallback_jp=False,
+            )
+            if error or not resolved_server:
+                return "你还没有绑定任何账号，请先使用“绑定 [区服] <游戏ID>”"
+            binding = await get_user_binding(platform, requester_user_id, resolved_server)
+            if not binding:
+                return f"你还没有绑定{server_label(resolved_server)}账号"
+            if error := await self._is_uid_blacklisted(
+                binding.server, binding.game_id, is_superuser
+            ):
+                return error
+            try:
+                return await self._capture_profile_image(binding.server, binding.game_id)
+            except ScreenshotError as exc:
+                return exc.to_user_message()
+
         binding, error = await self._resolve_binding_for_user(
             platform,
             is_superuser,

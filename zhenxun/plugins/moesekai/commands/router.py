@@ -24,7 +24,6 @@ from ..services import (
     handle_manga_by_id,
     handle_multiplier,
     handle_new_card_toggle,
-    handle_personal_archive,
     handle_prediction,
     handle_query_archive,
     handle_random_manga,
@@ -136,13 +135,6 @@ async def _(
             platform,
             user_id,
             allow_share_profile=parsed.admin_value == "allow",
-        )
-    elif parsed.action == "personal_archive":
-        result = await handle_personal_archive(
-            platform,
-            user_id,
-            parsed.server,
-            is_superuser=is_superuser,
         )
     elif parsed.action == "query_archive":
         result = await handle_query_archive(
