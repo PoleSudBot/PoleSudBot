@@ -2,6 +2,7 @@ import json
 import asyncio
 import datetime
 import time
+import math
 from pathlib import Path
 from typing import List, Optional
 
@@ -26,6 +27,8 @@ class PigDataManager:
                    旧版存完整 pig dict，_migrate() 会自动转换
     - group_rolls: {date: {group_id: {user_id: pig_id}}} ← 群内“今日已抽/已显形”记录
     - collection : {user_id: [pig_id, ...]}   ← 永久保留，图鉴数据
+    - collection_progress: {user_id: {"count": int, "reached_at": float | null}}
+                         ← 记录用户达到当前图鉴数量的时间，用于排行榜并列时判先后
     - usage      : {user_id: timestamp}        ← 烤群友普通模式 CD 时间戳
     - force_usage: {user_id: "YYYY-MM-DD"}    ← 后门口令每日计数
     - daily_events: {date: [event, ...]}      ← 群内烧烤事件（用于日报）
@@ -46,6 +49,7 @@ class PigDataManager:
                 "history": {},
                 "group_rolls": {},
                 "collection": {},
+                "collection_progress": {},
                 "usage": {},
                 "force_usage": {},
                 "daily_events": {},
@@ -62,6 +66,7 @@ class PigDataManager:
                 "history": {},
                 "group_rolls": {},
                 "collection": {},
+                "collection_progress": {},
                 "usage": {},
                 "force_usage": {},
                 "daily_events": {},
@@ -76,12 +81,43 @@ class PigDataManager:
             data = {}
 
         migrated = False
-        for key in ("history", "group_rolls", "collection", "usage", "force_usage", "daily_events"):
+        for key in (
+            "history",
+            "group_rolls",
+            "collection",
+            "collection_progress",
+            "usage",
+            "force_usage",
+            "daily_events",
+        ):
             if not isinstance(data.get(key), dict):
                 data[key] = {}
                 migrated = True
         if not isinstance(data.get("protected"), dict):
             data["protected"] = {}
+            migrated = True
+
+        collection = data.get("collection", {})
+        progress = data.get("collection_progress", {})
+        normalized_progress: dict[str, dict[str, float | int | None]] = {}
+        for user_id, pig_ids in collection.items():
+            if not isinstance(pig_ids, list):
+                continue
+            expected_count = len(pig_ids)
+            raw_progress = progress.get(str(user_id)) if isinstance(progress, dict) else None
+            normalized_entry = self._normalize_collection_progress_entry(
+                raw_progress,
+                default_count=expected_count,
+            )
+            if raw_progress is None:
+                # 旧账本没有“达到当前数”的时间，不能根据残缺历史反推出先后，只能补数量。
+                normalized_entry["reached_at"] = None
+                migrated = True
+            elif normalized_entry != raw_progress:
+                migrated = True
+            normalized_progress[str(user_id)] = normalized_entry
+        if normalized_progress != progress:
+            data["collection_progress"] = normalized_progress
             migrated = True
 
         history = data.get("history", {})
@@ -135,6 +171,46 @@ class PigDataManager:
         tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(self.file)  # 同一文件系统上是原子操作（Windows/Linux 均支持）
 
+    def _normalize_collection_progress_entry(
+        self,
+        progress: object,
+        *,
+        default_count: int,
+    ) -> dict[str, float | int | None]:
+        normalized = {"count": max(0, int(default_count)), "reached_at": None}
+        if not isinstance(progress, dict):
+            return normalized
+
+        try:
+            normalized["count"] = max(0, int(progress.get("count", default_count)))
+        except (TypeError, ValueError):
+            normalized["count"] = max(0, int(default_count))
+
+        raw_reached_at = progress.get("reached_at")
+        if raw_reached_at is None:
+            return normalized
+
+        try:
+            reached_at = float(raw_reached_at)
+        except (TypeError, ValueError):
+            return normalized
+
+        if math.isfinite(reached_at):
+            normalized["reached_at"] = reached_at
+        return normalized
+
+    def _update_collection_progress(
+        self,
+        user_id: str,
+        user_collection: list[str],
+        reached_at: Optional[float] = None,
+    ) -> None:
+        progress = self.data.setdefault("collection_progress", {})
+        progress[user_id] = {
+            "count": len(user_collection),
+            "reached_at": float(reached_at if reached_at is not None else time.time()),
+        }
+
     # ---- 今日/历史 抽猪记录 ----
 
     def get_today_pig(self, user_id: str, date_str: Optional[str] = None) -> Optional[str]:
@@ -169,6 +245,7 @@ class PigDataManager:
             user_col = col.setdefault(user_id, [])
             if pig_id not in user_col:
                 user_col.append(pig_id)
+                self._update_collection_progress(user_id, user_col)
 
             await self._atomic_save()
 
@@ -207,6 +284,7 @@ class PigDataManager:
             user_collection = collection.setdefault(user_id, [])
             if proposed_pig_id not in user_collection:
                 user_collection.append(proposed_pig_id)
+                self._update_collection_progress(user_id, user_collection)
 
             await self._atomic_save()
             return proposed_pig_id, True
@@ -241,6 +319,32 @@ class PigDataManager:
             str(user_id): list(pig_ids)
             for user_id, pig_ids in collection.items()
             if isinstance(pig_ids, list)
+        }
+
+    def get_collection_progress(self, user_id: str) -> dict[str, float | int | None] | None:
+        collection = self.get_user_collection(user_id)
+        progress = self.data.get("collection_progress", {})
+        if not isinstance(progress, dict):
+            return None
+        user_progress = progress.get(user_id)
+        if user_progress is None:
+            return None
+        return self._normalize_collection_progress_entry(
+            user_progress,
+            default_count=len(collection),
+        )
+
+    def get_all_collection_progress(self) -> dict[str, dict[str, float | int | None]]:
+        collection = self.get_all_collections()
+        progress = self.data.get("collection_progress", {})
+        if not isinstance(progress, dict):
+            progress = {}
+        return {
+            user_id: self._normalize_collection_progress_entry(
+                progress.get(user_id),
+                default_count=len(pig_ids),
+            )
+            for user_id, pig_ids in collection.items()
         }
 
     def get_recent_user_names(self) -> dict[str, str]:

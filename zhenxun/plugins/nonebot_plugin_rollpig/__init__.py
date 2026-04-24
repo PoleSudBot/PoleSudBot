@@ -3,7 +3,6 @@ import random
 import datetime
 import time
 import asyncio
-from dataclasses import dataclass
 from functools import wraps
 import httpx
 from pathlib import Path
@@ -28,6 +27,12 @@ require("nonebot_plugin_localstore")
 from nonebot_plugin_htmlrender import template_to_pic
 
 # 本地模块（在 require() 之后 import）
+from .ranking import (
+    PigKingEntry,
+    resolve_collection_reached_at,
+    sort_pig_king_rankings,
+)
+
 from .config import Config, GroupSettings, MODULE_NAME, get_proxy, get_storage_backend
 from .roast_manager import roast_manager
 from .runtime import (
@@ -86,7 +91,7 @@ __plugin_meta__ = PluginMetadata(
     📊 统计指令：
     我的猪圈 / 我的小猪 - 查看解锁进度
     猪王争霸榜 / 猪猪榜 / 猪猪排行 / 小猪榜 / 小猪排行 [数量] - 查看当前群图鉴排行
-    猪猪总榜 / 猪猪总排行 [数量] - 查看本地账本总排行
+    猪猪总榜 / 猪猪总排行 [数量] - 查看全局图鉴排行
     本周小猪 - 生成本周猪猪总结长图
     """,
     type="application",
@@ -203,14 +208,7 @@ RANKING_CONCURRENCY_LIMIT = 8
 PANEL_AVATAR_CONCURRENCY_LIMIT = 8
 DEFAULT_RANK_LIMIT = 5
 MAX_RANK_LIMIT = 50
-LOCAL_RANKING_UNSUPPORTED_TEXT = "当前存储后端不支持猪猪榜，请切换为本地账本后再试。"
-
-
-@dataclass(slots=True)
-class PigKingEntry:
-    user_id: str
-    display_name: str
-    collection_count: int
+LOCAL_RANKING_UNSUPPORTED_TEXT = "当前模式暂不支持查看猪王争霸榜，请稍后再试。"
 
 # ================= 工具函数 =================
 
@@ -294,10 +292,6 @@ def get_event_user_name(event: Event) -> str:
     if sender:
         return getattr(sender, "card", "") or getattr(sender, "nickname", "") or str(getattr(event, "user_id", ""))
     return str(getattr(event, "user_id", ""))
-
-
-def normalize_user_sort_key(user_id: str) -> tuple[int, int | str]:
-    return (0, int(user_id)) if str(user_id).isdigit() else (1, str(user_id))
 
 
 def sanitize_display_name(name: str, user_id: str) -> str:
@@ -401,6 +395,12 @@ async def build_group_pig_rankings(bot: Bot, group_id: str) -> list[PigKingEntry
     if not unique_members:
         return []
 
+    manager = None
+    if get_storage_backend() == "local":
+        from .data_manager import get_data_manager
+
+        manager = get_data_manager()
+
     semaphore = asyncio.Semaphore(min(RANKING_CONCURRENCY_LIMIT, len(unique_members)))
 
     async def _fetch_collection(member_id: str, display_name: str) -> PigKingEntry | None:
@@ -409,10 +409,17 @@ async def build_group_pig_rankings(bot: Bot, group_id: str) -> list[PigKingEntry
         collection_count = len(collection)
         if collection_count <= 0:
             return None
+
+        # 群榜只关心当前群成员，逐个读取本地进度即可，避免为一次群查询扫描全量账本。
+        progress = manager.get_collection_progress(member_id) if manager else None
         return PigKingEntry(
             user_id=member_id,
             display_name=display_name,
             collection_count=collection_count,
+            reached_at=resolve_collection_reached_at(
+                progress,
+                collection_count,
+            ),
         )
 
     results = await asyncio.gather(
@@ -431,10 +438,7 @@ async def build_group_pig_rankings(bot: Bot, group_id: str) -> list[PigKingEntry
         if result:
             rankings.append(result)
 
-    rankings.sort(
-        key=lambda entry: (-entry.collection_count, normalize_user_sort_key(entry.user_id))
-    )
-    return rankings
+    return sort_pig_king_rankings(rankings)
 
 
 async def build_global_pig_rankings(
@@ -445,6 +449,7 @@ async def build_global_pig_rankings(
 
     manager = get_data_manager()
     recent_names = manager.get_recent_user_names()
+    progress_map = manager.get_all_collection_progress()
 
     if bot and context_group_id:
         members = await PlatformUtils.get_group_member_list(bot, context_group_id)
@@ -462,14 +467,15 @@ async def build_global_pig_rankings(
             user_id=user_id,
             display_name=sanitize_display_name(recent_names.get(user_id, ""), user_id),
             collection_count=len(collection),
+            reached_at=resolve_collection_reached_at(
+                progress_map.get(user_id),
+                len(collection),
+            ),
         )
         for user_id, collection in manager.get_all_collections().items()
         if len(collection) > 0
     ]
-    rankings.sort(
-        key=lambda entry: (-entry.collection_count, normalize_user_sort_key(entry.user_id))
-    )
-    return rankings
+    return sort_pig_king_rankings(rankings)
 
 
 def get_group_rank_position(rankings: list[PigKingEntry], user_id: str) -> int | None:
@@ -1788,11 +1794,11 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
     fallback_text = build_pig_king_board_text(
         rankings,
         str(event.user_id),
-        title="猪猪总榜",
+        title="猪王争霸榜",
         limit=limit,
-        empty_text="当前账本还没人收集到猪图鉴",
+        empty_text="全局还没人收集到猪图鉴",
     )
-    notes = [] if rankings else ["当前账本还没人收集到猪图鉴"]
+    notes = [] if rankings else ["全局还没人收集到猪图鉴"]
     footer_rank = get_group_rank_position(rankings, str(event.user_id))
     footer = f"你的名次：第 {footer_rank} 位" if footer_rank else "你的名次：未上榜"
     ranking_items = await build_ranking_panel_items(rankings, limit) if rankings else []
@@ -1800,8 +1806,8 @@ async def _(bot: Bot, event: Event, args: Message = CommandArg()):
         cmd_pig_global,
         event,
         fallback_text=fallback_text,
-        title="猪猪总榜",
-        subtitle="本地账本全范围排行",
+        title="猪王争霸榜",
+        subtitle="当前全局实时图鉴排行",
         notes=notes,
         rankings=ranking_items,
         footer=footer,
