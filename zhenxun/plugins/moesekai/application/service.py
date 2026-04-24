@@ -12,7 +12,9 @@ from nonebot.adapters import Bot
 from nonebot.exception import ActionFailed, AdapterException
 from nonebot_plugin_alconna import At, Image, Text, UniMessage
 from tortoise import Tortoise
+from zhenxun.utils.exception import RenderingError
 
+from ..adapters.profile_renderer import render_profile_image
 from ..adapters.results import (
     MoeImageTextMessage,
     build_alias_profile_image,
@@ -53,6 +55,7 @@ from ..providers import (
     ranking_provider,
     story_cache_provider,
 )
+from ..providers.profile import ProfileRenderError
 from ..repositories import (
     add_blacklist_entry,
     create_notification_record,
@@ -426,7 +429,7 @@ class MoeSekaiApplication:
         if error := await self._is_uid_blacklisted(binding.server, binding.game_id, is_superuser):
             return error
         try:
-            return await screenshot_service.capture_profile(binding.server, binding.game_id)
+            return await self._capture_profile_image(binding.server, binding.game_id)
         except ScreenshotError as exc:
             return exc.to_user_message()
 
@@ -453,7 +456,7 @@ class MoeSekaiApplication:
             if error := await self._is_uid_blacklisted(resolved_server, game_id, is_superuser):
                 return error
             try:
-                return await screenshot_service.capture_profile(resolved_server, game_id)
+                return await self._capture_profile_image(resolved_server, game_id)
             except ScreenshotError as exc:
                 return exc.to_user_message()
         if not target_user_id:
@@ -468,7 +471,7 @@ class MoeSekaiApplication:
         if error:
             return error
         try:
-            return await screenshot_service.capture_profile(binding.server, binding.game_id)
+            return await self._capture_profile_image(binding.server, binding.game_id)
         except ScreenshotError as exc:
             return exc.to_user_message()
 
@@ -1059,6 +1062,19 @@ class MoeSekaiApplication:
         finally:
             if task.done() and self._shared_capture_tasks.get(key) is task:
                 self._shared_capture_tasks.pop(key, None)
+
+    async def _capture_profile_image(self, server: str, game_id: str) -> bytes:
+        if get_settings().profile_render_mode == "screenshot_only":
+            return await screenshot_service.capture_profile(server, game_id)
+        try:
+            return await render_profile_image(server, game_id)
+        except (ProfileRenderError, RenderingError) as exc:
+            logger.warning(
+                f"MoeSekai 个人档案内部渲染失败，回退网页截图: {server}/{game_id}",
+                MODULE_NAME,
+                e=exc,
+            )
+            return await screenshot_service.capture_profile(server, game_id)
 
     async def handle_character(
         self,

@@ -25,6 +25,17 @@ def test_default_profile_viewport_width_is_625():
     assert MoeSekaiSettings().profile_viewport_width == 625
 
 
+def test_default_profile_render_mode_is_internal_first():
+    assert MoeSekaiSettings().profile_render_mode == "internal_first"
+
+
+def test_default_profile_api_base_jp_uses_uni_url():
+    assert (
+        MoeSekaiSettings().profile_api_base_jp
+        == "https://api.unipjsk.com/api/user/%7Buser_id%7D"
+    )
+
+
 def test_build_profile_url_omits_empty_token():
     url = screenshot_service._build_profile_url(
         "https://example.com/profile/{server}/{game_id}?mode=screenshot&token={token}",

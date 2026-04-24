@@ -59,6 +59,8 @@ MASTER_DATASET_KEYS = (
     "virtualLives",
     "cards",
     "gameCharacters",
+    "honors",
+    "honorGroups",
     "stamps",
     "musics",
 )
@@ -69,6 +71,10 @@ DEFAULT_ASSET_SOURCE_ORDER = [
     "haruki-main",
     "haruki-jp-dedicated",
     "legacy-viewer",
+]
+DEFAULT_PROFILE_STATIC_ASSET_BASES = [
+    "https://raw.githubusercontent.com/Exmeaning/Exmeaning-Image-hosting/main",
+    "https://cdn.jsdelivr.net/gh/Exmeaning/Exmeaning-Image-hosting@main",
 ]
 LEGACY_PROFILE_TOKEN_DEFAULT = (
     "0357a6c752a7cb080bce495891911d0da722a907eecfc4d28b0ff952375466b0"
@@ -283,6 +289,15 @@ def _merge_master_sources_config(
 
 class MoeSekaiSettings(BaseModel):
     profile_token: str = ""
+    profile_render_mode: Literal["internal_first", "screenshot_only"] = "internal_first"
+    profile_api_token: str = ""
+    profile_api_base_jp: str = "https://api.unipjsk.com/api/user/%7Buser_id%7D"
+    profile_api_base_cn: str = "https://public-api.haruki.seiunx.com/sekai-api/v5/api/cn"
+    profile_api_base_tw: str = "https://public-api.haruki.seiunx.com/sekai-api/v5/api/tw"
+    profile_static_asset_bases: list[str] = Field(
+        default_factory=lambda: DEFAULT_PROFILE_STATIC_ASSET_BASES.copy()
+    )
+    profile_announcement_url: str = ""
     profile_bases: list[str] = Field(
         default_factory=lambda: ["https://sekaiprofile.exmeaning.com"]
     )
@@ -367,6 +382,7 @@ class MoeSekaiSettings(BaseModel):
     @field_validator(
         "profile_bases",
         "profile_url_templates",
+        "profile_static_asset_bases",
         "site_bases",
         "ranking_screenshot_templates",
         "ranking_history_screenshot_templates",
@@ -393,7 +409,7 @@ class MoeSekaiSettings(BaseModel):
     def _normalize_quality(cls, value: int) -> int:
         return max(1, min(100, value))
 
-    @field_validator("github_token")
+    @field_validator("profile_api_token", "github_token")
     @classmethod
     def _normalize_github_token(cls, value: str) -> str:
         return str(value or "").strip()
@@ -476,6 +492,62 @@ REGISTER_CONFIGS = [
         value=REGISTER_DEFAULTS.profile_token,
         default_value=REGISTER_DEFAULTS.profile_token,
         help="MoeSekai 档案鉴权 Token；留空时不会拼接 token 参数",
+        type=str,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MOESEKAI_PROFILE_RENDER_MODE",
+        value=REGISTER_DEFAULTS.profile_render_mode,
+        default_value=REGISTER_DEFAULTS.profile_render_mode,
+        help="个人档案渲染模式：internal_first 为内部生成优先，screenshot_only 为仅网页截图",
+        type=str,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MOESEKAI_PROFILE_API_TOKEN",
+        value=REGISTER_DEFAULTS.profile_api_token,
+        default_value=REGISTER_DEFAULTS.profile_api_token,
+        help="个人档案原始 profile API 的 X-Haruki-Sekai-Token；留空时不携带",
+        type=str,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MOESEKAI_PROFILE_API_BASE_JP",
+        value=REGISTER_DEFAULTS.profile_api_base_jp,
+        default_value=REGISTER_DEFAULTS.profile_api_base_jp,
+        help="日服 profile API 基础地址；支持 {user_id} 占位符",
+        type=str,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MOESEKAI_PROFILE_API_BASE_CN",
+        value=REGISTER_DEFAULTS.profile_api_base_cn,
+        default_value=REGISTER_DEFAULTS.profile_api_base_cn,
+        help="国服 profile API 基础地址；支持 {user_id} 占位符",
+        type=str,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MOESEKAI_PROFILE_API_BASE_TW",
+        value=REGISTER_DEFAULTS.profile_api_base_tw,
+        default_value=REGISTER_DEFAULTS.profile_api_base_tw,
+        help="台服 profile API 基础地址；支持 {user_id} 占位符",
+        type=str,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MOESEKAI_PROFILE_STATIC_ASSET_BASES",
+        value=[item for item in REGISTER_DEFAULTS.profile_static_asset_bases],
+        default_value=[item for item in REGISTER_DEFAULTS.profile_static_asset_bases],
+        help="个人档案静态资源源站列表，按顺序回退",
+        type=list[str],
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MOESEKAI_PROFILE_ANNOUNCEMENT_URL",
+        value=REGISTER_DEFAULTS.profile_announcement_url,
+        default_value=REGISTER_DEFAULTS.profile_announcement_url,
+        help="个人档案公告 JSON 地址；留空时不渲染公告",
         type=str,
     ),
     RegisterConfig(
@@ -925,6 +997,34 @@ def get_settings() -> MoeSekaiSettings:
         "profile_token": _get_compat_config(
             "MOESEKAI_PROFILE_TOKEN",
             defaults.profile_token,
+        ),
+        "profile_render_mode": _get_compat_config(
+            "MOESEKAI_PROFILE_RENDER_MODE",
+            defaults.profile_render_mode,
+        ),
+        "profile_api_token": _get_compat_config(
+            "MOESEKAI_PROFILE_API_TOKEN",
+            defaults.profile_api_token,
+        ),
+        "profile_api_base_jp": _get_compat_config(
+            "MOESEKAI_PROFILE_API_BASE_JP",
+            defaults.profile_api_base_jp,
+        ),
+        "profile_api_base_cn": _get_compat_config(
+            "MOESEKAI_PROFILE_API_BASE_CN",
+            defaults.profile_api_base_cn,
+        ),
+        "profile_api_base_tw": _get_compat_config(
+            "MOESEKAI_PROFILE_API_BASE_TW",
+            defaults.profile_api_base_tw,
+        ),
+        "profile_static_asset_bases": _get_compat_config(
+            "MOESEKAI_PROFILE_STATIC_ASSET_BASES",
+            defaults.profile_static_asset_bases,
+        ),
+        "profile_announcement_url": _get_compat_config(
+            "MOESEKAI_PROFILE_ANNOUNCEMENT_URL",
+            defaults.profile_announcement_url,
         ),
         "profile_bases": _get_compat_config(
             "MOESEKAI_PROFILE_BASES",

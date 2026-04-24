@@ -12,6 +12,7 @@ import pytest
 from nonebot.exception import ActionFailed
 from PIL import Image as PILImage
 from PIL import ImageDraw
+from zhenxun.utils.exception import RenderingError
 
 nonebot.init()
 
@@ -928,6 +929,82 @@ async def test_handle_personal_archive_still_requires_binding(
     )
 
     assert result == "你还没有绑定任何账号，请先使用“绑定 [区服] <游戏ID>”"
+
+
+@pytest.mark.asyncio
+async def test_capture_profile_image_falls_back_to_screenshot_once(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls: list[str] = []
+
+    class _FakeSettings:
+        profile_render_mode = "internal_first"
+
+    async def fake_render_profile_image(server: str, game_id: str):
+        calls.append(f"render:{server}:{game_id}")
+        raise RenderingError("render failed")
+
+    async def fake_capture_profile(server: str, game_id: str):
+        calls.append(f"screenshot:{server}:{game_id}")
+        return b"legacy-profile"
+
+    monkeypatch.setattr(service_module, "get_settings", lambda: _FakeSettings())
+    monkeypatch.setattr(service_module, "render_profile_image", fake_render_profile_image)
+    monkeypatch.setattr(service_module.screenshot_service, "capture_profile", fake_capture_profile)
+
+    result = await service_module.moesekai_app._capture_profile_image(
+        "jp",
+        "1234567890123",
+    )
+
+    assert result == b"legacy-profile"
+    assert calls == [
+        "render:jp:1234567890123",
+        "screenshot:jp:1234567890123",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_query_archive_uses_internal_profile_capture_for_explicit_uid(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_is_qq_blacklisted(*_args, **_kwargs):
+        return None
+
+    async def fake_is_uid_blacklisted(*_args, **_kwargs):
+        return None
+
+    async def fake_capture_profile_image(server: str, game_id: str):
+        assert server == "jp"
+        assert game_id == "1234567890123"
+        return b"profile-image"
+
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_is_qq_blacklisted",
+        fake_is_qq_blacklisted,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_is_uid_blacklisted",
+        fake_is_uid_blacklisted,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_capture_profile_image",
+        fake_capture_profile_image,
+    )
+
+    result = await service_module.moesekai_app.handle_query_archive(
+        platform="qq",
+        requester_user_id="123456",
+        server="jp",
+        game_id="1234567890123",
+        target_user_id=None,
+        is_superuser=False,
+    )
+
+    assert result == b"profile-image"
 
 
 @pytest.mark.asyncio

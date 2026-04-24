@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"
+    >
+    <title>MoeSekai Profile</title>
+    <style>
+        :root {
+            --theme-color: {{ themeColor }};
+            --theme-light: {{ themeLight }};
+            --theme-dark: {{ themeDark }};
+            --p-teal: {{ themeColor }};
+        }
+    </style>
+    <link rel="stylesheet" href="./style.css">
+</head>
+<body class="page-fully-loaded animation-finished">
+    <div class="app">
+        <div class="bg-pattern-container">
+            <div class="rotated-wrapper">
+                {% for _ in backgroundRows %}
+                <div class="pattern-row{% if loop.index is even %} reverse{% endif %}"></div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div class="top-deco"></div>
+
+        <div class="pjsk-container">
+            <div class="main-card">
+                <div class="user-header">
+                    <div class="avatar-wrapper">
+                        <img src="{{ avatarUri }}" alt="avatar">
+                        <div class="avatar-frame"></div>
+                    </div>
+                    <div class="user-meta">
+                        <div class="user-name">{{ displayName }}</div>
+                        <div class="user-badges">
+                            <span class="badge rank-badge">
+                                <span>Lv.</span>
+                                <span>{{ displayRank }}</span>
+                            </span>
+                            <span class="badge server-badge">
+                                <span>{{ serverCode }}</span>
+                            </span>
+                            <span class="badge power-badge">
+                                <span>综合力</span>
+                                <span>{{ displayPower }}</span>
+                            </span>
+                        </div>
+                        <div class="user-id">UID: {{ processed.userId }}</div>
+                    </div>
+                    <div class="brand-logo header-logo"></div>
+                </div>
+
+                <div class="user-word">{{ displayWord }}</div>
+
+                <div class="quick-stats">
+                    <div class="stat-capsule mvp-capsule">
+                        <span class="capsule-icon">👑</span>
+                        <span class="capsule-label">MVP</span>
+                        <span class="capsule-value">{{ processed.mvp }}</span>
+                    </div>
+                    <div class="stat-capsule star-capsule">
+                        <span class="capsule-icon">⭐</span>
+                        <span class="capsule-label">Super Star</span>
+                        <span class="capsule-value">{{ processed.superStar }}</span>
+                    </div>
+                    {% if challengeInfo %}
+                    <div class="stat-capsule challenge-capsule">
+                        <span class="capsule-icon">🎯</span>
+                        <span class="capsule-label">{{ challengeInfo.charName }}</span>
+                        <span class="capsule-value">{{ challengeInfo.score }}</span>
+                    </div>
+                    {% endif %}
+                </div>
+
+                <div>
+                    {% if honors %}
+                    <div class="honors-row">
+                        {% for honor in honors %}
+                        <div
+                            class="honor-capsule {{ honor.capsuleClasses }}"
+                            {% if honor.capsuleStyle %}style="{{ honor.capsuleStyle }}"{% endif %}
+                            title="{{ honor.description }}"
+                        >
+                            {% if honor.decoUri %}
+                            <div
+                                class="honor-deco honor-deco-left"
+                                style="background-image: url('{{ honor.decoUri }}')"
+                            ></div>
+                            <div
+                                class="honor-deco honor-deco-right"
+                                style="background-image: url('{{ honor.decoUri }}')"
+                            ></div>
+                            {% endif %}
+                            <div class="honor-content">
+                                {% if honor.isBonds %}<span>💕</span>{% endif %}
+                                <span>{{ honor.name }}</span>
+                                <span
+                                    class="honor-lv{% if honor.isRankingHonor %} honor-event{% endif %}"
+                                    style="background: {{ themeColor }}"
+                                    title="{{ honor.levelDisplay }}"
+                                >
+                                    {{ honor.displayTag }}
+                                </span>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div class="honors-row" style="color:#a0aec0;font-size:12px;">
+                        暂无徽章
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div class="section-card">
+                <div class="section-header">
+                    <span class="section-title">当前编队</span>
+                    {% if processed.deck.name %}
+                    <span class="deck-name">{{ processed.deck.name }}</span>
+                    {% endif %}
+                </div>
+
+                {% if deckMembers %}
+                <div class="deck-grid">
+                    {% for member in deckMembers %}
+                    <div class="deck-card{% if member.isLeader %} is-leader{% endif %}">
+                        {% if member.isLeader %}
+                        <div class="leader-ribbon">LEADER</div>
+                        {% endif %}
+
+                        <div class="chibi-area">
+                            <img src="{{ member.chibiUri }}" alt="chibi">
+                        </div>
+
+                        <div class="card-info">
+                            <div class="thumb-wrap">
+                                <img src="{{ member.thumbnailUri }}" class="thumb-img" alt="thumb">
+                                {% if member.attrIconUri %}
+                                <img src="{{ member.attrIconUri }}" class="attr-icon" alt="attr">
+                                {% endif %}
+                            </div>
+
+                            <div class="stars">
+                                {% if member.isBirthday %}
+                                <span class="ribbon-icon">🎀</span>
+                                {% else %}
+                                {% for _ in range(member.starCount) %}
+                                <span class="star-icon">★</span>
+                                {% endfor %}
+                                {% endif %}
+                            </div>
+
+                            <div class="card-stats">
+                                Lv.{{ member.level }}
+                                {% if member.masterRank > 0 %}
+                                <span class="mr-badge">
+                                    <span class="mr-icon">🔷</span>{{ member.masterRank }}
+                                </span>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <div style="color:#a0aec0;text-align:center;padding:20px;">暂无编队数据</div>
+                {% endif %}
+
+                {% if creditsList %}
+                <div class="deck-credits">
+                    <div class="credits-list">
+                        {% for item in creditsList %}
+                        <div class="credit-item">
+                            <span class="credit-card-id">#{{ item.cardId }}</span>
+                            <span class="credit-type">{{ "绘制" if item.type == "original" else "描摹" }} by</span>
+                            <span class="credit-author">{{ item.author }}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+
+            <div class="dual-column">
+                <div class="section-card">
+                    <div class="section-header">
+                        <span class="section-title">打歌统计</span>
+                    </div>
+                    {% if musicStats %}
+                    <div class="music-table">
+                        {% for stat in musicStats %}
+                        <div class="music-row music-row-{{ stat.difficulty }}">
+                            <div class="music-diff music-diff-{{ stat.difficulty }}">
+                                {{ stat.difficulty.upper() }}
+                            </div>
+                            <div class="music-stats">
+                                <div class="music-stat">
+                                    <div class="music-stat-label">CLEAR</div>
+                                    <div class="music-stat-val">{{ stat["clear"] }}</div>
+                                </div>
+                                <div class="music-stat">
+                                    <div class="music-stat-label">FC</div>
+                                    <div class="music-stat-val fc">{{ stat.fullCombo }}</div>
+                                </div>
+                                <div class="music-stat">
+                                    <div class="music-stat-label">AP</div>
+                                    <div class="music-stat-val ap">{{ stat.allPerfect }}</div>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div style="color:#a0aec0;font-size:12px;text-align:center;padding:20px;">
+                        暂无打歌数据
+                    </div>
+                    {% endif %}
+                </div>
+
+                <div class="section-card">
+                    <div class="section-header">
+                        <span class="section-title">角色等级</span>
+                    </div>
+                    <div class="unit-tabs">
+                        <div id="tab-总览" class="unit-tab active" data-unit="总览">
+                            <span>总览</span>
+                        </div>
+                        <div id="tab-L/n" class="unit-tab" data-unit="L/n" style="color:#4455dd;">
+                            <img src="./data/icon/ln.webp" class="tab-icon" alt="L/n">
+                        </div>
+                        <div id="tab-MMJ" class="unit-tab" data-unit="MMJ" style="color:#88dd44;">
+                            <img src="./data/icon/mmj.webp" class="tab-icon" alt="MMJ">
+                        </div>
+                        <div id="tab-VBS" class="unit-tab" data-unit="VBS" style="color:#ee1166;">
+                            <img src="./data/icon/vbs.webp" class="tab-icon" alt="VBS">
+                        </div>
+                        <div id="tab-WxS" class="unit-tab" data-unit="WxS" style="color:#ff9900;">
+                            <img src="./data/icon/wxs.webp" class="tab-icon" alt="WxS">
+                        </div>
+                        <div id="tab-25时" class="unit-tab" data-unit="25时" style="color:#884499;">
+                            <img src="./data/icon/n25.webp" class="tab-icon" alt="25时">
+                        </div>
+                        <div id="tab-VS" class="unit-tab" data-unit="VS" style="color:#33ccbb;">
+                            <img src="./data/icon/vs.webp" class="tab-icon" alt="VS">
+                        </div>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="unit-chart-canvas"></canvas>
+                    </div>
+                    <div class="unit-chart-loaded" style="position: absolute; width: 0; height: 0; opacity: 0;"></div>
+                </div>
+            </div>
+
+            {% if announcementHtml %}
+            <div class="announcement-card" style="margin-top: 20px;">
+                <div class="miku-icon"></div>
+                <div class="announcement-content">{{ announcementHtml | safe }}</div>
+            </div>
+            {% endif %}
+
+            <div class="footer-info">
+                <div class="footer-line">
+                    主题色 <span style="color: {{ themeColor }}; font-weight: bold;">{{ themeColor }}</span>
+                    来自 <span style="color: {{ themeColor }}; font-weight: bold;">{{ footerCharacterName }}</span>
+                </div>
+                <div class="footer-line subtle">
+                    Haruki(data) 丨 Created by Moesekai by MoeSekai Dev Team
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        window.__PROFILE_PAGE__ = {{ {
+            "characterRanks": processed.characterRanks,
+            "themeColor": themeColor
+        } | tojson }};
+    </script>
+    <script src="./vendor/chart.umd.min.js"></script>
+    <script src="./vendor/chartjs-plugin-datalabels.min.js"></script>
+    <script src="./profile.js"></script>
+</body>
+</html>

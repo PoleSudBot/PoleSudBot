@@ -19,11 +19,18 @@ from zhenxun.plugins.moesekai.providers.asset_cache import AssetCacheProvider
 from zhenxun.plugins.moesekai.providers.asset_fetcher import asset_fetcher
 from zhenxun.plugins.moesekai.providers.character_cache import CharacterCacheProvider
 from zhenxun.plugins.moesekai.providers.hub import hub_provider
+from zhenxun.plugins.moesekai.providers.masterdata import MasterDataProvider
+from zhenxun.plugins.moesekai.providers.profile import (
+    ProfileProcessor,
+    ProfileProvider,
+    ProfileStaticAssetProvider,
+)
 from zhenxun.plugins.moesekai.providers.ranking import RankingSnapshot, ranking_provider
 from zhenxun.plugins.moesekai.providers.story_cache import StoryCacheProvider
 from zhenxun.plugins.moesekai.storage import BinaryFileCacheStore, PathBinaryFileStore
 from zhenxun.plugins.moesekai.storage.state import JsonStateStore
 from zhenxun.plugins.moesekai.constants import SCOPE_GLOBAL
+from zhenxun.utils.exception import AllURIsFailedError
 
 
 @pytest.mark.asyncio
@@ -634,3 +641,313 @@ async def test_ranking_provider_treats_empty_cache_as_cache_hit(
     )
 
     assert await ranking_provider.list_events("jp") == []
+
+
+def test_profile_provider_build_profile_url_keeps_encoded_uni_placeholder():
+    assert (
+        ProfileProvider.build_profile_url(
+            "https://api.unipjsk.com/api/user/%7Buser_id%7D",
+            "6540035398873094",
+        )
+        == "https://api.unipjsk.com/api/user/%7Buser_id%7D/6540035398873094/profile"
+    )
+
+
+def test_profile_provider_build_profile_url_keeps_encoded_uni_placeholder_with_profile_suffix():
+    assert (
+        ProfileProvider.build_profile_url(
+            "https://api.unipjsk.com/api/user/%7Buser_id%7D/profile",
+            "6540035398873094",
+        )
+        == "https://api.unipjsk.com/api/user/%7Buser_id%7D/6540035398873094/profile"
+    )
+
+
+def test_profile_provider_build_profile_url_supports_plain_placeholder():
+    assert (
+        ProfileProvider.build_profile_url(
+            "https://example.com/api/user/{user_id}",
+            "6540035398873094",
+        )
+        == "https://example.com/api/user/6540035398873094/profile"
+    )
+
+
+@pytest.mark.asyncio
+async def test_profile_provider_get_raw_profile_sends_token_header(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    provider = ProfileProvider()
+    captured: dict[str, object] = {}
+
+    class _FakeResponse:
+        def json(self):
+            return {"user": {"userId": "1"}}
+
+    class _FakeSettings:
+        profile_api_base_jp = "https://example.com/api/jp"
+        profile_api_base_cn = "https://example.com/api/cn"
+        profile_api_base_tw = "https://example.com/api/tw"
+        profile_api_token = "token-123"
+
+    async def fake_get(url: str, *, timeout: float | None = None, headers=None):
+        captured["url"] = url
+        captured["timeout"] = timeout
+        captured["headers"] = headers
+        return _FakeResponse()
+
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.providers.profile.get_settings",
+        lambda: _FakeSettings(),
+    )
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.providers.profile.AsyncHttpx.get",
+        fake_get,
+    )
+
+    payload = await provider.get_raw_profile("jp", "1234567890123")
+
+    assert payload == {"user": {"userId": "1"}}
+    assert captured["url"] == "https://example.com/api/jp/1234567890123/profile"
+    assert captured["timeout"] == 30
+    assert captured["headers"] == {
+        "Accept": "application/json",
+        "User-Agent": "MoeSekai/1.0",
+        "X-Haruki-Sekai-Token": "token-123",
+    }
+
+
+def test_profile_processor_matches_go_side_key_fields():
+    raw = {
+        "user": {"userId": 6540035398873094, "name": "测试玩家", "rank": 278},
+        "userProfile": {"word": "愿你也能找到自己的歌", "twitterId": ""},
+        "userDeck": {
+            "name": "主力编队",
+            "leader": 1001,
+            "member1": 1001,
+            "member2": 1002,
+            "member3": 1003,
+            "member4": 1004,
+            "member5": 1005,
+        },
+        "userCards": [
+            {"cardId": 1001, "level": 60, "masterRank": 5, "defaultImage": "special_training"},
+            {"cardId": 1002, "level": 50, "masterRank": 1, "defaultImage": "original"},
+        ],
+        "userCharacters": [
+            {"characterId": 1, "characterRank": 55},
+            {"characterId": 21, "characterRank": 62},
+        ],
+        "userHonors": [[501, 3], {"honorId": 601, "level": 1}],
+        "userBondsHonors": [{"bondsHonorId": 801, "level": 5}],
+        "userProfileHonors": [
+            {"seq": 2, "honorId": 501, "profileHonorType": "normal"},
+            {"seq": 1, "honorId": 801, "profileHonorType": "bonds"},
+            {"seq": 3, "honorId": 601, "profileHonorType": "normal"},
+        ],
+        "userMusicDifficultyClearCount": [
+            {"musicDifficultyType": "master", "liveClear": 10, "fullCombo": 4, "allPerfect": 1},
+            {"musicDifficultyType": "easy", "liveClear": 120, "fullCombo": 120, "allPerfect": 118},
+        ],
+        "userChallengeLiveSoloResult": {"characterId": 21, "highScore": 1234567},
+        "userChallengeLiveSoloStages": [
+            {"characterId": 21, "rank": 18},
+            {"characterId": 21, "rank": 15},
+            {"characterId": 1, "rank": 12},
+        ],
+        "userMultiLiveTopScoreCount": {"mvp": 12, "superStar": 34},
+        "totalPower": {"totalPower": 321654},
+    }
+    cards = [
+        {
+            "id": 1001,
+            "characterId": 21,
+            "cardRarityType": "rarity_4",
+            "attr": "cool",
+            "supportUnit": "street",
+            "assetbundleName": "card_1001",
+        },
+        {
+            "id": 1002,
+            "characterId": 1,
+            "cardRarityType": "rarity_3",
+            "attr": "cute",
+            "supportUnit": "light_sound",
+            "assetbundleName": "card_1002",
+        },
+        {
+            "id": 1003,
+            "characterId": 2,
+            "cardRarityType": "rarity_2",
+            "attr": "pure",
+            "supportUnit": "light_sound",
+            "assetbundleName": "card_1003",
+        },
+        {
+            "id": 1004,
+            "characterId": 3,
+            "cardRarityType": "rarity_1",
+            "attr": "happy",
+            "supportUnit": "light_sound",
+            "assetbundleName": "card_1004",
+        },
+        {
+            "id": 1005,
+            "characterId": 4,
+            "cardRarityType": "rarity_birthday",
+            "attr": "mysterious",
+            "supportUnit": "light_sound",
+            "assetbundleName": "card_1005",
+        },
+    ]
+    honors = [
+        {
+            "id": 501,
+            "groupId": 71,
+            "honorRarity": "highest",
+            "name": "活动第一名",
+            "assetbundleName": "honor_top_0001",
+            "levels": [{"description": "活动 1 位"}],
+        },
+        {
+            "id": 601,
+            "groupId": 88,
+            "honorRarity": "middle",
+            "name": "世界回响",
+            "assetbundleName": "honor_0601",
+            "levels": [{"description": "章节徽章"}],
+        },
+        {
+            "id": 801,
+            "groupId": 99,
+            "honorRarity": "low",
+            "name": "心羽&Miku",
+            "assetbundleName": "honor_0801",
+            "levels": [{"description": "羁绊 5"}],
+        },
+    ]
+    honor_groups = [
+        {"id": 71, "name": "雨上がりの一番星", "honorType": "event"},
+        {"id": 88, "name": "世界回响 第一章", "honorType": "sekai_echo"},
+        {"id": 99, "name": "羁绊徽章", "honorType": "bonds"},
+    ]
+
+    processed = ProfileProcessor.process(
+        raw,
+        cards=cards,
+        honors=honors,
+        honor_groups=honor_groups,
+    )
+
+    assert processed["userId"] == "6540035398873094"
+    assert processed["topCharacterId"] == 21
+    assert processed["deck"]["members"][0]["assetbundleName"] == "card_1001"
+    assert processed["deck"]["members"][0]["defaultImage"] == "special_training"
+    assert [item["honorId"] for item in processed["honors"]] == [801, 501, 601]
+    assert processed["honors"][1]["levelDisplay"] == "雨上がりの一番星"
+    assert processed["honors"][2]["levelDisplay"] == "世界回响 第一章"
+    assert processed["challengeLive"]["characterStages"] == {21: 18, 1: 12}
+    assert processed["musicStats"][0]["difficulty"] == "easy"
+    assert processed["musicStats"][-1]["difficulty"] == "append"
+
+
+@pytest.mark.asyncio
+async def test_master_data_provider_exposes_honor_datasets(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_get_dataset(server: str, dataset: str):
+        assert server == "jp"
+        return [{"dataset": dataset}]
+
+    monkeypatch.setattr(MasterDataProvider, "get_dataset", fake_get_dataset)
+
+    assert await MasterDataProvider.get_honors("jp") == [{"dataset": "honors"}]
+    assert await MasterDataProvider.get_honor_groups("jp") == [{"dataset": "honorGroups"}]
+
+
+@pytest.mark.asyncio
+async def test_profile_static_asset_provider_uses_source_fallback_and_local_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    provider = ProfileStaticAssetProvider(
+        store=PathBinaryFileStore(tmp_path / "profile_static"),
+        miss_store=JsonStateStore(tmp_path / "profile_static_miss.json"),
+    )
+    calls: list[str] = []
+
+    class _FakeSettings:
+        asset_miss_cache_ttl_seconds = 3600
+        profile_static_asset_bases = ["https://a.example.com", "https://b.example.com"]
+
+    async def fake_get_content(url: str, *, timeout: float | None = None, **_kwargs):
+        calls.append(url)
+        if url == "https://a.example.com/credits.json":
+            request = httpx.Request("GET", url)
+            response = httpx.Response(404, request=request)
+            raise httpx.HTTPStatusError("404", request=request, response=response)
+        assert timeout == 20
+        return b'{"1001":{"author":"tester","source_type":"original"}}'
+
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.providers.profile.get_settings",
+        lambda: _FakeSettings(),
+    )
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.providers.profile.AsyncHttpx.get_content",
+        fake_get_content,
+    )
+
+    payload = await provider.get_json("credits.json")
+    second_path = await provider.ensure_local_path(["credits.json"])
+
+    assert payload == {"1001": {"author": "tester", "source_type": "original"}}
+    assert second_path is not None and second_path.is_file()
+    assert calls == [
+        "https://a.example.com/credits.json",
+        "https://b.example.com/credits.json",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_profile_static_asset_provider_unwraps_all_uris_failed_404(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    provider = ProfileStaticAssetProvider(
+        store=PathBinaryFileStore(tmp_path / "profile_static"),
+        miss_store=JsonStateStore(tmp_path / "profile_static_miss.json"),
+    )
+    calls: list[str] = []
+
+    class _FakeSettings:
+        asset_miss_cache_ttl_seconds = 3600
+        profile_static_asset_bases = ["https://a.example.com", "https://b.example.com"]
+
+    async def fake_get_content(url: str, *, timeout: float | None = None, **_kwargs):
+        calls.append(url)
+        if url == "https://a.example.com/credits.json":
+            request = httpx.Request("GET", url)
+            response = httpx.Response(404, request=request)
+            raise AllURIsFailedError(
+                [url],
+                [httpx.HTTPStatusError("404", request=request, response=response)],
+            )
+        return b'{"1001":{"author":"tester","source_type":"original"}}'
+
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.providers.profile.get_settings",
+        lambda: _FakeSettings(),
+    )
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.providers.profile.AsyncHttpx.get_content",
+        fake_get_content,
+    )
+
+    payload = await provider.get_json("credits.json")
+
+    assert payload == {"1001": {"author": "tester", "source_type": "original"}}
+    assert calls == [
+        "https://a.example.com/credits.json",
+        "https://b.example.com/credits.json",
+    ]

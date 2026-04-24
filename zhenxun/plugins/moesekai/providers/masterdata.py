@@ -754,6 +754,16 @@ class MasterDataProvider:
         return payload if isinstance(payload, list) else []
 
     @classmethod
+    async def get_honors(cls, server: str) -> list[dict[str, Any]]:
+        payload = await cls.get_dataset(server, "honors")
+        return payload if isinstance(payload, list) else []
+
+    @classmethod
+    async def get_honor_groups(cls, server: str) -> list[dict[str, Any]]:
+        payload = await cls.get_dataset(server, "honorGroups")
+        return payload if isinstance(payload, list) else []
+
+    @classmethod
     async def get_stamps(cls, server: str) -> list[dict[str, Any]]:
         payload = await cls.get_dataset(server, "stamps")
         return payload if isinstance(payload, list) else []

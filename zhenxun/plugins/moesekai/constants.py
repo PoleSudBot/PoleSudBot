@@ -63,6 +63,7 @@ STORY_CACHE_DIR = SCREENSHOT_CACHE_DIR / "stories"
 STATE_DIR = PLUGIN_DATA_DIR / "state"
 ASSET_CACHE_DIR = PLUGIN_DATA_DIR / "asset_cache"
 ASSET_MIRROR_DIR = PLUGIN_DATA_DIR / "assets"
+PROFILE_STATIC_ASSET_DIR = ASSET_MIRROR_DIR / "profile_static"
 ASSET_CACHE_INDEX_PATH = STATE_DIR / "asset_cache_index.json"
 REMINDER_SNAPSHOT_DIR = PLUGIN_DATA_DIR / "reminder_snapshots"
 
@@ -75,6 +76,7 @@ for path in (
     STATE_DIR,
     ASSET_CACHE_DIR,
     ASSET_MIRROR_DIR,
+    PROFILE_STATIC_ASSET_DIR,
     REMINDER_SNAPSHOT_DIR,
 ):
     path.mkdir(parents=True, exist_ok=True)
