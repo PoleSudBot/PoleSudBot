@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 from types import ModuleType
 
 import nonebot
 import pytest
+from jinja2 import Environment, FileSystemLoader
 
 nonebot.init()
 
@@ -32,6 +34,43 @@ class _FakeResponse:
         if self._json_error is not None:
             raise self._json_error
         return self._payload
+
+
+def _render_profile_template(
+    theme_color: str,
+    *,
+    theme_light: str | None = None,
+    theme_dark: str | None = None,
+) -> str:
+    template_dir = Path(profile_renderer._TEMPLATE_PATH).parent
+    env = Environment(loader=FileSystemLoader(str(template_dir)))
+    template = env.get_template("index.html")
+    return template.render(
+        themeColor=theme_color,
+        themeLight=theme_light or f"{theme_color}22",
+        themeDark=theme_dark or theme_color,
+        avatarUri="file:///tmp/avatar.png",
+        displayName="测试玩家",
+        displayRank=88,
+        displayPower="350,000",
+        displayWord="测试签名",
+        serverCode="JP",
+        processed={
+            "userId": "1234567890123",
+            "mvp": 10,
+            "superStar": 20,
+            "deck": {"name": "测试编队"},
+            "characterRanks": {"3": 25},
+        },
+        challengeInfo=None,
+        honors=[],
+        deckMembers=[],
+        creditsList=[],
+        musicStats=[],
+        footerCharacterName="穗波",
+        announcementHtml=None,
+        backgroundRows=[0, 1],
+    )
 
 
 @pytest.mark.asyncio
@@ -198,3 +237,28 @@ async def test_load_announcement_html_parses_json_payload(
     assert await profile_renderer._load_announcement_html() is None
     assert await profile_renderer._load_announcement_html() == "纯文本公告"
     assert await profile_renderer._load_announcement_html() == "直接文本公告"
+
+
+def test_profile_template_applies_runtime_theme_variables_after_stylesheet():
+    html = _render_profile_template("#ee6666", theme_dark="#d95a5a")
+
+    stylesheet_index = html.index('<link rel="stylesheet" href="./style.css">')
+    theme_style_index = html.index("<style>", stylesheet_index)
+
+    assert stylesheet_index < theme_style_index
+    assert "--theme-color: #ee6666;" in html
+    assert "--theme-light: #ee666622;" in html
+    assert "--theme-dark: #d95a5a;" in html
+    assert "主题色 <span style=\"color: #ee6666; font-weight: bold;\">#ee6666</span>" in html
+
+
+def test_profile_template_keeps_default_theme_fallback_values_renderable():
+    html = _render_profile_template("#33ccbb", theme_dark="#2ab3a3")
+
+    stylesheet_index = html.index('<link rel="stylesheet" href="./style.css">')
+    theme_style_index = html.index("<style>", stylesheet_index)
+
+    assert stylesheet_index < theme_style_index
+    assert "--theme-color: #33ccbb;" in html
+    assert "--theme-light: #33ccbb22;" in html
+    assert "--theme-dark: #2ab3a3;" in html
