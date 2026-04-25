@@ -14,11 +14,13 @@ from zhenxun.services.external_bot_bridge import (
     BridgeConnectionTimeout,
     BridgeDependencyUnavailable,
     BridgeResponseTimeout,
+    BridgeServiceWarmingUp,
     BridgeUnsupportedEvent,
+    BridgeUnsupportedResponse,
     external_bot_bridge,
 )
-from zhenxun.services.log import logger
 from zhenxun.services.external_bot_bridge_config import REGISTER_CONFIGS
+from zhenxun.services.log import logger
 from zhenxun.utils.enum import PluginType
 from zhenxun.utils.message import MessageUtils
 
@@ -62,6 +64,9 @@ __plugin_meta__ = PluginMetadata(
 
 
 matcher = on_message(priority=5, block=True, rule=Rule(_xutheringwavesuid_rule))
+external_bot_bridge.register_source_route(
+    "XutheringWavesUID", "xutheringwavesuid", "鸣潮查询"
+)
 
 
 async def _finish_local_error(matcher: Matcher, message: str) -> None:
@@ -70,7 +75,8 @@ async def _finish_local_error(matcher: Matcher, message: str) -> None:
 
 
 def _mark_silent_no_response(matcher: Matcher) -> None:
-    # ww 前缀当前仍是宽匹配；上游没回包时静默结束，可以避免误触发后给用户制造无意义报错。
+    # ww 前缀当前仍是宽匹配；上游没回包时静默结束，
+    # 可以避免误触发后给用户制造无意义报错。
     matcher.state["_statistics_skip"] = True
     logger.debug(
         "鸣潮查询上游无响应，已静默忽略",
@@ -90,7 +96,7 @@ async def _(
         await _finish_local_error(matcher, "鸣潮查询当前仅支持 OneBot V11 协议。")
 
     try:
-        responses = await external_bot_bridge.send_request(bot, event)
+        sent_count = await external_bot_bridge.stream_request(bot, event)
     except BridgeDependencyUnavailable:
         await _finish_local_error(
             matcher,
@@ -102,22 +108,25 @@ async def _(
             matcher,
             "鸣潮查询暂时不可用，请先启动相关服务后再试。",
         )
+    except BridgeServiceWarmingUp:
+        await _finish_local_error(
+            matcher,
+            "外部服务启动中，请稍后再试。",
+        )
     except BridgeResponseTimeout:
         _mark_silent_no_response(matcher)
         return
+    except BridgeUnsupportedResponse:
+        await _finish_local_error(
+            matcher,
+            "鸣潮查询返回了当前协议暂不支持的响应内容。",
+        )
     except BridgeUnsupportedEvent:
         await _finish_local_error(
             matcher,
             "当前消息暂不支持发送到鸣潮查询。",
         )
 
-    try:
-        sent_count = await external_bot_bridge.replay_responses(bot, responses)
-    except BridgeUnsupportedEvent:
-        await _finish_local_error(
-            matcher,
-            "鸣潮查询返回了当前协议暂不支持的响应内容。",
-        )
     if sent_count <= 0:
         _mark_silent_no_response(matcher)
         return
