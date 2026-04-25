@@ -325,7 +325,7 @@ def get_shape_label(pig_data: Optional[dict]) -> str:
 def format_roast_actor_display(name: str, user_id: str = "") -> str:
     safe_user_id = user_id or "未知用户"
     display_name = sanitize_display_name(name, safe_user_id)
-    return display_name
+    return f"「{display_name}」"
 
 
 def format_roast_subject_display(
@@ -336,7 +336,7 @@ def format_roast_subject_display(
     safe_user_id = user_id or "未知用户"
     display_name = sanitize_display_name(name, safe_user_id)
     if not pig_data:
-        return display_name
+        return f"「{display_name}」"
     return f"「{display_name}({get_shape_label(pig_data)})」"
 
 
