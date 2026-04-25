@@ -8,13 +8,13 @@ import subprocess
 import sys
 from typing import Any
 
-
 CONFIG_PATH = Path("/gsuid_core/data/config.json")
 DEPENDENCIES_PATH = Path("/sidecar_dependencies.json")
 DEFAULT_TRUSTED_IPS = ["localhost", "::1", "127.0.0.1"]
 PLAYWRIGHT_BROWSERS_PATH = Path(
     os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/venv/ms-playwright")
 )
+BYTECODE_CLEANUP_ROOTS = [Path("/gsuid_core/gsuid_core")]
 
 
 def _load_json_dict(path: Path) -> dict[str, Any]:
@@ -118,11 +118,36 @@ def _run_command(command: list[str]) -> None:
     subprocess.run(command, check=True, env=os.environ.copy())
 
 
+def _cleanup_python_bytecode() -> None:
+    for root in BYTECODE_CLEANUP_ROOTS:
+        if not root.exists():
+            continue
+        for pattern in ("*.pyc", "*.pyo"):
+            for path in root.rglob(pattern):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    continue
+        for path in sorted(
+            root.rglob("__pycache__"),
+            key=lambda candidate: len(candidate.parts),
+            reverse=True,
+        ):
+            try:
+                path.rmdir()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                # Non-empty directories can only happen if new bytecode is created
+                # concurrently before core import, so this is harmless.
+                continue
+
+
 def _ensure_python_packages(packages: list[str]) -> None:
     missing = [package for package in packages if not _is_package_installed(package)]
     if not missing:
         return
-    print(
+    print(  # noqa: T201
         "[sidecar] installing python packages: " + ", ".join(missing),
         flush=True,
     )
@@ -156,7 +181,10 @@ def _ensure_playwright_browsers(browsers: list[str]) -> None:
 
     PLAYWRIGHT_BROWSERS_PATH.mkdir(parents=True, exist_ok=True)
     for browser in missing:
-        print(f"[sidecar] installing playwright browser: {browser}", flush=True)
+        print(  # noqa: T201
+            f"[sidecar] installing playwright browser: {browser}",
+            flush=True,
+        )
         _run_command([sys.executable, "-m", "playwright", "install", browser])
 
 
@@ -168,6 +196,7 @@ def _prepare_runtime_dependencies() -> None:
 
 def main() -> None:
     _prepare_config()
+    _cleanup_python_bytecode()
     _prepare_runtime_dependencies()
     os.execvp(
         "uv",

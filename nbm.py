@@ -397,6 +397,7 @@ def _sync_sidecar_runtime() -> tuple[str, str, dict[str, str]]:
         config.logger.info(f"🎮 Syncing {len(specs)} sidecar plugins...")
     sidecar_plugin_heads = _sync_sidecar_plugin_repositories(specs)
     _write_sidecar_dependency_manifest(specs)
+    _cleanup_sidecar_python_bytecode()
     return bridge_vendor_head, sidecar_core_head, sidecar_plugin_heads
 
 
@@ -474,6 +475,7 @@ def _sync_sidecar_runtime_with_report() -> (
             sidecar_plugin_heads[spec.name] = result.head
 
     _write_sidecar_dependency_manifest(specs)
+    _cleanup_sidecar_python_bytecode()
     return (
         bridge_result.head or "",
         sidecar_core_result.head or "",
@@ -578,6 +580,68 @@ def _discard_ignored_tracked_paths(
         "将恢复到当前 HEAD 后继续更新。"
     )
     _discard_tracked_paths(cwd, sorted(ignored_entries))
+
+
+def _remove_python_bytecode(root: Path, label: str) -> tuple[int, int]:
+    if not root.exists():
+        return 0, 0
+
+    removed_files = 0
+    removed_dirs = 0
+    failed_paths: list[Path] = []
+    for pattern in ("*.pyc", "*.pyo"):
+        for path in root.rglob(pattern):
+            try:
+                path.unlink()
+                removed_files += 1
+            except FileNotFoundError:
+                continue
+            except OSError:
+                failed_paths.append(path)
+
+    for path in sorted(
+        root.rglob("__pycache__"),
+        key=lambda candidate: len(candidate.parts),
+        reverse=True,
+    ):
+        try:
+            shutil.rmtree(path)
+            removed_dirs += 1
+        except FileNotFoundError:
+            continue
+        except OSError:
+            if path not in failed_paths:
+                failed_paths.append(path)
+
+    if failed_paths:
+        examples = ", ".join(str(path) for path in failed_paths[:3])
+        config.logger.warning(
+            f"⚠️ {label} 有 {len(failed_paths)} 个字节码缓存因权限限制未能在主机侧清理，"
+            f"将交给容器启动阶段处理。示例：{examples}"
+        )
+
+    return removed_files, removed_dirs
+
+
+def _cleanup_sidecar_python_bytecode() -> None:
+    # 只清理代码仓库内的 Python 字节码缓存，避免旧模块名残留被容器继续执行；
+    # 不触碰 sidecar/.runtime/gsuid_core/data，保留数据库、订阅和下载资源。
+    cleanup_roots = [
+        (config.BRIDGE_VENDOR_DIR, "bridge vendor"),
+        (config.SIDECAR_CORE_DIR / "gsuid_core", "sidecar core/plugins"),
+    ]
+    total_files = 0
+    total_dirs = 0
+    for root, label in cleanup_roots:
+        removed_files, removed_dirs = _remove_python_bytecode(root, label)
+        total_files += removed_files
+        total_dirs += removed_dirs
+
+    if total_files or total_dirs:
+        config.logger.info(
+            "🧹 Cleaned sidecar Python bytecode caches: "
+            f"{total_files} files, {total_dirs} directories"
+        )
 
 
 def _ensure_upstream_remote(cwd: Path, upstream_url: str | None) -> None:
@@ -1405,6 +1469,7 @@ class DockerInstallCommand(CommandBase):
             "up",
             "-d",
             "--build",
+            "--force-recreate",
         ]
         config.logger.info(f"🐳 Starting sidecar with: {' '.join(compose_args)}")
         process.run_and_stream(compose_args, config.PROJECT_ROOT)

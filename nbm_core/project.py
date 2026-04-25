@@ -150,9 +150,9 @@ SIDECAR_STARTER_TEMPLATE = """from __future__ import annotations
 import importlib.metadata as metadata
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
 
@@ -162,6 +162,7 @@ DEFAULT_TRUSTED_IPS = ["localhost", "::1", "127.0.0.1"]
 PLAYWRIGHT_BROWSERS_PATH = Path(
     os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/venv/ms-playwright")
 )
+BYTECODE_CLEANUP_ROOTS = [Path("/gsuid_core/gsuid_core")]
 
 
 def _load_json_dict(path: Path) -> dict[str, Any]:
@@ -207,7 +208,9 @@ def _load_dependency_manifest() -> dict[str, Any]:
     manifest = _load_json_dict(DEPENDENCIES_PATH)
     plugins = manifest.get("plugins", [])
     if not isinstance(plugins, list):
-        raise RuntimeError("sidecar dependency manifest is malformed: plugins must be a list")
+        raise RuntimeError(
+            "sidecar dependency manifest is malformed: plugins must be a list"
+        )
     return {"plugins": plugins}
 
 
@@ -222,7 +225,8 @@ def _collect_string_values(data: Any, field_name: str) -> list[str]:
     for item in data:
         if not isinstance(item, str):
             raise RuntimeError(
-                f"sidecar dependency manifest is malformed: {field_name} items must be strings"
+                "sidecar dependency manifest is malformed: "
+                f"{field_name} items must be strings"
             )
         value = item.strip()
         if value:
@@ -237,7 +241,8 @@ def _collect_runtime_dependencies() -> tuple[list[str], list[str]]:
     for plugin in manifest["plugins"]:
         if not isinstance(plugin, dict):
             raise RuntimeError(
-                "sidecar dependency manifest is malformed: plugin entries must be objects"
+                "sidecar dependency manifest is malformed: "
+                "plugin entries must be objects"
             )
         packages.extend(_collect_string_values(plugin.get("packages"), "packages"))
         browsers.extend(
@@ -261,11 +266,38 @@ def _run_command(command: list[str]) -> None:
     subprocess.run(command, check=True, env=os.environ.copy())
 
 
+def _cleanup_python_bytecode() -> None:
+    for root in BYTECODE_CLEANUP_ROOTS:
+        if not root.exists():
+            continue
+        for pattern in ("*.pyc", "*.pyo"):
+            for path in root.rglob(pattern):
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    continue
+        for path in sorted(
+            root.rglob("__pycache__"),
+            key=lambda candidate: len(candidate.parts),
+            reverse=True,
+        ):
+            try:
+                path.rmdir()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                # Non-empty directories can only happen if new bytecode is created
+                # concurrently before core import, so this is harmless.
+                continue
+
+
 def _ensure_python_packages(packages: list[str]) -> None:
-    missing = [package for package in packages if not _is_package_installed(package)]
+    missing = [
+        package for package in packages if not _is_package_installed(package)
+    ]
     if not missing:
         return
-    print(
+    print(  # noqa: T201
         "[sidecar] installing python packages: " + ", ".join(missing),
         flush=True,
     )
@@ -289,13 +321,20 @@ def _ensure_playwright_browsers(browsers: list[str]) -> None:
             "playwright browsers requested but the playwright package is not installed"
         )
 
-    missing = [browser for browser in browsers if not _is_playwright_browser_installed(browser)]
+    missing = [
+        browser
+        for browser in browsers
+        if not _is_playwright_browser_installed(browser)
+    ]
     if not missing:
         return
 
     PLAYWRIGHT_BROWSERS_PATH.mkdir(parents=True, exist_ok=True)
     for browser in missing:
-        print(f"[sidecar] installing playwright browser: {browser}", flush=True)
+        print(  # noqa: T201
+            f"[sidecar] installing playwright browser: {browser}",
+            flush=True,
+        )
         _run_command([sys.executable, "-m", "playwright", "install", browser])
 
 
@@ -307,6 +346,7 @@ def _prepare_runtime_dependencies() -> None:
 
 def main() -> None:
     _prepare_config()
+    _cleanup_python_bytecode()
     _prepare_runtime_dependencies()
     os.execvp(
         "uv",
