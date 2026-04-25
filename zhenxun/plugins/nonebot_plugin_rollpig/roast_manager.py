@@ -1,5 +1,6 @@
 import json
 import random
+import re
 from typing import Dict, List
 
 import nonebot_plugin_localstore as store
@@ -50,13 +51,18 @@ class RoastManager:
         )
 
     def _save_new_text(self, origin_id: str, target_id: str, text: str):
+        normalized_text = self._normalize_pvp_placeholder_spacing(text)
         if origin_id not in self.library:
             self.library[origin_id] = {}
         if target_id not in self.library[origin_id]:
             self.library[origin_id][target_id] = []
-        if text not in self.library[origin_id][target_id]:
-            self.library[origin_id][target_id].append(text)
+        if normalized_text not in self.library[origin_id][target_id]:
+            self.library[origin_id][target_id].append(normalized_text)
             self._save()
+
+    def _normalize_pvp_placeholder_spacing(self, text: str) -> str:
+        # 历史 AI 文案会把 {k}/{v} 两侧补空格，名字改成「昵称」后在图片里会显得断开。
+        return re.sub(r"[ \u3000]*\{([kv])\}[ \u3000]*", r"{\1}", text)
 
     def _format_text(
         self,
@@ -66,7 +72,8 @@ class RoastManager:
         killer: str | None = None,
         victim: str | None = None,
     ) -> str:
-        res = text.replace("{origin}", origin).replace("{food}", food)
+        res = self._normalize_pvp_placeholder_spacing(text)
+        res = res.replace("{origin}", origin).replace("{food}", food)
         k_name = killer if killer else "神秘人"
         v_name = victim if victim else "倒霉蛋"
         res = res.replace("{k}", k_name).replace("{v}", v_name)
