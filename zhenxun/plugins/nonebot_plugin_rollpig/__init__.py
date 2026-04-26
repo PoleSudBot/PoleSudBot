@@ -45,20 +45,25 @@ from .store.cloud import CloudStoreError
 from .store.models import RoastEvent
 from .summary_service import build_daily_summary
 from .texts import (
-    TOMORROW_TEXTS,
+    BACKFIRE_NO_PIG_TEXTS, BACKFIRE_GENERIC_TEXTS,
+    BACKFIRE_HUMAN_TEXTS, BACKFIRE_EATEN_TEXTS, BACKFIRE_FOOD_TEXTS,
+    DAILY_SUMMARY_EMPTY_TEXTS, DAILY_SUMMARY_HEADER, DAILY_SUMMARY_FOOTER,
+    EATEN_PIG_ID,
+    ESCAPE_TEXTS,
     FOOD_PIG_IDS, HUMAN_PIG_ID,
     FORCE_ROAST_KEYWORDS, SUPER_FORCE_ROAST_KEYWORD,
-    TODAY_ROAST_HUMAN_BLOCK_TEXTS, TODAY_ROAST_FOOD_BLOCK_TEXTS,
-    TARGET_HUMAN_BLOCK_TEXTS, TARGET_FOOD_BLOCK_TEXTS,
-    BACKFIRE_HUMAN_TEXTS, BACKFIRE_FOOD_TEXTS,
-    BACKFIRE_NO_PIG_TEXTS, BACKFIRE_GENERIC_TEXTS,
-    ESCAPE_TEXTS,
-    SUPER_FORCE_ROAST_PREFIX_TEXTS, FORCE_ROAST_PREFIX_TEXTS,
     FORCE_ROAST_LIMIT_TEXTS,
-    ROAST_BOT_TEXTS,
-    DAILY_SUMMARY_EMPTY_TEXTS, DAILY_SUMMARY_HEADER, DAILY_SUMMARY_FOOTER,
     PROTECTION_BLOCK_TEXTS, PROTECTION_BREAK_TEXTS,
     RANDOM_ROAST_INTRO_TEXTS,
+    ROAST_BOT_TEXTS,
+    SUPER_FORCE_ROAST_PREFIX_TEXTS, FORCE_ROAST_PREFIX_TEXTS,
+    TARGET_HUMAN_BLOCK_TEXTS,
+    TARGET_EATEN_BLOCK_TEXTS,
+    TARGET_FOOD_BLOCK_TEXTS,
+    TODAY_ROAST_HUMAN_BLOCK_TEXTS,
+    TODAY_ROAST_EATEN_BLOCK_TEXTS,
+    TODAY_ROAST_FOOD_BLOCK_TEXTS,
+    TOMORROW_TEXTS,
 )
 
 # --- 引入 PIL ---
@@ -82,10 +87,12 @@ __plugin_meta__ = PluginMetadata(
     🔮 趣味指令：
     明日小猪 - 预测明天的猪猪运势
     昨日小猪 - 查看昨天抽到了什么
-    今日烤猪 - 把今天的猪做成美食（人类/熟食形态会拦截）
-    烤群友 - 把群友做成烤猪（目标需已抽猪且非人类/熟食）
-    烤群友 + 打点后厨/偷换烤架/贿赂主厨/加急生火(兼容加急生活) - 每日一次强制成功（目标仍需已抽猪且非人类/熟食）
-    烤群友 + 强行点火 - superuser 专属，无限强制成功（目标仍需已抽猪且非人类/熟食）
+    今日烤猪 - 把今天的猪做成美食（人类/熟食形态/吃掉了会拦截）
+    烤群友 - 把群友做成烤猪（目标需已抽猪且非人类/熟食/吃掉了）
+    烤群友 + 打点后厨/偷换烤架/贿赂主厨/加急生火(兼容加急生活)
+      - 每日一次强制成功（目标仍需已抽猪且非人类/熟食/吃掉了）
+    烤群友 + 强行点火 - superuser 专属，无限强制成功
+      （目标仍需已抽猪且非人类/熟食/吃掉了）
     开启猪圈日报 / 关闭猪圈日报 - 开关当前群的猪圈日报推送
     
     📊 统计指令：
@@ -100,7 +107,7 @@ __plugin_meta__ = PluginMetadata(
     config=Config,
     extra={
         "author": "Felis2026",
-        "version": "0.5.0",
+        "version": "0.5.1",
         "configs": [
             {
                 "module": MODULE_NAME,
@@ -238,6 +245,10 @@ def is_human_pig(pig_data: Optional[dict]) -> bool:
     return bool(pig_data and pig_data.get("id") == HUMAN_PIG_ID)
 
 
+def is_eaten_pig(pig_data: Optional[dict]) -> bool:
+    return bool(pig_data and pig_data.get("id") == EATEN_PIG_ID)
+
+
 def is_superuser_user(user_id: str) -> bool:
     superusers = {str(x) for x in getattr(get_driver().config, "superusers", set())}
     if user_id in superusers:
@@ -260,18 +271,74 @@ def detect_force_roast_mode(raw_text: str, user_id: str) -> Optional[str]:
 def pick_backfire_text(attacker_name: str, target_name: str, attacker_pig: Optional[dict]) -> str:
     if not attacker_pig:
         pool = BACKFIRE_NO_PIG_TEXTS
+        shape = "未抽形态"
     elif is_human_pig(attacker_pig):
         pool = BACKFIRE_HUMAN_TEXTS
+        shape = "人类"
+    elif is_eaten_pig(attacker_pig):
+        pool = BACKFIRE_EATEN_TEXTS
+        shape = "吃掉了"
     elif is_food_pig(attacker_pig):
         pool = BACKFIRE_FOOD_TEXTS
+        shape = attacker_pig.get("name", "熟食")
     else:
         pool = BACKFIRE_GENERIC_TEXTS
+        shape = attacker_pig.get("name", "未知形态")
 
-    return random.choice(pool).format(attacker=attacker_name, target=target_name)
+    return random.choice(pool).format(
+        attacker=attacker_name,
+        target=target_name,
+        shape=shape,
+    )
+
+
+# 反噬图片保留“两段式”结构时，第二段烧烤文案需要明确指向操作者本人。
+# 这里只处理反噬分支，避免影响正常烧烤、今日烤猪或 AI 生成逻辑。
+def clarify_backfire_roast_text(roast_text: str, attacker_display: str) -> str:
+    normalized_text = (roast_text or "").strip()
+    if not normalized_text:
+        return normalized_text
+
+    if attacker_display and attacker_display in normalized_text:
+        return normalized_text
+
+    attacker_label = attacker_display or "对方"
+    subject_replacements = (
+        ("曾经你", f"曾经{attacker_label}"),
+        ("如今你", f"如今{attacker_label}"),
+        ("生前你", f"生前{attacker_label}"),
+        ("原本你", f"原本{attacker_label}"),
+        ("原来你", f"原来{attacker_label}"),
+        ("你本是一只", f"{attacker_label}本是一只"),
+        ("你本是", f"{attacker_label}本是"),
+        ("你曾经是", f"{attacker_label}曾经是"),
+        ("你曾是", f"{attacker_label}曾是"),
+        ("你虽然", f"{attacker_label}虽然"),
+        ("你从", f"{attacker_label}从"),
+        ("看看你", f"看看{attacker_label}"),
+        ("可怜的你", f"可怜的{attacker_label}"),
+        ("没想到你", f"没想到{attacker_label}"),
+    )
+    for old_text, new_text in subject_replacements:
+        if old_text in normalized_text:
+            return normalized_text.replace(old_text, new_text, 1)
+
+    if "你" in normalized_text:
+        return normalized_text.replace("你", attacker_label, 1)
+
+    return (
+        f"{attacker_label}原本想把别人送上烤架，"
+        f"结果最后被端上桌的却是自己。{normalized_text}"
+    )
 
 
 def pick_escape_text(attacker_name: str, target_name: str, target_pig: Optional[dict]) -> str:
-    return random.choice(ESCAPE_TEXTS).format(attacker=attacker_name, target=target_name)
+    shape = target_pig.get("name", "未知形态") if target_pig else "未知形态"
+    return random.choice(ESCAPE_TEXTS).format(
+        attacker=attacker_name,
+        target=target_name,
+        shape=shape,
+    )
 
 
 def pick_force_prefix_text(target_name: str, is_super_mode: bool) -> str:
@@ -1045,6 +1112,13 @@ async def _(event: Event):
         )
         return
 
+    if is_eaten_pig(original_pig):
+        await cmd_roast.finish(
+            MessageSegment.reply(event.message_id)
+            + random.choice(TODAY_ROAST_EATEN_BLOCK_TEXTS)
+        )
+        return
+
     if is_food_pig(original_pig):
         await cmd_roast.finish(
             MessageSegment.reply(event.message_id)
@@ -1213,10 +1287,20 @@ async def _(bot: Bot, event: GroupMessageEvent):
         )
         return
 
+    if is_eaten_pig(target_pig):
+        await cmd_roast_member.finish(
+            MessageSegment.reply(event.message_id)
+            + random.choice(TARGET_EATEN_BLOCK_TEXTS).format(target=target_full_display)
+        )
+        return
+
     if is_food_pig(target_pig):
         await cmd_roast_member.finish(
             MessageSegment.reply(event.message_id)
-            + random.choice(TARGET_FOOD_BLOCK_TEXTS).format(target=target_full_display)
+            + random.choice(TARGET_FOOD_BLOCK_TEXTS).format(
+                target=target_full_display,
+                shape=target_pig.get("name", "熟食"),
+            )
         )
         return
 
@@ -1346,6 +1430,7 @@ async def _(bot: Bot, event: GroupMessageEvent):
                 return
 
             text = await roast_manager.get_roast_text(attacker_pig, food_pig_template)
+            text = clarify_backfire_roast_text(text, attacker_full_display)
             fail_intro = pick_backfire_text(
                 attacker_full_display,
                 target_full_display,
@@ -1490,6 +1575,16 @@ async def _(bot: Bot, event: GroupMessageEvent):
         )
         return
 
+    if is_eaten_pig(target_pig):
+        eaten_text = random.choice(TARGET_EATEN_BLOCK_TEXTS).format(
+            target=target_full_display
+        )
+        await cmd_random_roast.finish(
+            MessageSegment.reply(event.message_id)
+            + f"系统随机选中了{target_full_display}。\n{eaten_text}"
+        )
+        return
+
     if is_food_pig(target_pig):
         await cmd_random_roast.finish(
             MessageSegment.reply(event.message_id)
@@ -1567,6 +1662,7 @@ async def _(bot: Bot, event: GroupMessageEvent):
                 await cmd_random_roast.finish("食材配置缺失。")
                 return
             text = await roast_manager.get_roast_text(attacker_pig, food_pig_template)
+            text = clarify_backfire_roast_text(text, attacker_full_display)
             fail_intro = pick_backfire_text(
                 attacker_full_display,
                 target_full_display,

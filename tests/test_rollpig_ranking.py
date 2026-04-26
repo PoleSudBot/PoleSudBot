@@ -267,13 +267,17 @@ def load_rollpig_plugin_module(
     fake_texts.TOMORROW_TEXTS = [""]
     fake_texts.FOOD_PIG_IDS = set()
     fake_texts.HUMAN_PIG_ID = "human"
+    fake_texts.EATEN_PIG_ID = "eaten"
     fake_texts.FORCE_ROAST_KEYWORDS = []
     fake_texts.SUPER_FORCE_ROAST_KEYWORD = "super"
     fake_texts.TODAY_ROAST_HUMAN_BLOCK_TEXTS = [""]
+    fake_texts.TODAY_ROAST_EATEN_BLOCK_TEXTS = [""]
     fake_texts.TODAY_ROAST_FOOD_BLOCK_TEXTS = [""]
     fake_texts.TARGET_HUMAN_BLOCK_TEXTS = [""]
+    fake_texts.TARGET_EATEN_BLOCK_TEXTS = [""]
     fake_texts.TARGET_FOOD_BLOCK_TEXTS = [""]
     fake_texts.BACKFIRE_HUMAN_TEXTS = ["{attacker}{target}"]
+    fake_texts.BACKFIRE_EATEN_TEXTS = ["{attacker}{target}"]
     fake_texts.BACKFIRE_FOOD_TEXTS = ["{attacker}{target}"]
     fake_texts.BACKFIRE_NO_PIG_TEXTS = ["{attacker}{target}"]
     fake_texts.BACKFIRE_GENERIC_TEXTS = ["{attacker}{target}"]
