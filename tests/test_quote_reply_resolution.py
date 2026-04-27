@@ -82,6 +82,8 @@ class _FakeQuery:
     ):
         self._rows = rows
         self._limit: int | None = None
+        self._offset = 0
+        self._order_by: tuple[str, ...] = ()
         self._values_field: str | None = None
         self._values_flat = False
         self._update_calls = update_calls
@@ -90,21 +92,43 @@ class _FakeQuery:
         self._limit = count
         return self
 
+    def offset(self, count: int):
+        self._offset = count
+        return self
+
+    def order_by(self, *fields: str):
+        self._order_by = fields
+        return self
+
     def values_list(self, field: str, flat: bool = False):
         self._values_field = field
         self._values_flat = flat
         return self
+
+    async def first(self):
+        rows = self._resolve_rows()
+        return rows[0] if rows else None
 
     async def update(self, **kwargs):
         if self._update_calls is not None:
             self._update_calls.append(kwargs)
         return len(self._rows)
 
+    def _resolve_rows(self):
+        rows = list(self._rows)
+        for field in reversed(self._order_by):
+            reverse = field.startswith("-")
+            attr_name = field[1:] if reverse else field
+            rows.sort(key=lambda row: getattr(row, attr_name), reverse=reverse)
+        if self._offset:
+            rows = rows[self._offset :]
+        if self._limit is not None:
+            rows = rows[: self._limit]
+        return rows
+
     def __await__(self):
         async def _resolve():
-            rows = list(self._rows)
-            if self._limit is not None:
-                rows = rows[: self._limit]
+            rows = self._resolve_rows()
             if self._values_field is not None:
                 if self._values_flat:
                     return [getattr(row, self._values_field) for row in rows]
@@ -333,6 +357,8 @@ def test_compact_quote_shortcut_matches_regular_queries_only():
         "语录777": ("777",),
         "语录统计学": ("统计学",),
         "语录管理学 test": ("管理学", "test"),
+        "语录xxx-3": ("xxx-3",),
+        "语录1969*3": ("1969*3",),
     }
     for text, expected in matched_cases.items():
         result = query_commands.quote_alc.parse(text)
@@ -352,14 +378,45 @@ def test_quote_query_num_option_parses():
 
 
 @pytest.mark.parametrize(
+    ("text", "expected_keywords"),
+    [
+        ("语录 x5", ("x5",)),
+        ("语录 *5", ("*5",)),
+        ("语录 1969 x3", ("1969", "x3")),
+        ("语录 1969 *3", ("1969", "*3")),
+        ("语录 xxx -3", ("xxx", "-3")),
+    ],
+)
+def test_quote_query_new_forms_parse_as_keywords(
+    text: str, expected_keywords: tuple[str, ...]
+):
+    arp = query_commands.quote_alc.parse(text)
+
+    assert arp.matched is True
+    assert arp.all_matched_args["search_keywords"] == expected_keywords
+
+
+@pytest.mark.parametrize(
     ("keywords", "option_count", "expected"),
     [
+        (["3连"], None, ("", 3)),
         (["五连"], None, ("", 5)),
+        (["x5"], None, ("", 5)),
+        (["*5"], None, ("", 5)),
         (["1969", "五连"], None, ("1969", 5)),
+        (["1969", "3连"], None, ("1969", 3)),
+        (["1969", "x3"], None, ("1969", 3)),
+        (["1969", "*3"], None, ("1969", 3)),
         (["1969五连"], None, ("1969", 5)),
+        (["1969三连"], None, ("1969", 3)),
+        (["1969x3"], None, ("1969", 3)),
+        (["1969*3"], None, ("1969", 3)),
+        (["X10"], None, ("", 10)),
+        (["xxxx3"], None, ("xxxx3", 1)),
         (["五连发"], None, ("五连发", 1)),
         (["10连续查询"], None, ("10连续查询", 1)),
         (["五连"], 1, ("五连", 1)),
+        (["*5"], 1, ("*5", 1)),
     ],
 )
 def test_extract_quote_query_and_count_cases(
@@ -370,6 +427,28 @@ def test_extract_quote_query_and_count_cases(
     assert (
         query_commands._extract_quote_query_and_count(keywords, option_count) == expected
     )
+
+
+@pytest.mark.parametrize(
+    ("keywords", "option_count", "expected_keyword", "expected_index"),
+    [
+        (["-1"], None, "", 1),
+        (["xxx", "-3"], None, "xxx", 3),
+        (["xxx-3"], None, "xxx", 3),
+        (["南极", "-5"], None, "南极", 5),
+        (["xxx", "-3"], 1, "xxx -3", None),
+    ],
+)
+def test_extract_quote_query_params_history_index_cases(
+    keywords: list[str],
+    option_count: int | None,
+    expected_keyword: str,
+    expected_index: int | None,
+):
+    params = query_commands._extract_quote_query_params(keywords, option_count)
+
+    assert params.keyword == expected_keyword
+    assert params.history_index == expected_index
 
 
 def test_make_record_alc_supports_compact_no_space_input():
@@ -476,6 +555,51 @@ async def test_get_quotes_by_ids_in_order_preserves_input_order(monkeypatch):
     result = await QuoteService.get_quotes_by_ids_in_order([3, 1, 2])
 
     assert [quote.id for quote in result] == [3, 1, 2]
+
+
+@pytest.mark.asyncio
+async def test_get_quote_by_history_index_uses_desc_id_without_keyword(monkeypatch):
+    quotes = [
+        SimpleNamespace(id=1, group_id="123"),
+        SimpleNamespace(id=3, group_id="123"),
+        SimpleNamespace(id=2, group_id="123"),
+        SimpleNamespace(id=9, group_id="456"),
+    ]
+
+    monkeypatch.setattr(quote_service_module.Quote, "filter", _build_filter(quotes))
+
+    result = await QuoteService.get_quote_by_history_index("123", 2)
+
+    assert result is not None
+    assert result.id == 2
+
+
+@pytest.mark.asyncio
+async def test_get_quote_by_history_index_sorts_search_matches(monkeypatch):
+    quotes = [
+        SimpleNamespace(id=2, group_id="123"),
+        SimpleNamespace(id=9, group_id="123"),
+        SimpleNamespace(id=5, group_id="123"),
+    ]
+    calls: list[tuple[str, str, str | None]] = []
+
+    async def _fake_search_quotes(
+        group_id: str, keyword: str, user_id_filter: str | None = None
+    ):
+        calls.append((group_id, keyword, user_id_filter))
+        return list(quotes)
+
+    monkeypatch.setattr(
+        QuoteService, "search_quotes", staticmethod(_fake_search_quotes)
+    )
+
+    result = await QuoteService.get_quote_by_history_index(
+        "123", 2, "南极", "114514"
+    )
+
+    assert result is not None
+    assert result.id == 5
+    assert calls == [("123", "南极", "114514")]
 
 
 def test_select_quote_ids_without_record_prefers_unseen(monkeypatch):

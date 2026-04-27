@@ -652,6 +652,53 @@ class QuoteService:
         except Exception:
             return None
 
+    @classmethod
+    async def get_quote_by_history_index(
+        cls,
+        group_id: str,
+        history_index: int,
+        keyword: str | None = None,
+        user_id_filter: str | None = None,
+    ) -> Quote | None:
+        """按入库倒序获取第 N 条语录，可复用现有关键词与用户过滤语义。"""
+        index = max(1, int(history_index))
+        normalized_keyword = (keyword or "").strip()
+
+        try:
+            if normalized_keyword:
+                quotes = await cls.search_quotes(
+                    group_id, normalized_keyword, user_id_filter
+                )
+            elif user_id_filter:
+                # 用户筛选需要兼容 quoted_user_id 与 user:<qq> tag，
+                # 继续沿用 Python 层判断。
+                quotes = [
+                    quote
+                    for quote in await Quote.filter(group_id=group_id)
+                    if cls._match_user_filter(quote, user_id_filter)
+                ]
+            else:
+                return (
+                    await Quote.filter(group_id=group_id)
+                    .order_by("-id")
+                    .offset(index - 1)
+                    .first()
+                )
+
+            quotes.sort(key=lambda quote: quote.id, reverse=True)
+            if len(quotes) < index:
+                return None
+            return quotes[index - 1]
+        except Exception as e:
+            logger.error(
+                f"按倒序索引获取语录失败 - 群组: {group_id}, "
+                f"索引: {history_index}, 关键词: {normalized_keyword}, "
+                f"用户筛选: {user_id_filter}, 错误: {e}",
+                "群聊语录",
+                e=e,
+            )
+            return None
+
     @staticmethod
     async def get_all_quotes() -> list[Quote]:
         """获取所有语录"""

@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 import re
 
 import aiofiles
@@ -20,9 +21,21 @@ from ..config import (
 from ..model import Quote
 from ..services.quote_service import QuoteService
 
-_LIAN_COUNT_PATTERN = re.compile(r"^(?P<count>(?:10|[1-9]|[一二两三四五六七八九十]))连$")
+_LIAN_COUNT_PATTERN = re.compile(
+    r"^(?P<count>(?:10|[1-9]|[一二两三四五六七八九十]))连$"
+)
 _SUFFIX_LIAN_COUNT_PATTERN = re.compile(
     r"^(?P<keyword>.+?)(?P<count>(?:10|[1-9]|[一二两三四五六七八九十]))连$"
+)
+_MULTIPLIER_COUNT_PATTERN = re.compile(
+    r"^(?P<operator>[xX*])(?P<count>10|[1-9])$"
+)
+_SUFFIX_MULTIPLIER_COUNT_PATTERN = re.compile(
+    r"^(?P<keyword>.+?)(?P<operator>[xX*])(?P<count>10|[1-9])$"
+)
+_HISTORY_INDEX_PATTERN = re.compile(r"^-(?P<index>[1-9]\d*)$")
+_SUFFIX_HISTORY_INDEX_PATTERN = re.compile(
+    r"^(?P<keyword>.+?)-(?P<index>[1-9]\d*)$"
 )
 _CN_LIAN_COUNT_MAP = {
     "一": 1,
@@ -37,6 +50,16 @@ _CN_LIAN_COUNT_MAP = {
     "九": 9,
     "十": 10,
 }
+
+
+@dataclass(frozen=True)
+class QuoteQueryParams:
+    """语录查询参数，区分随机数量请求与倒序指定请求。"""
+
+    keyword: str
+    count: int
+    history_index: int | None = None
+
 
 quote_alc = Alconna(
     "语录",
@@ -79,39 +102,112 @@ def _parse_lian_count(token: str) -> int | None:
     return _CN_LIAN_COUNT_MAP.get(stripped)
 
 
-def _extract_quote_query_and_count(
+def _parse_multiplier_count(token: str) -> int | None:
+    stripped = token.strip()
+    if not stripped:
+        return None
+    if match := _MULTIPLIER_COUNT_PATTERN.fullmatch(stripped):
+        return _normalize_quote_count(int(match.group("count")))
+    return None
+
+
+def _can_parse_suffix_multiplier(keyword: str, operator: str) -> bool:
+    if operator == "*":
+        return True
+
+    # xN 粘连写法存在英文关键词歧义；至少包含数字或中文时才拆后缀，
+    # 避免把 xxxx3 误判成“xxx x3”。
+    return bool(re.search(r"[\d\u4e00-\u9fff]", keyword))
+
+
+def _extract_suffix_count(token: str) -> tuple[str, int] | None:
+    if match := _SUFFIX_LIAN_COUNT_PATTERN.fullmatch(token):
+        return (
+            match.group("keyword").strip(),
+            _parse_lian_count(match.group("count")) or 1,
+        )
+
+    if match := _SUFFIX_MULTIPLIER_COUNT_PATTERN.fullmatch(token):
+        keyword = match.group("keyword").strip()
+        operator = match.group("operator")
+        if keyword and _can_parse_suffix_multiplier(keyword, operator):
+            return keyword, _normalize_quote_count(int(match.group("count")))
+
+    return None
+
+
+def _extract_history_index(
+    normalized_keywords: list[str],
+) -> tuple[str, int] | None:
+    if not normalized_keywords:
+        return None
+
+    if len(normalized_keywords) == 1:
+        token = normalized_keywords[0]
+        if match := _HISTORY_INDEX_PATTERN.fullmatch(token):
+            return "", int(match.group("index"))
+        if match := _SUFFIX_HISTORY_INDEX_PATTERN.fullmatch(token):
+            return match.group("keyword").strip(), int(match.group("index"))
+
+    last_token = normalized_keywords[-1]
+    if match := _HISTORY_INDEX_PATTERN.fullmatch(last_token):
+        return (
+            " ".join(normalized_keywords[:-1]).strip(),
+            int(match.group("index")),
+        )
+
+    return None
+
+
+def _extract_quote_query_params(
     search_keywords: list[str], option_count: int | None
-) -> tuple[str, int]:
+) -> QuoteQueryParams:
     normalized_keywords = [
         keyword.strip() for keyword in search_keywords if str(keyword).strip()
     ]
     if option_count is not None:
         # 显式 -n/--num 的优先级最高，避免“语录 -n 1 五连”这类写法被误拆成数量请求。
-        return " ".join(normalized_keywords), _normalize_quote_count(option_count)
+        return QuoteQueryParams(
+            " ".join(normalized_keywords), _normalize_quote_count(option_count)
+        )
 
     if not normalized_keywords:
-        return "", 1
+        return QuoteQueryParams("", 1)
+
+    if history_result := _extract_history_index(normalized_keywords):
+        keyword, history_index = history_result
+        return QuoteQueryParams(keyword, 1, history_index)
 
     if len(normalized_keywords) == 1:
         token = normalized_keywords[0]
         if match := _LIAN_COUNT_PATTERN.fullmatch(token):
-            return "", _parse_lian_count(match.group("count")) or 1
-        if match := _SUFFIX_LIAN_COUNT_PATTERN.fullmatch(token):
-            # 仅支持“整条 X连”或“末尾 X连”，故意不支持任意位置数量写法，
-            # 这样可以把歧义控制在最小范围，避免把正常关键词误解释成数量。
-            return (
-                match.group("keyword").strip(),
-                _parse_lian_count(match.group("count")) or 1,
-            )
+            return QuoteQueryParams("", _parse_lian_count(match.group("count")) or 1)
+        if multiplier_count := _parse_multiplier_count(token):
+            return QuoteQueryParams("", multiplier_count)
+        if suffix_count := _extract_suffix_count(token):
+            # 仅支持“整条数量”或“末尾数量”，避免把正常关键词中间的数字误解释成数量。
+            keyword, count = suffix_count
+            return QuoteQueryParams(keyword, count)
 
     last_token = normalized_keywords[-1]
     if match := _LIAN_COUNT_PATTERN.fullmatch(last_token):
-        return (
+        return QuoteQueryParams(
             " ".join(normalized_keywords[:-1]).strip(),
             _parse_lian_count(match.group("count")) or 1,
         )
+    if multiplier_count := _parse_multiplier_count(last_token):
+        return QuoteQueryParams(
+            " ".join(normalized_keywords[:-1]).strip(), multiplier_count
+        )
 
-    return " ".join(normalized_keywords), 1
+    return QuoteQueryParams(" ".join(normalized_keywords), 1)
+
+
+def _extract_quote_query_and_count(
+    search_keywords: list[str], option_count: int | None
+) -> tuple[str, int]:
+    params = _extract_quote_query_params(search_keywords, option_count)
+    return params.keyword, params.count
 
 
 def _build_random_memory_key(group_id: str, user_id_filter: str | None = None) -> str:
@@ -285,6 +381,42 @@ async def _send_quote_batch(
         return False
 
 
+async def _send_history_quote(
+    bot: Bot,
+    target,
+    group_id: str,
+    keyword: str,
+    history_index: int,
+    user_id_filter: str | None = None,
+) -> None:
+    """处理 -N 倒序指定请求，保持结果确定且不参与随机去重。"""
+    quote = await QuoteService.get_quote_by_history_index(
+        group_id, history_index, keyword, user_id_filter
+    )
+    if not quote:
+        keyword_hint = f"匹配 '{keyword}' 的" if keyword else "本群"
+        await MessageUtils.build_message(
+            f"未找到{keyword_hint}倒数第 {history_index} 条语录。"
+        ).send(target=target, bot=bot)
+        return
+
+    if not safe_file_exists(quote.image_path):
+        logger.warning(
+            f"倒序指定的语录 (ID: {quote.id}) 对应图片文件不存在: {quote.image_path}",
+            "群聊语录",
+        )
+        await _delete_invalid_quotes([quote.id])
+        await MessageUtils.build_message(
+            "这条语录图片文件已缺失，已清理记录，请再试一次。"
+        ).send(target=target, bot=bot)
+        return
+
+    if not await _send_quote_batch(bot, target, group_id, [quote]):
+        return
+
+    await QuoteService.increment_view_counts([quote.id])
+
+
 @record_pool.handle()
 async def record_pool_handle(bot: Bot, event: Event, arp: Arparma, state: T_State):
     """语录查询处理函数。"""
@@ -297,10 +429,23 @@ async def record_pool_handle(bot: Bot, event: Event, arp: Arparma, state: T_Stat
 
     at_user_info: At | None = arp.all_matched_args.get("target_user")
     search_keywords: list[str] = arp.all_matched_args.get("search_keywords", [])
-    search_key_processed, request_count = _extract_quote_query_and_count(
+    query_params = _extract_quote_query_params(
         search_keywords, arp.query("num.count")
     )
+    search_key_processed = query_params.keyword
+    request_count = query_params.count
     user_id_filter: str | None = str(at_user_info.target) if at_user_info else None
+
+    if query_params.history_index is not None:
+        await _send_history_quote(
+            bot,
+            target,
+            group_id,
+            search_key_processed,
+            query_params.history_index,
+            user_id_filter,
+        )
+        return
 
     quotes: list[Quote] = []
     memory_key: str | None = None
