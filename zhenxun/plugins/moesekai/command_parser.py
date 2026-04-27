@@ -565,10 +565,6 @@ def parse_command(event: MessageEvent) -> ParsedCommand | None:
         return manga
     if story := _parse_story(text):
         return story
-    if multiplier := _parse_multiplier(text):
-        return multiplier
-    if alias := _parse_alias(text):
-        return alias
     if live_toggle := _parse_toggle_command(text, ("live提醒",), action="live_toggle"):
         return live_toggle
     if new_card_toggle := _parse_toggle_command(
@@ -579,23 +575,5 @@ def parse_command(event: MessageEvent) -> ParsedCommand | None:
         return new_card_toggle
     if subscription := _parse_live_subscription(text):
         return subscription
-
-    prediction = _parse_optional_event_command(
-        text,
-        ("sk预测",),
-        action="prediction",
-        error_message="sk预测只支持一个可选活动ID",
-    )
-    if prediction:
-        return prediction
-
-    ycx = _parse_optional_event_command(
-        text,
-        ("ycx",),
-        action="ycx",
-        error_message="ycx只支持一个可选活动ID",
-    )
-    if ycx:
-        return ycx
 
     return _parse_deck_command(text, at_targets)

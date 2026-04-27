@@ -22,10 +22,8 @@ DECK_MODE_SPECS: tuple[DeckModeSpec, ...] = (
     DeckModeSpec(mode="challenge", label="挑战组卡", command_names=("挑战组卡",)),
 )
 
-# custom 模式目前仅保留内部实现，对外先隐藏命令入口。
-DECK_COMMAND_SPECS: tuple[DeckModeSpec, ...] = tuple(
-    spec for spec in DECK_MODE_SPECS if spec.mode != "custom"
-)
+# 组卡模式实现仅保留内部能力，对外命令入口全部关闭。
+DECK_COMMAND_SPECS: tuple[DeckModeSpec, ...] = ()
 
 DECK_MODE_SPEC_MAP = {spec.mode: spec for spec in DECK_MODE_SPECS}
 

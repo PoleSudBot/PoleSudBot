@@ -110,60 +110,16 @@ def test_parse_bind_without_space_before_game_id():
     assert parsed.game_id == "1234567890123"
 
 
-def test_parse_activity_deck_with_optional_flags():
-    parsed = parse_command(
-        FakeEvent("活动组卡 195 --music 226 --difficulty hard --live-type multi")  # type: ignore[arg-type]
-    )
-    assert parsed is not None
-    assert parsed.action == "deck"
-    assert isinstance(parsed.deck_request, DeckCommandRequest)
-    assert parsed.deck_request.mode == "event"
-    assert parsed.deck_request.event_id == 195
-    assert parsed.deck_request.music_query == "226"
-    assert parsed.deck_request.difficulty == "hard"
-    assert parsed.deck_request.live_type == "multi"
-
-
-def test_parse_activity_deck_with_position_args_and_aliases():
-    parsed = parse_command(FakeEvent("活动组卡 195 226 hd cheerful"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert parsed.action == "deck"
-    assert isinstance(parsed.deck_request, DeckCommandRequest)
-    assert parsed.deck_request.mode == "event"
-    assert parsed.deck_request.event_id == 195
-    assert parsed.deck_request.music_query == "226"
-    assert parsed.deck_request.difficulty == "hard"
-    assert parsed.deck_request.live_type == "cheerful"
-
-
-def test_parse_activity_deck_duplicate_music_arg_errors():
-    parsed = parse_command(
-        FakeEvent("活动组卡 195 226 --music 227")  # type: ignore[arg-type]
-    )
-    assert parsed is not None
-    assert parsed.action == "deck"
-    assert parsed.error == "歌曲ID参数重复"
-
-
-def test_parse_activity_deck_without_space_before_event_id():
-    parsed = parse_command(FakeEvent("活动组卡195 --music 226"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert parsed.action == "deck"
-    assert isinstance(parsed.deck_request, DeckCommandRequest)
-    assert parsed.deck_request.mode == "event"
-    assert parsed.deck_request.event_id == 195
-    assert parsed.deck_request.music_query == "226"
-
-
-def test_parse_activity_deck_with_music_alias_text():
-    parsed = parse_command(FakeEvent("活动组卡 tell your world master"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert parsed.action == "deck"
-    assert isinstance(parsed.deck_request, DeckCommandRequest)
-    assert parsed.deck_request.mode == "event"
-    assert parsed.deck_request.event_id is None
-    assert parsed.deck_request.music_query == "tell your world"
-    assert parsed.deck_request.difficulty == "master"
+def test_parse_all_public_deck_commands_are_hidden():
+    hidden_commands = [
+        "活动组卡 195 --music 226 --difficulty hard --live-type multi",
+        "活动组卡195 --music 226",
+        "烤森组卡 201",
+        "最强组卡 Tell Your World 实效",
+        "挑战组卡 初音未来 Tell Your World master",
+    ]
+    for command in hidden_commands:
+        assert parse_command(FakeEvent(command)) is None  # type: ignore[arg-type]
 
 
 def test_parse_custom_deck_command_is_hidden():
@@ -242,46 +198,9 @@ def test_parse_custom_deck_request_with_vs_support_prefix():
     ]
 
 
-def test_parse_mysekai_deck():
-    parsed = parse_command(FakeEvent("烤森组卡 201"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert isinstance(parsed.deck_request, DeckCommandRequest)
-    assert parsed.deck_request.mode == "mysekai"
-    assert parsed.deck_request.event_id == 201
-
-
-def test_parse_strongest_deck_defaults_to_power():
-    parsed = parse_command(FakeEvent("最强组卡"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert isinstance(parsed.deck_request, DeckCommandRequest)
-    assert parsed.deck_request.mode == "strongest"
-    assert parsed.deck_request.strongest_target is None
-    assert parsed.deck_request.music_query is None
-
-
-def test_parse_strongest_deck_skill_target_and_music():
-    parsed = parse_command(FakeEvent("最强组卡 Tell Your World 实效"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert isinstance(parsed.deck_request, DeckCommandRequest)
-    assert parsed.deck_request.mode == "strongest"
-    assert parsed.deck_request.strongest_target == "skill"
-    assert parsed.deck_request.music_query == "tell your world"
-
-
-def test_parse_challenge_deck():
-    parsed = parse_command(FakeEvent("挑战组卡 初音未来 Tell Your World master"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert isinstance(parsed.deck_request, DeckCommandRequest)
-    assert parsed.deck_request.mode == "challenge"
-    assert parsed.deck_request.free_text_query == "初音未来 tell your world"
-    assert parsed.deck_request.difficulty == "master"
-
-
-def test_parse_challenge_deck_requires_character():
-    parsed = parse_command(FakeEvent("挑战组卡"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert parsed.action == "deck"
-    assert parsed.error == "用法: 挑战组卡 <角色> [歌曲] [难度]"
+def test_parse_hidden_deck_command_without_args_returns_none():
+    assert parse_command(FakeEvent("最强组卡")) is None  # type: ignore[arg-type]
+    assert parse_command(FakeEvent("挑战组卡")) is None  # type: ignore[arg-type]
 
 
 def test_parse_custom_deck_request_rejects_missing_bonus_pair():
@@ -312,43 +231,16 @@ def test_parse_update_all():
     assert parsed.all_servers is True
 
 
-def test_parse_ycx_with_event_id():
-    parsed = parse_command(FakeEvent("cnycx 166"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert parsed.action == "ycx"
-    assert parsed.server == "cn"
-    assert parsed.event_id == 166
-
-
-def test_parse_ycx_without_space_before_event_id():
-    parsed = parse_command(FakeEvent("ycx166"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert parsed.action == "ycx"
-    assert parsed.server is None
-    assert parsed.event_id == 166
-
-
-def test_parse_prediction_with_event_id():
-    parsed = parse_command(FakeEvent("jpsk预测 178"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert parsed.action == "prediction"
-    assert parsed.server == "jp"
-    assert parsed.event_id == 178
-
-
-def test_parse_prediction_without_space_before_event_id():
-    parsed = parse_command(FakeEvent("sk预测178"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert parsed.action == "prediction"
-    assert parsed.server is None
-    assert parsed.event_id == 178
-
-
-def test_parse_ycx_extra_arg_errors():
-    parsed = parse_command(FakeEvent("ycx 166 extra"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert parsed.action == "ycx"
-    assert parsed.error == "ycx只支持一个可选活动ID"
+def test_parse_prediction_and_ycx_commands_are_hidden():
+    hidden_commands = [
+        "cnycx 166",
+        "ycx166",
+        "ycx 166 extra",
+        "jpsk预测 178",
+        "sk预测178",
+    ]
+    for command in hidden_commands:
+        assert parse_command(FakeEvent(command)) is None  # type: ignore[arg-type]
 
 
 def test_parse_admin_query_binding_qq_with_at():
@@ -430,30 +322,15 @@ def test_parse_character_command_is_archived():
     assert parse_command(FakeEvent("查角色 初音未来")) is None  # type: ignore[arg-type]
 
 
-def test_parse_multiplier_command():
-    parsed = parse_command(FakeEvent("倍率计算 150 130 120 115 100"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert parsed.action == "multiplier"
-    assert parsed.multiplier_values == [150, 130, 120, 115, 100]
-
-
-def test_parse_multiplier_short_name_command():
-    parsed = parse_command(FakeEvent("倍率 150 130 120 115 100"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert parsed.action == "multiplier"
-    assert parsed.multiplier_values == [150, 130, 120, 115, 100]
-
-
-def test_parse_multiplier_requires_five_numeric_args():
-    parsed = parse_command(FakeEvent("倍率计算 150 130 120"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert parsed.action == "multiplier"
-    assert parsed.error == "用法: 倍率计算 <a> <b> <c> <d> <e>"
-
-    parsed = parse_command(FakeEvent("倍率计算 150 130 120 115 abc"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert parsed.action == "multiplier"
-    assert parsed.error == "用法: 倍率计算 <a> <b> <c> <d> <e>"
+def test_parse_multiplier_commands_are_hidden():
+    hidden_commands = [
+        "倍率计算 150 130 120 115 100",
+        "倍率 150 130 120 115 100",
+        "倍率计算 150 130 120",
+        "倍率计算 150 130 120 115 abc",
+    ]
+    for command in hidden_commands:
+        assert parse_command(FakeEvent(command)) is None  # type: ignore[arg-type]
 
 
 def test_parse_live_toggle_with_server():
@@ -509,51 +386,16 @@ def test_parse_new_card_toggle_supports_new_and_legacy_name():
     assert legacy.server == "jp"
 
 
-def test_parse_alias_add_global():
-    parsed = parse_command(FakeEvent("角色别名 添加 全局 初音未来 miku"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert parsed.action == "alias"
-    assert parsed.admin_target_type == "character"
-    assert parsed.admin_subaction == "add"
-    assert parsed.global_scope is True
-    assert parsed.query_text == "初音未来"
-    assert parsed.alias == "miku"
-
-
-def test_parse_character_alias_defaults_to_query():
-    parsed = parse_command(FakeEvent("角色别名 初音未来"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert parsed.action == "alias"
-    assert parsed.admin_target_type == "character"
-    assert parsed.admin_subaction == "query"
-    assert parsed.query_text == "初音未来"
-
-
-def test_parse_character_alias_without_space():
-    parsed = parse_command(FakeEvent("角色别名初音未来"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert parsed.action == "alias"
-    assert parsed.admin_target_type == "character"
-    assert parsed.admin_subaction == "query"
-    assert parsed.query_text == "初音未来"
-
-
-def test_parse_music_alias_defaults_to_query():
-    parsed = parse_command(FakeEvent("歌曲别名 Tell Your World"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert parsed.action == "alias"
-    assert parsed.admin_target_type == "music"
-    assert parsed.admin_subaction == "query"
-    assert parsed.query_text == "tell your world"
-
-
-def test_parse_music_alias_without_space():
-    parsed = parse_command(FakeEvent("歌曲别名277"))  # type: ignore[arg-type]
-    assert parsed is not None
-    assert parsed.action == "alias"
-    assert parsed.admin_target_type == "music"
-    assert parsed.admin_subaction == "query"
-    assert parsed.query_text == "277"
+def test_parse_alias_commands_are_hidden():
+    hidden_commands = [
+        "角色别名 添加 全局 初音未来 miku",
+        "角色别名 初音未来",
+        "角色别名初音未来",
+        "歌曲别名 Tell Your World",
+        "歌曲别名277",
+    ]
+    for command in hidden_commands:
+        assert parse_command(FakeEvent(command)) is None  # type: ignore[arg-type]
 
 
 def test_parse_query_archive_without_space_before_game_id():
