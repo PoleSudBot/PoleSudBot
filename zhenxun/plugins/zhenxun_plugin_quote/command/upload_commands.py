@@ -491,8 +491,9 @@ def _is_new_record_command_text(text: str) -> bool:
 def _build_basic_usage_hint_text() -> str:
     return (
         "基础用法：\n"
-        "上传语录 [tag/@用户 ...]\n"
+        "上传语录 [图片] [tag/@用户 ...]\n"
         "记录语录 [tag/@用户 ...]（记录 为别名，需回复消息）\n"
+        "入典 [tag/@用户 ...]（classic 预设，需回复消息）\n"
         "语录 [关键词/@用户]"
     )
 
@@ -500,8 +501,9 @@ def _build_basic_usage_hint_text() -> str:
 def _build_upload_migration_hint_text() -> str:
     return (
         "“上传”不再直接解析图片。\n"
-        "上传图片并解析请使用：上传语录 [tag/@用户 ...]\n"
+        "上传图片并解析请使用：上传语录 [图片] [tag/@用户 ...]\n"
         "回复文本生成语录请使用：记录语录 [tag/@用户 ...]\n"
+        "classic 风格预设可使用：入典 [tag/@用户 ...]\n"
         "兼容别名：记录（需回复消息）"
     )
 
@@ -512,6 +514,23 @@ def _build_upload_success_text() -> str:
 
 def _build_record_success_message(img_data: bytes) -> list[bytes | str]:
     return [img_data, "\n保存成功\n", _build_basic_usage_hint_text()]
+
+
+def _has_style_override_parts(parts: list[Any]) -> bool:
+    """
+    `入典` 是固定 classic 预设；这里显式拦截样式参数，避免 strict=False
+    把 `-s/--style` 误吞成普通 tag，导致预设命令语义漂移。
+    """
+    for part in parts:
+        text = part.text if isinstance(part, Text) else part if isinstance(part, str) else None
+        if text is None:
+            continue
+        normalized = text.strip()
+        if normalized in {"-s", "--style"}:
+            return True
+        if normalized.startswith("-s=") or normalized.startswith("--style="):
+            return True
+    return False
 
 
 async def _match_upload_with_image(event: MessageEvent) -> bool:
@@ -592,6 +611,18 @@ legacy_record_cmd = on_alconna(
     legacy_record_alc,
     block=True,
     rule=record_reply_rule(exclude_new_command=True),
+)
+idiom_record_alc = Alconna(
+    "入典",
+    Option("-n|--num", Args["count", int, 1], help_text="记录连续消息的数量"),
+    Option("-o|--only|--仅作者", help_text="仅记录/生成被回复用户的连续消息"),
+    Args["parts?", MultiVar(At | Text)],
+    meta=CommandMeta(strict=False, compact=True),
+)
+idiom_record_cmd = on_alconna(
+    idiom_record_alc,
+    block=True,
+    rule=record_reply_rule(),
 )
 
 generate_quote_alc = Alconna(
@@ -809,6 +840,7 @@ async def _handle_quote_generation(
     arp: Arparma,
     session: Uninfo,
     issuer_user_id: str | None = None,
+    forced_variant: str | None = None,
 ) -> tuple[bytes | None, str | None, str | None, str | None]:
     """
     统一处理'记录'和'生成'命令的核心逻辑。
@@ -816,7 +848,9 @@ async def _handle_quote_generation(
     返回:
         元组 (img_data, recorded_text, quoted_user_id, error_msg)
     """
-    user_variant: str | None = arp.query("style.style_name")
+    # `入典` 这类预设命令必须绑定具体主题名，而不是继续依赖 `-s 1`
+    # 之类会随主题排序变化的外部语义。
+    user_variant: str | None = forced_variant or arp.query("style.style_name")
     count: int = arp.query("num.count", 1) if not user_variant == "classic" else 1
     is_only_author = arp.find("only")
 
@@ -1023,7 +1057,11 @@ def _is_message_renderable(message_dict: dict) -> bool:
 
 
 async def _handle_record_command(
-    bot: Bot, event: MessageEvent, arp: Arparma, session: Uninfo
+    bot: Bot,
+    event: MessageEvent,
+    arp: Arparma,
+    session: Uninfo,
+    forced_variant: str | None = None,
 ):
     """记录语录处理函数 (重构后)"""
     user_id = str(event.get_user_id())
@@ -1031,8 +1069,16 @@ async def _handle_record_command(
         bot, session.group.id if session.group else None, arp
     )
 
+    generation_kwargs = {"issuer_user_id": user_id}
+    if forced_variant is not None:
+        generation_kwargs["forced_variant"] = forced_variant
+
     img_data, recorded_text, quoted_user_id, error = await _handle_quote_generation(
-        bot, event, arp, session, issuer_user_id=user_id
+        bot,
+        event,
+        arp,
+        session,
+        **generation_kwargs,
     )
 
     if error:
@@ -1097,6 +1143,21 @@ async def legacy_record_handle(
     bot: Bot, event: MessageEvent, arp: Arparma, session: Uninfo
 ):
     await _handle_record_command(bot, event, arp, session)
+
+
+@idiom_record_cmd.handle()
+async def idiom_record_handle(
+    bot: Bot, event: MessageEvent, arp: Arparma, session: Uninfo
+):
+    if _has_style_override_parts(collect_tag_parts(arp)):
+        await MessageUtils.build_message(
+            "入典 为固定 classic 预设，不支持 -s/--style。"
+        ).send(target=event, bot=bot)
+        return
+
+    await _handle_record_command(
+        bot, event, arp, session, forced_variant="classic"
+    )
 
 
 @generate_quote_cmd.handle()

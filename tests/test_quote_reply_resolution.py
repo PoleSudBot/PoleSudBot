@@ -382,6 +382,16 @@ def test_make_record_alc_supports_compact_no_space_input():
     )
 
 
+def test_idiom_record_alc_supports_compact_no_space_input():
+    result = upload_commands.idiom_record_alc.parse("入典aaa bbb")
+
+    assert result.matched is True
+    assert tuple(part.text for part in result.all_matched_args["parts"]) == (
+        "aaa",
+        "bbb",
+    )
+
+
 @pytest.mark.asyncio
 async def test_match_upload_with_image_requires_current_or_reply_image():
     class _FakeEvent:
@@ -772,6 +782,171 @@ async def test_make_record_handle_writes_dual_mention_tags(monkeypatch, tmp_path
     assert sent_messages == [
         upload_commands._build_record_success_message(b"generated-image")
     ]
+
+
+@pytest.mark.asyncio
+async def test_idiom_record_handle_forces_classic_and_reuses_record_flow(
+    monkeypatch, tmp_path: Path
+):
+    captured: dict[str, object] = {}
+    sent_messages: list[object] = []
+
+    async def _fake_extract_tags(bot, group_id, arp, arg_name="parts"):
+        assert group_id == "123"
+        return ["user:114514", "群主_张三"]
+
+    async def _fake_handle_generation(
+        bot,
+        event,
+        arp,
+        session,
+        issuer_user_id=None,
+        forced_variant=None,
+    ):
+        captured["forced_variant"] = forced_variant
+        return b"generated-image", "recorded text", "114514", None
+
+    async def _fake_add_quote(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(id=1), True
+
+    class _FakeMessage:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def send(self, target=None, bot=None):
+            sent_messages.append(self.payload)
+
+    monkeypatch.setattr(
+        upload_commands,
+        "extract_manual_tags_with_mention_names",
+        _fake_extract_tags,
+    )
+    monkeypatch.setattr(
+        upload_commands, "_handle_quote_generation", _fake_handle_generation
+    )
+    monkeypatch.setattr(upload_commands, "ensure_quote_path", lambda: tmp_path)
+    monkeypatch.setattr(
+        upload_commands.Quote,
+        "filter",
+        lambda **kwargs: _FakeExistsQuery(False),
+    )
+    monkeypatch.setattr(upload_commands.QuoteService, "add_quote", _fake_add_quote)
+    monkeypatch.setattr(
+        upload_commands.MessageUtils, "build_message", lambda payload: _FakeMessage(payload)
+    )
+
+    event = SimpleNamespace(get_user_id=lambda: "42")
+    session = SimpleNamespace(group=SimpleNamespace(id="123"))
+    arp = SimpleNamespace(all_matched_args={}, main_args={})
+
+    await upload_commands.idiom_record_handle(
+        SimpleNamespace(), event, arp, session
+    )
+
+    assert captured["forced_variant"] == "classic"
+    assert captured["group_id"] == "123"
+    assert captured["manual_tags"] == ["user:114514", "群主_张三"]
+    assert sent_messages == [
+        upload_commands._build_record_success_message(b"generated-image")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_idiom_record_handle_rejects_style_override(monkeypatch):
+    sent_messages: list[object] = []
+    generation_called = False
+
+    class _FakeMessage:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def send(self, target=None, bot=None):
+            sent_messages.append(self.payload)
+
+    async def _fake_handle_generation(*args, **kwargs):
+        nonlocal generation_called
+        generation_called = True
+        return None, None, None, "unexpected"
+
+    arp = SimpleNamespace(
+        all_matched_args={"parts": [Text("-s"), Text("1"), Text("南极")]},
+        main_args={"parts": [Text("-s"), Text("1"), Text("南极")]},
+    )
+
+    monkeypatch.setattr(
+        upload_commands.MessageUtils, "build_message", lambda payload: _FakeMessage(payload)
+    )
+    monkeypatch.setattr(
+        upload_commands, "_handle_quote_generation", _fake_handle_generation
+    )
+
+    await upload_commands.idiom_record_handle(
+        SimpleNamespace(),
+        SimpleNamespace(get_user_id=lambda: "42"),
+        arp,
+        SimpleNamespace(group=SimpleNamespace(id="123")),
+    )
+
+    assert generation_called is False
+    assert sent_messages == ["入典 为固定 classic 预设，不支持 -s/--style。"]
+
+
+@pytest.mark.asyncio
+async def test_handle_quote_generation_forced_classic_rejects_pure_image_message(
+    monkeypatch,
+):
+    async def _fake_extract_info(event, bot):
+        return (
+            upload_commands.UniMessage([upload_commands.UniImage(raw=b"image-bytes")]),
+            "南极",
+            "114514",
+        ), None
+
+    async def _fake_superuser(bot, event):
+        return False
+
+    monkeypatch.setattr(upload_commands, "_extract_info_from_reply", _fake_extract_info)
+    monkeypatch.setattr(upload_commands, "SUPERUSER", _fake_superuser)
+    monkeypatch.setattr(
+        upload_commands.Config,
+        "get_config",
+        lambda module, key, default=None: False if key.startswith("QUOTE_ALLOW") else default,
+    )
+
+    class _FakeBot:
+        async def get_msg(self, message_id: int):
+            return {"message": []}
+
+    class _FakeArp:
+        def query(self, key, default=None):
+            return default
+
+        def find(self, key):
+            return False
+
+    event = SimpleNamespace(
+        self_id="1919810",
+        reply=SimpleNamespace(
+            message_id=1,
+            sender=SimpleNamespace(user_id="114514"),
+        ),
+        group_id=123,
+    )
+
+    img_data, recorded_text, quoted_user_id, error = await upload_commands._handle_quote_generation(
+        _FakeBot(),
+        event,
+        _FakeArp(),
+        SimpleNamespace(group=SimpleNamespace(id="123")),
+        issuer_user_id="42",
+        forced_variant="classic",
+    )
+
+    assert img_data is None
+    assert recorded_text is None
+    assert quoted_user_id is None
+    assert error == "不支持使用 classic 主题记录纯图片消息。"
 
 
 @pytest.mark.asyncio

@@ -120,9 +120,11 @@ def test_upload_migration_and_success_prompt_share_new_usage_hint():
 
     assert "上传语录 [图片] [tag/@用户 ...]" in migration_hint
     assert "记录语录 [tag/@用户 ...]" in migration_hint
+    assert "入典 [tag/@用户 ...]" in migration_hint
     assert "记录（需回复消息）" in migration_hint
     assert success_hint.startswith("保存成功\n")
     assert "基础用法：" in success_hint
+    assert "入典 [tag/@用户 ...]" in success_hint
     assert "语录 [关键词/@用户]" in success_hint
 
 
@@ -146,12 +148,34 @@ def test_record_command_keeps_new_main_name_and_old_alias():
     assert _extract_texts(legacy_parsed.query("parts")) == ["南极"]
 
 
+def test_idiom_command_supports_compact_and_options():
+    compact_parsed = upload_commands.idiom_record_cmd.command().parse("入典南极")
+    option_parsed = upload_commands.idiom_record_cmd.command().parse("入典 -n 2 -o 南极")
+
+    assert compact_parsed.matched
+    assert _extract_texts(compact_parsed.query("parts")) == ["南极"]
+    assert option_parsed.matched
+    assert _extract_texts(option_parsed.query("parts")) == ["南极"]
+    assert option_parsed.query("num.count", 1) == 2
+    assert option_parsed.find("only")
+
+
+def test_idiom_style_override_parts_are_rejected():
+    parsed = upload_commands.idiom_record_cmd.command().parse("入典 -s 1 南极")
+
+    assert parsed.matched
+    assert upload_commands._has_style_override_parts(
+        list(parsed.query("parts") or [])
+    )
+
+
 def test_record_success_message_keeps_image_and_usage_hint_in_one_message():
     message_parts = upload_commands._build_record_success_message(b"fake-image")
 
     assert message_parts[0] == b"fake-image"
     assert "保存成功" in message_parts[1]
     assert "记录语录 [tag/@用户 ...]" in message_parts[2]
+    assert "入典 [tag/@用户 ...]" in message_parts[2]
     assert "语录 [关键词/@用户]" in message_parts[2]
 
 
@@ -161,6 +185,9 @@ def test_plugin_usage_text_is_updated_to_new_commands():
     assert "`上传语录 [图片] [tag/@用户 ...]`" in usage_text
     assert "`上传` - 迁移提示命令" in usage_text
     assert "`记录语录 [tag/@用户 ...]`" in usage_text
+    assert "`入典 [tag/@用户 ...]`" in usage_text
+    assert "`入典 [-n 数量] [-o|--only]`" in usage_text
     assert "记录语录aaa bbb" in usage_text
+    assert "入典aaa bbb" in usage_text
     assert "上传语录xxx" in usage_text
     assert "上传xxx" not in usage_text
