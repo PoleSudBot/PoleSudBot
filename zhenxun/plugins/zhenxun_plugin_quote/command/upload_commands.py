@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import aiofiles
 from arclet.alconna import Alconna, Args, Arparma, CommandMeta, MultiVar, Option
+from nonebot import get_driver
 from nonebot.permission import SUPERUSER
 import httpx
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageEvent, MessageSegment
@@ -459,6 +460,60 @@ def _message_has_image_segment(message: Any) -> bool:
         return False
 
 
+def _strip_command_start(text: str) -> str:
+    """
+    去掉消息前导命令前缀，避免 `/上传语录` 这类写法误落到旧命令路由。
+    """
+    normalized = text.lstrip()
+    command_starts = sorted(
+        (str(start) for start in get_driver().config.command_start if start),
+        key=len,
+        reverse=True,
+    )
+    for start in command_starts:
+        if normalized.startswith(start):
+            return normalized[len(start) :].lstrip()
+    return normalized
+
+
+def _starts_with_command_name(text: str, command_name: str) -> bool:
+    return _strip_command_start(text).startswith(command_name)
+
+
+def _is_new_upload_command_text(text: str) -> bool:
+    return _starts_with_command_name(text, "上传语录")
+
+
+def _is_new_record_command_text(text: str) -> bool:
+    return _starts_with_command_name(text, "记录语录")
+
+
+def _build_basic_usage_hint_text() -> str:
+    return (
+        "基础用法：\n"
+        "上传语录 [tag/@用户 ...]\n"
+        "记录语录 [tag/@用户 ...]（记录 为别名，需回复消息）\n"
+        "语录 [关键词/@用户]"
+    )
+
+
+def _build_upload_migration_hint_text() -> str:
+    return (
+        "“上传”不再直接解析图片。\n"
+        "上传图片并解析请使用：上传语录 [tag/@用户 ...]\n"
+        "回复文本生成语录请使用：记录语录 [tag/@用户 ...]\n"
+        "兼容别名：记录（需回复消息）"
+    )
+
+
+def _build_upload_success_text() -> str:
+    return f"保存成功\n{_build_basic_usage_hint_text()}"
+
+
+def _build_record_success_message(img_data: bytes) -> list[bytes | str]:
+    return [img_data, "\n保存成功\n", _build_basic_usage_hint_text()]
+
+
 async def _match_upload_with_image(event: MessageEvent) -> bool:
     if _message_has_image_segment(event.message):
         return True
@@ -469,8 +524,11 @@ async def _match_upload_with_image(event: MessageEvent) -> bool:
     return reply is not None and _message_has_image_segment(getattr(reply, "message", None))
 
 
-def upload_has_image_rule() -> Rule:
+def upload_has_image_rule(*, exclude_new_command: bool = False) -> Rule:
     async def _rule(event: MessageEvent) -> bool:
+        # 旧“上传”必须显式让出“上传语录”，否则 compact 前缀匹配会把新命令吞掉。
+        if exclude_new_command and _is_new_upload_command_text(event.get_plaintext()):
+            return False
         return await _match_upload_with_image(event)
 
     return Rule(_rule)
@@ -480,26 +538,41 @@ async def _match_record_reply(event: MessageEvent) -> bool:
     return getattr(event, "reply", None) is not None
 
 
-def record_reply_rule() -> Rule:
+def record_reply_rule(*, exclude_new_command: bool = False) -> Rule:
     async def _rule(event: MessageEvent) -> bool:
+        # “记录语录”是新的正式入口；旧“记录”作为别名时必须先避开它，
+        # 否则 “记录语录 xxx” 会被旧命令误拆成 tag。
+        if exclude_new_command and _is_new_record_command_text(event.get_plaintext()):
+            return False
         return await _match_record_reply(event)
 
     return Rule(_rule)
 
 
-upload_alc = Alconna(
-    "上传",
+upload_quote_alc = Alconna(
+    "上传语录",
     Args["parts?", MultiVar(At | Text | UniImage)],
     meta=CommandMeta(strict=False, compact=True),
 )
 save_img_cmd = on_alconna(
-    upload_alc,
+    upload_quote_alc,
     auto_send_output=False,
     block=True,
     rule=upload_has_image_rule(),
 )
+legacy_upload_alc = Alconna(
+    "上传",
+    Args["parts?", MultiVar(At | Text | UniImage)],
+    meta=CommandMeta(strict=False, compact=True),
+)
+upload_hint_cmd = on_alconna(
+    legacy_upload_alc,
+    auto_send_output=False,
+    block=True,
+    rule=upload_has_image_rule(exclude_new_command=True),
+)
 make_record_alc = Alconna(
-    "记录",
+    "记录语录",
     Option("-s|--style", Args["style_name", str], help_text="指定主题样式"),
     Option("-n|--num", Args["count", int, 1], help_text="记录连续消息的数量"),
     Option("-o|--only|--仅作者", help_text="仅记录/生成被回复用户的连续消息"),
@@ -507,6 +580,19 @@ make_record_alc = Alconna(
     meta=CommandMeta(strict=False, compact=True),
 )
 make_record_cmd = on_alconna(make_record_alc, block=True, rule=record_reply_rule())
+legacy_record_alc = Alconna(
+    "记录",
+    Option("-s|--style", Args["style_name", str], help_text="指定主题样式"),
+    Option("-n|--num", Args["count", int, 1], help_text="记录连续消息的数量"),
+    Option("-o|--only|--仅作者", help_text="仅记录/生成被回复用户的连续消息"),
+    Args["parts?", MultiVar(At | Text)],
+    meta=CommandMeta(strict=False, compact=True),
+)
+legacy_record_cmd = on_alconna(
+    legacy_record_alc,
+    block=True,
+    rule=record_reply_rule(exclude_new_command=True),
+)
 
 generate_quote_alc = Alconna(
     "生成",
@@ -541,6 +627,25 @@ async def _set_pending_emoji_like(bot: Bot, event: MessageEvent) -> None:
         logger.debug(f"设置上传处理中表情失败，可能协议端不支持: {e}", "群聊语录")
 
 
+@upload_hint_cmd.handle()
+async def upload_hint_handle(bot: Bot, event: MessageEvent):
+    """旧上传命令只负责提示迁移，不再触发 OCR 或保存。"""
+    session_id = event.get_session_id()
+    if "group" not in session_id:
+        await upload_hint_cmd.finish("上传功能目前仅支持群聊。")
+        return
+
+    group_id = session_id.split("_")[1]
+    await bot.call_api(
+        "send_group_msg",
+        **{
+            "group_id": int(group_id),
+            "message": MessageSegment.reply(event.message_id)
+            + _build_upload_migration_hint_text(),
+        },
+    )
+
+
 @save_img_cmd.handle()
 async def save_img_handle(bot: Bot, event: MessageEvent, arp: Arparma, state: T_State):
     """上传语录处理函数"""
@@ -571,7 +676,9 @@ async def save_img_handle(bot: Bot, event: MessageEvent, arp: Arparma, state: T_
                 break
 
     if not target_image:
-        await save_img_cmd.finish("请直接发送「上传+图片」或回复图片消息来上传语录")
+        await save_img_cmd.finish(
+            "请直接发送「上传语录+图片」或回复图片消息来上传语录"
+        )
 
     # 3. 统一提取图片二进制数据
     img_data = b""
@@ -665,7 +772,8 @@ async def save_img_handle(bot: Bot, event: MessageEvent, arp: Arparma, state: T_
                     "send_group_msg",
                     **{
                         "group_id": int(group_id),
-                        "message": MessageSegment.reply(message_id) + "保存成功",
+                        "message": MessageSegment.reply(message_id)
+                        + _build_upload_success_text(),
                     },
                 )
             else:
@@ -914,8 +1022,7 @@ def _is_message_renderable(message_dict: dict) -> bool:
     return any(seg.get("type") in {"text", "image"} for seg in message_segments)
 
 
-@make_record_cmd.handle()
-async def make_record_handle(
+async def _handle_record_command(
     bot: Bot, event: MessageEvent, arp: Arparma, session: Uninfo
 ):
     """记录语录处理函数 (重构后)"""
@@ -929,7 +1036,7 @@ async def make_record_handle(
     )
 
     if error:
-        await make_record_cmd.finish(error)
+        await MessageUtils.build_message(error).send(target=event, bot=bot)
         return
 
     assert img_data is not None
@@ -961,7 +1068,9 @@ async def make_record_handle(
         )
 
         if quote and is_new:
-            await MessageUtils.build_message(img_data).send(target=event, bot=bot)
+            await MessageUtils.build_message(
+                _build_record_success_message(img_data)
+            ).send(target=event, bot=bot)
         else:
             if os.path.exists(image_path):
                 os.remove(image_path)
@@ -974,6 +1083,20 @@ async def make_record_handle(
         await MessageUtils.build_message("保存语录时发生意外，请稍后再试").send(
             target=event, bot=bot
         )
+
+
+@make_record_cmd.handle()
+async def make_record_handle(
+    bot: Bot, event: MessageEvent, arp: Arparma, session: Uninfo
+):
+    await _handle_record_command(bot, event, arp, session)
+
+
+@legacy_record_cmd.handle()
+async def legacy_record_handle(
+    bot: Bot, event: MessageEvent, arp: Arparma, session: Uninfo
+):
+    await _handle_record_command(bot, event, arp, session)
 
 
 @generate_quote_cmd.handle()

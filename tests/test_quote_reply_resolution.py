@@ -373,7 +373,7 @@ def test_extract_quote_query_and_count_cases(
 
 
 def test_make_record_alc_supports_compact_no_space_input():
-    result = upload_commands.make_record_alc.parse("记录aaa bbb")
+    result = upload_commands.make_record_alc.parse("记录语录aaa bbb")
 
     assert result.matched is True
     assert tuple(part.text for part in result.all_matched_args["parts"]) == (
@@ -769,7 +769,9 @@ async def test_make_record_handle_writes_dual_mention_tags(monkeypatch, tmp_path
 
     assert captured["group_id"] == "123"
     assert captured["manual_tags"] == ["user:114514", "群主_张三"]
-    assert sent_messages == [b"generated-image"]
+    assert sent_messages == [
+        upload_commands._build_record_success_message(b"generated-image")
+    ]
 
 
 @pytest.mark.asyncio
