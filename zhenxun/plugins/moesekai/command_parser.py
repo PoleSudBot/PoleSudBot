@@ -97,6 +97,15 @@ def _normalize_qq(value: str | None, at_targets: list[str]) -> str | None:
     return None
 
 
+def _is_valid_compact_game_id_suffix(raw_rest: str, game_id: str) -> bool:
+    compact_suffix = bool(raw_rest) and not raw_rest[:1].isspace()
+    if not compact_suffix:
+        return True
+    # 对“绑定123...”这类紧跟写法，只接受长度合法的纯数字游戏 ID，
+    # 避免普通聊天或短数字片段误触发后继续落到 service 层报错提示。
+    return game_id.isdigit() and 13 <= len(game_id) <= 20
+
+
 def _parse_optional_event_command(
     text: str,
     names: tuple[str, ...],
@@ -171,14 +180,8 @@ def _parse_archive_query(text: str, at_targets: list[str]) -> ParsedCommand | No
         return ParsedCommand("query_archive", text, server=server, error="档案查询不能同时指定游戏ID和 @用户")
     if at_targets:
         return ParsedCommand("query_archive", text, server=server, target_user_id=at_targets[0])
-    # 对“个人档案123...”这种紧跟写法，只接受纯数字 UID；
-    # 其它尾随文本或位数明显不合法的数字都直接忽略，
-    # 避免普通聊天或短数字片段被误识别成档案查询并回错误提示。
-    if compact_suffix and rest:
-        if not rest.isdigit():
-            return None
-        if not 13 <= len(rest) <= 20:
-            return None
+    if rest and not _is_valid_compact_game_id_suffix(raw_rest, rest):
+        return None
     return ParsedCommand("query_archive", text, server=server, game_id=rest or None)
 
 
@@ -528,11 +531,13 @@ def parse_command(event: MessageEvent) -> ParsedCommand | None:
 
     matched = _match_command(text, ("绑定",))
     if matched:
-        prefix, rest = matched
-        server, rest = _consume_server(prefix, rest)
+        prefix, raw_rest = matched
+        server, rest = _consume_server(prefix, raw_rest)
         game_id = rest.strip()
         if not game_id:
             return ParsedCommand("bind", text, server=server, error="用法: 绑定 [区服] <游戏ID>")
+        if not _is_valid_compact_game_id_suffix(raw_rest, game_id):
+            return None
         return ParsedCommand("bind", text, server=server, game_id=game_id)
 
     matched = _match_command(text, ("解绑",))

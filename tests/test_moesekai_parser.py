@@ -110,6 +110,32 @@ def test_parse_bind_without_space_before_game_id():
     assert parsed.game_id == "1234567890123"
 
 
+def test_parse_bind_with_prefix_without_space_before_game_id():
+    parsed = parse_command(FakeEvent("cn绑定1234567890123"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "bind"
+    assert parsed.server == "cn"
+    assert parsed.game_id == "1234567890123"
+
+
+def test_parse_bind_compact_non_digit_suffix_is_ignored():
+    assert parse_command(FakeEvent("绑定abc")) is None  # type: ignore[arg-type]
+    assert parse_command(FakeEvent("cn绑定abc")) is None  # type: ignore[arg-type]
+
+
+def test_parse_bind_compact_short_numeric_suffix_is_ignored():
+    assert parse_command(FakeEvent("绑定123")) is None  # type: ignore[arg-type]
+    assert parse_command(FakeEvent("jp绑定123")) is None  # type: ignore[arg-type]
+
+
+def test_parse_bind_with_space_keeps_explicit_validation_path():
+    parsed = parse_command(FakeEvent("绑定 123"))  # type: ignore[arg-type]
+    assert parsed is not None
+    assert parsed.action == "bind"
+    assert parsed.server is None
+    assert parsed.game_id == "123"
+
+
 def test_parse_all_public_deck_commands_are_hidden():
     hidden_commands = [
         "活动组卡 195 --music 226 --difficulty hard --live-type multi",
