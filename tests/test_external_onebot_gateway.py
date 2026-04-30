@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import nonebot
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegment
 import pytest
@@ -11,6 +13,7 @@ from zhenxun.services.external_onebot_gateway import (
     ExternalOneBotAppSpec,
     ExternalOneBotSession,
     QueuedOneBotEvent,
+    _OneBotSelfIdUnavailable,
     apply_auto_slash,
     apply_extra_prefix_policy,
     apply_token_rewrites,
@@ -266,6 +269,17 @@ def test_build_event_payload_rewrites_segments_and_raw_message():
     assert payload["message"][1]["data"]["text"] == " /查卡"
     assert payload["raw_message"] == "[CQ:at,qq=123] /查卡"
     assert "original_message" not in payload
+
+
+@pytest.mark.asyncio
+async def test_run_connection_waits_when_runtime_self_id_unavailable(monkeypatch):
+    settings = replace(_settings(), virtual_self_id="", route_bot_self_id="")
+    session = _session(settings)
+
+    monkeypatch.setattr(nonebot, "get_bots", lambda: {})
+
+    with pytest.raises(_OneBotSelfIdUnavailable):
+        await session._run_connection(settings)
 
 
 @pytest.mark.asyncio

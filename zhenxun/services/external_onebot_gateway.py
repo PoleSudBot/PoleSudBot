@@ -44,6 +44,12 @@ _REPLY_CQ_PATTERN = re.compile(r"\[CQ:reply,(?:[^\]]*?,)?id=([^,\]]+)")
 _TEXT_WHITESPACE_PATTERN = re.compile(r"^(\s*)(.*)$", re.S)
 
 
+class _OneBotSelfIdUnavailable(RuntimeError):
+    """Local OneBot adapter has not connected yet, so lifecycle self_id is unknown."""
+
+    pass
+
+
 @dataclass(frozen=True)
 class ExternalOneBotAppSpec:
     name: str
@@ -486,6 +492,15 @@ class ExternalOneBotSession:
                 backoff = 1.0
             except asyncio.CancelledError:
                 raise
+            except _OneBotSelfIdUnavailable:
+                self._log_throttled(
+                    "wait_runtime_self_id",
+                    (
+                        f"{self.spec.display_name} 等待 OneBot V11 bot 连接后"
+                        "再建立外部连接。"
+                    ),
+                )
+                backoff = 1.0
             except Exception as exc:
                 self._log_throttled(
                     "connect_failed",
@@ -511,7 +526,9 @@ class ExternalOneBotSession:
         )
         runtime_self_id = self._resolve_runtime_self_id(settings)
         if runtime_self_id is None:
-            raise RuntimeError("no OneBot self_id available for lifecycle event")
+            raise _OneBotSelfIdUnavailable(
+                "no OneBot self_id available for lifecycle event"
+            )
         async with websockets.connect(
             settings.ws_url,
             additional_headers=headers,
