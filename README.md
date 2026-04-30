@@ -1,3 +1,32 @@
+<!-- markdownlint-disable MD033 MD041 -->
+<div align="center">
+  <img src="./docs/banner.webp" alt="PoleSudBot" width="100%" />
+</div>
+
+<div align="center">
+  <a href="./LICENSE">
+    <img src="https://img.shields.io/badge/license-AGPL%203.0-FE7D37" alt="license">
+  </a>
+  <a href="https://www.python.org">
+    <img src="https://img.shields.io/badge/Python-3.10%2B-blue" alt="python">
+  </a>
+  <a href="https://nonebot.dev/">
+    <img src="https://img.shields.io/badge/NoneBot2-v2.3%2B-EA5252" alt="nonebot">
+  </a>
+  <a href="https://onebot.dev/">
+    <img src="https://img.shields.io/badge/OneBot-v11-black" alt="onebot">
+  </a>
+  <a href="https://github.com/Microsoft/pyright">
+    <img src="https://img.shields.io/badge/types-pyright-797952.svg?logo=python&logoColor=edb641" alt="pyright">
+  </a>
+  <a href="https://github.com/astral-sh/ruff">
+    <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json" alt="ruff">
+  </a>
+  <a href="https://deepwiki.com/PoleSudBot/Bot">
+    <img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki">
+  </a>
+</div>
+
 # PoleSudBot
 
 PoleSudBot 是一个基于 [zhenxun_bot](https://github.com/zhenxun-org/zhenxun_bot) 修改维护的 Bot 项目。
@@ -23,6 +52,8 @@ uv run bot.py
 ```bash
 uv run --no-project nbm.py update
 ```
+
+`update` 会自动忽略并覆盖主仓库中本地漂移的 `uv.lock`；若主仓库还有其他已跟踪修改，仍会立即中止，需先手动清理工作区。主仓库更新成功后，后续 resources、插件和 sidecar 仓库会按仓库逐个同步；单仓库失败不会打断剩余同步，命令结束时会统一汇总成功/失败情况，并在存在失败项时返回非零退出码。
 
 ## 简单配置
 
