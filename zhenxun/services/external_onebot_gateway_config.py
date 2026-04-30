@@ -21,7 +21,12 @@ DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 5.0
 
 DEFAULT_USER_FILTER_MODE = "blacklist"
 DEFAULT_GROUP_FILTER_MODE = "blacklist"
-DEFAULT_CONTENT_FILTER_MODE = "on"
+DEFAULT_CONTENT_FILTER_MODE = "blacklist"
+DEFAULT_CONTENT_FILTER_REGEX = [
+    "^生日",
+    "^活动",
+    "^(歌曲|音乐|乐曲)",
+]
 
 DEFAULT_ACTION_ALLOWLIST = [
     "send_group_msg",
@@ -171,8 +176,8 @@ REGISTER_CONFIGS = [
     RegisterConfig(
         module=MODULE_NAME,
         key="CONTENT_FILTER_REGEX",
-        value=[],
-        default_value=[],
+        value=DEFAULT_CONTENT_FILTER_REGEX,
+        default_value=DEFAULT_CONTENT_FILTER_REGEX,
         help="消息内容过滤正则列表",
         type=list,
     ),
