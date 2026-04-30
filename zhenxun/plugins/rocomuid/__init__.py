@@ -10,6 +10,7 @@ from nonebot.rule import Rule
 from nonebot.typing import T_State
 
 from zhenxun.configs.utils import Command, PluginExtraData, PluginSetting
+from zhenxun.plugins.rocomuid_helper import run_rocomuid_local_action
 from zhenxun.services.external_bot_bridge import (
     BridgeConnectionTimeout,
     BridgeDependencyUnavailable,
@@ -84,8 +85,16 @@ def _mark_silent_no_response(matcher: Matcher) -> None:
     )
 
 
+async def _send_local_notice(message: str) -> None:
+    await MessageUtils.build_message(message).send(reply_to=True)
+
+
+async def _finish_local_notice(message: str) -> None:
+    await MessageUtils.build_message(message).finish(reply_to=True)
+
+
 @matcher.handle()
-async def _(
+async def handle_rocomuid_message(
     bot: OneBotV11Bot,
     event: OneBotV11MessageEvent,
     matcher: Matcher,
@@ -94,25 +103,39 @@ async def _(
         event, OneBotV11MessageEvent
     ):
         await _finish_local_error(matcher, "洛克助手当前仅支持 OneBot V11 协议。")
+        return
 
     try:
-        sent_count = await external_bot_bridge.stream_request(bot, event)
+        # 敏感指令先在本地给出风险说明，
+        # 避免用户长时间等待图片或二维码期间看不到来源边界。
+        sent_count = await run_rocomuid_local_action(
+            str(matcher.state.get("rocomuid_plain_text", "") or ""),
+            matcher.state,
+            send_message=_send_local_notice,
+            finish_message=_finish_local_notice,
+            continue_handler=lambda: external_bot_bridge.stream_request(
+                bot, event
+            ),
+        )
     except BridgeDependencyUnavailable:
         await _finish_local_error(
             matcher,
             "洛克助手依赖暂不可用，"
             "请先执行初始化命令准备 sidecar/.runtime 运行目录。",
         )
+        return
     except BridgeConnectionTimeout:
         await _finish_local_error(
             matcher,
             "洛克助手暂时不可用，请先启动相关服务后再试。",
         )
+        return
     except BridgeServiceWarmingUp:
         await _finish_local_error(
             matcher,
             "外部服务启动中，请稍后再试。",
         )
+        return
     except BridgeResponseTimeout:
         _mark_silent_no_response(matcher)
         return
@@ -121,11 +144,16 @@ async def _(
             matcher,
             "洛克助手返回了当前协议暂不支持的响应内容。",
         )
+        return
     except BridgeUnsupportedEvent:
         await _finish_local_error(
             matcher,
             "当前消息暂不支持发送到洛克助手。",
         )
+        return
+
+    if sent_count is None:
+        return
 
     if sent_count <= 0:
         _mark_silent_no_response(matcher)
