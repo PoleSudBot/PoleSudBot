@@ -43,6 +43,7 @@ def _settings(
         attribution_sweep_interval_seconds=15,
         event_queue_max_size=1000,
         enable_auto_slash=True,
+        auto_slash_disabled_group_ids=set(),
         heartbeat_interval_seconds=5,
         action_allowlist=action_allowlist or {"get_status"},
         user_filter=IdFilterSettings(mode="blacklist", ids=set()),
@@ -62,6 +63,34 @@ def _session(settings: ExternalOneBotAppSettings) -> ExternalOneBotSession:
             plugin_module="pjsk",
             settings_factory=lambda: settings,
         )
+    )
+
+
+def _group_event(text: str, *, group_id: int = 444) -> GroupMessageEvent:
+    return GroupMessageEvent(
+        time=1,
+        self_id=111,
+        post_type="message",
+        sub_type="normal",
+        user_id=222,
+        message_type="group",
+        message_id=333,
+        message=Message([MessageSegment.text(text)]),
+        original_message=Message([MessageSegment.text(text)]),
+        raw_message=text,
+        font=0,
+        sender={
+            "user_id": 222,
+            "nickname": "tester",
+            "card": "",
+            "sex": "unknown",
+            "age": 0,
+            "area": "",
+            "level": "",
+            "role": "member",
+            "title": "",
+        },
+        group_id=group_id,
     )
 
 
@@ -269,6 +298,86 @@ def test_build_event_payload_rewrites_segments_and_raw_message():
     assert payload["message"][1]["data"]["text"] == " /查卡"
     assert payload["raw_message"] == "[CQ:at,qq=123] /查卡"
     assert "original_message" not in payload
+
+
+def test_build_event_payload_skips_auto_slash_for_disabled_group():
+    settings = replace(_settings(), auto_slash_disabled_group_ids={"444"})
+    session = _session(settings)
+
+    payload = session._build_event_payload(
+        QueuedOneBotEvent("111", _group_event("查卡", group_id=444)),
+        settings,
+    )
+
+    assert payload is not None
+    assert payload["message"][0]["data"]["text"] == "查卡"
+    assert payload["raw_message"] == "查卡"
+
+
+def test_build_event_payload_keeps_explicit_slash_for_disabled_group():
+    settings = replace(_settings(), auto_slash_disabled_group_ids={"444"})
+    session = _session(settings)
+
+    payload = session._build_event_payload(
+        QueuedOneBotEvent("111", _group_event("/查卡", group_id=444)),
+        settings,
+    )
+
+    assert payload is not None
+    assert payload["message"][0]["data"]["text"] == "/查卡"
+    assert payload["raw_message"] == "/查卡"
+
+
+def test_build_event_payload_auto_slash_still_applies_outside_disabled_group():
+    settings = replace(_settings(), auto_slash_disabled_group_ids={"444"})
+    session = _session(settings)
+
+    payload = session._build_event_payload(
+        QueuedOneBotEvent("111", _group_event("查卡", group_id=555)),
+        settings,
+    )
+
+    assert payload is not None
+    assert payload["message"][0]["data"]["text"] == "/查卡"
+    assert payload["raw_message"] == "/查卡"
+
+
+def test_build_event_payload_global_auto_slash_switch_has_precedence():
+    settings = replace(
+        _settings(),
+        enable_auto_slash=False,
+        auto_slash_disabled_group_ids=set(),
+    )
+    session = _session(settings)
+
+    payload = session._build_event_payload(
+        QueuedOneBotEvent("111", _group_event("查卡", group_id=555)),
+        settings,
+    )
+
+    assert payload is not None
+    assert payload["message"][0]["data"]["text"] == "查卡"
+    assert payload["raw_message"] == "查卡"
+
+
+def test_build_event_payload_group_filter_remains_hard_block():
+    settings = replace(
+        _settings(),
+        group_filter=IdFilterSettings(mode="blacklist", ids={"444"}),
+    )
+    session = _session(settings)
+
+    explicit_payload = session._build_event_payload(
+        QueuedOneBotEvent("111", _group_event("/查卡", group_id=444)),
+        settings,
+    )
+    implicit_payload = session._build_event_payload(
+        QueuedOneBotEvent("111", _group_event("查卡", group_id=444)),
+        settings,
+    )
+
+    assert explicit_payload is None
+    assert implicit_payload is None
 
 
 @pytest.mark.asyncio

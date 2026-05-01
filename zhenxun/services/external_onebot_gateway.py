@@ -337,6 +337,17 @@ def content_filter_allows(
     return not matched
 
 
+def should_apply_auto_slash(
+    settings: ExternalOneBotAppSettings,
+    group_id: str | int | None,
+) -> bool:
+    if not settings.enable_auto_slash:
+        return False
+    if group_id is None:
+        return True
+    return str(group_id) not in settings.auto_slash_disabled_group_ids
+
+
 def extract_reply_id(message: Any) -> str | None:
     if isinstance(message, str):
         match = _REPLY_CQ_PATTERN.search(message)
@@ -692,7 +703,11 @@ class ExternalOneBotSession:
         ):
             return None
 
-        apply_auto_slash(segments, enabled=settings.enable_auto_slash)
+        # auto-slash 是内容改写策略；分群禁用只跳过补斜杠，不改变硬拦截语义。
+        apply_auto_slash(
+            segments,
+            enabled=should_apply_auto_slash(settings, group_id),
+        )
         apply_token_rewrites(segments, settings.token_rewrites)
         payload["message"] = segments
         payload["raw_message"] = str(normalize_action_message(segments))

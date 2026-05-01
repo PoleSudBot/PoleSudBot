@@ -17,6 +17,7 @@ DEFAULT_ATTRIBUTION_MAX_SIZE = 10000
 DEFAULT_ATTRIBUTION_SWEEP_INTERVAL_SECONDS = 15
 DEFAULT_EVENT_QUEUE_MAX_SIZE = 1000
 DEFAULT_ENABLE_AUTO_SLASH = True
+DEFAULT_AUTO_SLASH_DISABLED_GROUP_IDS: list[str] = []
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 5.0
 
 DEFAULT_USER_FILTER_MODE = "blacklist"
@@ -119,6 +120,14 @@ REGISTER_CONFIGS = [
     ),
     RegisterConfig(
         module=MODULE_NAME,
+        key="AUTO_SLASH_DISABLED_GROUP_IDS",
+        value=DEFAULT_AUTO_SLASH_DISABLED_GROUP_IDS,
+        default_value=DEFAULT_AUTO_SLASH_DISABLED_GROUP_IDS,
+        help="这些群只使用显式 / 指令，不自动补 /",
+        type=list,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
         key="HEARTBEAT_INTERVAL_SECONDS",
         value=DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
         default_value=DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
@@ -154,7 +163,7 @@ REGISTER_CONFIGS = [
         key="GROUP_FILTER_MODE",
         value=DEFAULT_GROUP_FILTER_MODE,
         default_value=DEFAULT_GROUP_FILTER_MODE,
-        help="群过滤模式：blacklist 或 whitelist",
+        help="高级群硬拦截模式：blacklist 或 whitelist；日常群启停请用 WebUI 插件开关",
         type=str,
     ),
     RegisterConfig(
@@ -162,7 +171,7 @@ REGISTER_CONFIGS = [
         key="GROUP_FILTER_IDS",
         value=[],
         default_value=[],
-        help="群过滤 QQ 列表",
+        help="高级群硬拦截 QQ 列表；命中后显式 / 与无斜杠消息都不转发",
         type=list,
     ),
     RegisterConfig(
@@ -261,6 +270,7 @@ class ExternalOneBotAppSettings:
     attribution_sweep_interval_seconds: float
     event_queue_max_size: int
     enable_auto_slash: bool
+    auto_slash_disabled_group_ids: set[str]
     heartbeat_interval_seconds: float
     action_allowlist: set[str]
     user_filter: IdFilterSettings
@@ -370,6 +380,12 @@ def get_pjsk_app_settings() -> ExternalOneBotAppSettings:
         ),
         enable_auto_slash=bool(
             config_group.get("ENABLE_AUTO_SLASH", DEFAULT_ENABLE_AUTO_SLASH)
+        ),
+        auto_slash_disabled_group_ids=_as_str_set(
+            config_group.get(
+                "AUTO_SLASH_DISABLED_GROUP_IDS",
+                DEFAULT_AUTO_SLASH_DISABLED_GROUP_IDS,
+            )
         ),
         heartbeat_interval_seconds=max(
             1.0,
