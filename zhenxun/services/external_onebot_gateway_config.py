@@ -23,10 +23,13 @@ DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 5.0
 DEFAULT_USER_FILTER_MODE = "blacklist"
 DEFAULT_GROUP_FILTER_MODE = "blacklist"
 DEFAULT_CONTENT_FILTER_MODE = "blacklist"
+# 默认只拦常见自然语言误触发；负向前瞻用于保留低误触发的 Haruki 无斜杠命令别名。
 DEFAULT_CONTENT_FILTER_REGEX = [
-    "^生日",
-    "^活动",
-    "^(歌曲|音乐|乐曲)",
+    r"^生日(?!$|\s)",
+    r"^活动(?!$|\s|\d|-|[A-Za-z]+\d|列表|一览|记录|组卡|组队|卡组|配)",
+    r"^歌曲(?!列表|一览|定数|奖励|挖矿|进度|排行|别名|meta)",
+    r"^乐曲(?!列表|一览)",
+    "^音乐",
 ]
 
 DEFAULT_ACTION_ALLOWLIST = [

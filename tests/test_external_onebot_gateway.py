@@ -23,6 +23,7 @@ from zhenxun.services.external_onebot_gateway import (
     normalize_action_message,
 )
 from zhenxun.services.external_onebot_gateway_config import (
+    DEFAULT_CONTENT_FILTER_REGEX,
     ContentFilterSettings,
     ExternalOneBotAppSettings,
     IdFilterSettings,
@@ -141,6 +142,58 @@ def test_content_filter_modes():
     assert content_filter_allows(whitelist, "查卡 957") is True
     assert content_filter_allows(whitelist, "你好") is False
     assert content_filter_allows(whitelist, "你好", bypass=True) is True
+
+
+def test_default_content_filter_preserves_low_misfire_haruki_commands():
+    settings = ContentFilterSettings(
+        mode="blacklist",
+        patterns=tuple(DEFAULT_CONTENT_FILTER_REGEX),
+    )
+    allowed_texts = [
+        "生日",
+        "生日 miku",
+        "活动",
+        "活动 123",
+        "活动123",
+        "活动mnr1",
+        "活动列表",
+        "活动一览",
+        "活动记录",
+        "活动组卡",
+        "活动组队",
+        "活动卡组",
+        "活动配",
+        "活动配队",
+        "歌曲列表",
+        "歌曲一览",
+        "歌曲定数",
+        "歌曲奖励",
+        "歌曲挖矿",
+        "歌曲进度",
+        "歌曲排行",
+        "歌曲别名",
+        "歌曲别名待审核",
+        "歌曲meta",
+        "乐曲列表",
+        "乐曲一览",
+    ]
+    blocked_texts = [
+        "生日快乐",
+        "活动快乐",
+        "活动真多",
+        "歌曲",
+        "歌曲 六兆年",
+        "歌曲真好听",
+        "乐曲",
+        "乐曲 六兆年",
+        "乐曲真好听",
+        "音乐真好听",
+    ]
+
+    for text in allowed_texts:
+        assert content_filter_allows(settings, text), text
+    for text in blocked_texts:
+        assert not content_filter_allows(settings, text), text
 
 
 def test_extract_reply_id_from_message_array_and_cq_string():
