@@ -8,8 +8,11 @@ import pytest
 
 nonebot.init()
 
+from zhenxun.services import external_onebot_gateway as gateway_module
 from zhenxun.services.external_onebot_gateway import (
     AttributionCache,
+    AutoSlashFuse,
+    EchoSourceTracker,
     ExternalOneBotAppSpec,
     ExternalOneBotSession,
     QueuedOneBotEvent,
@@ -45,6 +48,13 @@ def _settings(
         event_queue_max_size=1000,
         enable_auto_slash=True,
         auto_slash_disabled_group_ids=set(),
+        auto_slash_fuse_enabled=True,
+        auto_slash_fuse_echo_source_seconds=3,
+        auto_slash_fuse_window_seconds=15,
+        auto_slash_fuse_max_replies=4,
+        auto_slash_fuse_suspend_seconds=30,
+        auto_slash_fuse_group_notice_enabled=True,
+        auto_slash_fuse_superuser_notice_enabled=True,
         heartbeat_interval_seconds=5,
         action_allowlist=action_allowlist or {"get_status"},
         user_filter=IdFilterSettings(mode="blacklist", ids=set()),
@@ -344,9 +354,14 @@ def test_build_event_payload_rewrites_segments_and_raw_message():
     )
     session = _session(_settings())
 
-    payload = session._build_event_payload(QueuedOneBotEvent("111", event), _settings())
+    built_event = session._build_event_payload(
+        QueuedOneBotEvent("111", event), _settings()
+    )
 
-    assert payload is not None
+    assert built_event is not None
+    assert built_event.auto_slash_applied is True
+    assert built_event.source_plain_text == "查卡"
+    payload = built_event.payload
     assert payload["self_id"] == 999
     assert payload["message"][1]["data"]["text"] == " /查卡"
     assert payload["raw_message"] == "[CQ:at,qq=123] /查卡"
@@ -357,12 +372,14 @@ def test_build_event_payload_skips_auto_slash_for_disabled_group():
     settings = replace(_settings(), auto_slash_disabled_group_ids={"444"})
     session = _session(settings)
 
-    payload = session._build_event_payload(
+    built_event = session._build_event_payload(
         QueuedOneBotEvent("111", _group_event("查卡", group_id=444)),
         settings,
     )
 
-    assert payload is not None
+    assert built_event is not None
+    assert built_event.auto_slash_applied is False
+    payload = built_event.payload
     assert payload["message"][0]["data"]["text"] == "查卡"
     assert payload["raw_message"] == "查卡"
 
@@ -371,12 +388,14 @@ def test_build_event_payload_keeps_explicit_slash_for_disabled_group():
     settings = replace(_settings(), auto_slash_disabled_group_ids={"444"})
     session = _session(settings)
 
-    payload = session._build_event_payload(
+    built_event = session._build_event_payload(
         QueuedOneBotEvent("111", _group_event("/查卡", group_id=444)),
         settings,
     )
 
-    assert payload is not None
+    assert built_event is not None
+    assert built_event.auto_slash_applied is False
+    payload = built_event.payload
     assert payload["message"][0]["data"]["text"] == "/查卡"
     assert payload["raw_message"] == "/查卡"
 
@@ -385,12 +404,14 @@ def test_build_event_payload_auto_slash_still_applies_outside_disabled_group():
     settings = replace(_settings(), auto_slash_disabled_group_ids={"444"})
     session = _session(settings)
 
-    payload = session._build_event_payload(
+    built_event = session._build_event_payload(
         QueuedOneBotEvent("111", _group_event("查卡", group_id=555)),
         settings,
     )
 
-    assert payload is not None
+    assert built_event is not None
+    assert built_event.auto_slash_applied is True
+    payload = built_event.payload
     assert payload["message"][0]["data"]["text"] == "/查卡"
     assert payload["raw_message"] == "/查卡"
 
@@ -403,12 +424,14 @@ def test_build_event_payload_global_auto_slash_switch_has_precedence():
     )
     session = _session(settings)
 
-    payload = session._build_event_payload(
+    built_event = session._build_event_payload(
         QueuedOneBotEvent("111", _group_event("查卡", group_id=555)),
         settings,
     )
 
-    assert payload is not None
+    assert built_event is not None
+    assert built_event.auto_slash_applied is False
+    payload = built_event.payload
     assert payload["message"][0]["data"]["text"] == "查卡"
     assert payload["raw_message"] == "查卡"
 
@@ -431,6 +454,301 @@ def test_build_event_payload_group_filter_remains_hard_block():
 
     assert explicit_payload is None
     assert implicit_payload is None
+
+
+def test_echo_source_tracker_keeps_per_source_records():
+    tracker = EchoSourceTracker()
+
+    tracker.put(
+        group_id="444",
+        user_id="user-a",
+        source_message_id="m1",
+        source_auto_slash_applied=True,
+        now=100,
+    )
+    tracker.put(
+        group_id="444",
+        user_id="user-b",
+        source_message_id="m2",
+        source_auto_slash_applied=True,
+        now=101,
+    )
+
+    assert (
+        tracker.get(group_id="444", user_id="user-a", ttl_seconds=3, now=102)
+        is not None
+    )
+    assert (
+        tracker.get(group_id="444", user_id="user-b", ttl_seconds=3, now=102)
+        is not None
+    )
+    assert tracker.sweep(ttl_seconds=3, now=104) == 1
+    assert (
+        tracker.get(group_id="444", user_id="user-a", ttl_seconds=3, now=104)
+        is None
+    )
+    assert (
+        tracker.get(group_id="444", user_id="user-b", ttl_seconds=3, now=104)
+        is not None
+    )
+
+
+def test_build_event_payload_marks_same_source_echo_suspect():
+    settings = _settings()
+    session = _session(settings)
+    session._echo_source_tracker.put(
+        group_id="444",
+        user_id="222",
+        source_message_id="1001",
+        source_auto_slash_applied=True,
+        now=100,
+    )
+
+    built_event = session._build_event_payload(
+        QueuedOneBotEvent("111", _group_event("查卡", group_id=444)),
+        settings,
+        now=102,
+    )
+
+    assert built_event is not None
+    assert built_event.auto_slash_applied is True
+    assert built_event.echo_suspect is True
+    assert built_event.echo_source_gap_seconds == 2
+
+
+def test_build_event_payload_does_not_cross_pollinate_echo_sources():
+    settings = _settings()
+    session = _session(settings)
+    session._echo_source_tracker.put(
+        group_id="444",
+        user_id="333",
+        source_message_id="1001",
+        source_auto_slash_applied=True,
+        now=100,
+    )
+
+    built_event = session._build_event_payload(
+        QueuedOneBotEvent("111", _group_event("查卡", group_id=444)),
+        settings,
+        now=102,
+    )
+
+    assert built_event is not None
+    assert built_event.auto_slash_applied is True
+    assert built_event.echo_suspect is False
+    assert built_event.echo_source_gap_seconds is None
+
+
+def test_build_event_payload_ignores_expired_echo_source():
+    settings = _settings()
+    session = _session(settings)
+    session._echo_source_tracker.put(
+        group_id="444",
+        user_id="222",
+        source_message_id="1001",
+        source_auto_slash_applied=True,
+        now=100,
+    )
+
+    built_event = session._build_event_payload(
+        QueuedOneBotEvent("111", _group_event("查卡", group_id=444)),
+        settings,
+        now=104,
+    )
+
+    assert built_event is not None
+    assert built_event.auto_slash_applied is True
+    assert built_event.echo_suspect is False
+
+
+def test_build_event_payload_requires_auto_slash_for_echo_suspect():
+    settings = replace(_settings(), auto_slash_disabled_group_ids={"444"})
+    session = _session(settings)
+    session._echo_source_tracker.put(
+        group_id="444",
+        user_id="222",
+        source_message_id="1001",
+        source_auto_slash_applied=True,
+        now=100,
+    )
+
+    built_event = session._build_event_payload(
+        QueuedOneBotEvent("111", _group_event("查卡", group_id=444)),
+        settings,
+        now=102,
+    )
+
+    assert built_event is not None
+    assert built_event.auto_slash_applied is False
+    assert built_event.echo_suspect is False
+
+
+def test_auto_slash_fuse_triggers_after_echo_threshold_and_dedupes_reply_id():
+    cache = AttributionCache(ttl_seconds=10, max_size=10)
+    fuse = AutoSlashFuse()
+    base = {
+        "group_id": "444",
+        "source_bot_self_id": "111",
+        "plugin_module": "pjsk",
+        "app_name": "pjsk",
+        "auto_slash_applied": True,
+        "source_plain_text": "活动测试",
+        "echo_suspect": True,
+        "echo_source_gap_seconds": 1.0,
+    }
+
+    cache.put("1", user_id="222", now=100, **base)
+    record = cache.get("1", now=101)
+    assert record is not None
+    assert record.auto_slash_applied is True
+    assert record.source_plain_text == "活动测试"
+
+    assert (
+        fuse.record_reply(
+            attribution=record,
+            reply_id="1",
+            enabled=True,
+            window_seconds=15,
+            max_replies=4,
+            suspend_seconds=30,
+            now=101,
+        )
+        is None
+    )
+    assert (
+        fuse.record_reply(
+            attribution=record,
+            reply_id="1",
+            enabled=True,
+            window_seconds=15,
+            max_replies=4,
+            suspend_seconds=30,
+            now=102,
+        )
+        is None
+    )
+
+    for index, timestamp in ((2, 103), (3, 106)):
+        cache.put(str(index), user_id="222", now=timestamp, **base)
+        next_record = cache.get(str(index), now=timestamp)
+        assert next_record is not None
+        assert (
+            fuse.record_reply(
+                attribution=next_record,
+                reply_id=str(index),
+                enabled=True,
+                window_seconds=15,
+                max_replies=4,
+                suspend_seconds=30,
+                now=timestamp,
+            )
+            is None
+        )
+
+    cache.put("4", user_id="222", now=109, **base)
+    final_record = cache.get("4", now=109)
+    assert final_record is not None
+    trigger = fuse.record_reply(
+        attribution=final_record,
+        reply_id="4",
+        enabled=True,
+        window_seconds=15,
+        max_replies=4,
+        suspend_seconds=30,
+        now=109,
+    )
+
+    assert trigger is not None
+    assert trigger.suspend_until == 139
+    assert fuse.is_suspended(app_name="pjsk", user_id="222", enabled=True, now=110)
+    assert not fuse.is_suspended(app_name="pjsk", user_id="222", enabled=True, now=140)
+    assert fuse.sweep(window_seconds=15, suspend_seconds=30, now=140) == 1
+    assert len(fuse) == 0
+
+
+def test_auto_slash_fuse_ignores_non_echo_attribution():
+    cache = AttributionCache(ttl_seconds=10, max_size=10)
+    fuse = AutoSlashFuse()
+    cache.put(
+        "1",
+        user_id="222",
+        group_id="444",
+        source_bot_self_id="111",
+        plugin_module="pjsk",
+        app_name="pjsk",
+        auto_slash_applied=True,
+        source_plain_text="查卡",
+        echo_suspect=False,
+        now=100,
+    )
+    record = cache.get("1", now=101)
+    assert record is not None
+
+    for index in range(5):
+        assert (
+            fuse.record_reply(
+                attribution=record,
+                reply_id=str(index),
+                enabled=True,
+                window_seconds=15,
+                max_replies=4,
+                suspend_seconds=30,
+                now=101 + index,
+            )
+            is None
+        )
+
+    assert not fuse.is_suspended(app_name="pjsk", user_id="222", enabled=True, now=106)
+
+
+def test_build_event_payload_skips_auto_slash_while_user_fuse_suspended():
+    settings = replace(
+        _settings(),
+        auto_slash_fuse_max_replies=1,
+        auto_slash_fuse_window_seconds=5,
+        auto_slash_fuse_suspend_seconds=30,
+    )
+    session = _session(settings)
+    cache = AttributionCache(ttl_seconds=10, max_size=10)
+    cache.put(
+        "1",
+        user_id="222",
+        group_id="444",
+        source_bot_self_id="111",
+        plugin_module="pjsk",
+        app_name="pjsk",
+        auto_slash_applied=True,
+        source_plain_text="查卡",
+        echo_suspect=True,
+        echo_source_gap_seconds=1.0,
+        now=100,
+    )
+    record = cache.get("1", now=101)
+    assert record is not None
+    session._auto_slash_fuse.record_reply(
+        attribution=record,
+        reply_id="1",
+        enabled=True,
+        window_seconds=5,
+        max_replies=1,
+        suspend_seconds=30,
+    )
+
+    implicit = session._build_event_payload(
+        QueuedOneBotEvent("111", _group_event("查卡", group_id=444)),
+        settings,
+    )
+    explicit = session._build_event_payload(
+        QueuedOneBotEvent("111", _group_event("/查卡", group_id=444)),
+        settings,
+    )
+
+    assert implicit is not None
+    assert implicit.auto_slash_applied is False
+    assert implicit.payload["message"][0]["data"]["text"] == "查卡"
+    assert explicit is not None
+    assert explicit.auto_slash_applied is False
+    assert explicit.payload["message"][0]["data"]["text"] == "/查卡"
 
 
 @pytest.mark.asyncio
@@ -556,3 +874,237 @@ async def test_handle_action_blocks_send_when_plugin_disabled(monkeypatch):
     assert calls == []
     assert sent[0]["status"] == "failed"
     assert sent[0]["echo"] == "e3"
+
+
+@pytest.mark.asyncio
+async def test_handle_action_without_reply_does_not_count_fuse(monkeypatch):
+    sent: list[dict] = []
+    calls: list[tuple[str, dict]] = []
+    statistics: list[tuple[object, str]] = []
+    session = _session(_settings(action_allowlist={"send_group_msg"}))
+
+    class FakeBot:
+        self_id = "999"
+
+        async def call_api(self, action: str, **params):
+            calls.append((action, params))
+            return {"message_id": 2001}
+
+    async def fake_send(payload: dict):
+        sent.append(payload)
+
+    async def fake_can_send(bot, action, params):
+        return True
+
+    async def fake_record_statistics(attr, bot_id):
+        statistics.append((attr, bot_id))
+
+    monkeypatch.setattr(
+        session,
+        "_resolve_action_bot",
+        lambda settings, attr: FakeBot(),
+    )
+    monkeypatch.setattr(session, "_can_send_action", fake_can_send)
+    monkeypatch.setattr(session, "_record_statistics", fake_record_statistics)
+    monkeypatch.setattr(session, "_send_action_response", fake_send)
+
+    await session._handle_action(
+        {
+            "action": "send_group_msg",
+            "params": {"group_id": 444, "message": "ok"},
+            "echo": "e4",
+        }
+    )
+
+    assert calls == [("send_group_msg", {"group_id": 444, "message": "ok"})]
+    assert statistics == []
+    assert len(session._auto_slash_fuse) == 0
+    assert sent[0]["status"] == "ok"
+    assert sent[0]["echo"] == "e4"
+
+
+@pytest.mark.asyncio
+async def test_handle_action_with_expired_reply_does_not_count_fuse(monkeypatch):
+    sent: list[dict] = []
+    calls: list[tuple[str, dict]] = []
+    statistics: list[tuple[object, str]] = []
+    session = _session(_settings(action_allowlist={"send_group_msg"}))
+    session._attribution.put(
+        "1001",
+        user_id="222",
+        group_id="444",
+        source_bot_self_id="999",
+        plugin_module="pjsk",
+        app_name="pjsk",
+        auto_slash_applied=True,
+        source_plain_text="活动测试",
+        now=100,
+    )
+
+    class FakeBot:
+        self_id = "999"
+
+        async def call_api(self, action: str, **params):
+            calls.append((action, params))
+            return {"message_id": 2001}
+
+    async def fake_send(payload: dict):
+        sent.append(payload)
+
+    async def fake_can_send(bot, action, params):
+        return True
+
+    async def fake_record_statistics(attr, bot_id):
+        statistics.append((attr, bot_id))
+
+    monkeypatch.setattr(
+        session._attribution,
+        "get",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        session,
+        "_resolve_action_bot",
+        lambda settings, attr: FakeBot(),
+    )
+    monkeypatch.setattr(session, "_can_send_action", fake_can_send)
+    monkeypatch.setattr(session, "_record_statistics", fake_record_statistics)
+    monkeypatch.setattr(session, "_send_action_response", fake_send)
+
+    await session._handle_action(
+        {
+            "action": "send_group_msg",
+            "params": {
+                "group_id": 444,
+                "message": [
+                    {"type": "reply", "data": {"id": "1001"}},
+                    {"type": "text", "data": {"text": "ok"}},
+                ],
+            },
+            "echo": "e5",
+        }
+    )
+
+    assert calls[0][0] == "send_group_msg"
+    assert statistics == []
+    assert len(session._auto_slash_fuse) == 0
+    assert sent[0]["status"] == "ok"
+    assert sent[0]["echo"] == "e5"
+
+
+@pytest.mark.asyncio
+async def test_handle_action_triggers_auto_slash_fuse_notices_once(monkeypatch):
+    settings = replace(
+        _settings(action_allowlist={"send_group_msg"}),
+        auto_slash_fuse_max_replies=1,
+        auto_slash_fuse_window_seconds=5,
+        auto_slash_fuse_suspend_seconds=30,
+    )
+    sent: list[dict] = []
+    calls: list[tuple[str, dict]] = []
+    session = _session(settings)
+    session._attribution.put(
+        "1001",
+        user_id="222",
+        group_id="444",
+        source_bot_self_id="999",
+        plugin_module="pjsk",
+        app_name="pjsk",
+        auto_slash_applied=True,
+        source_plain_text="活动测试",
+        echo_suspect=True,
+        echo_source_gap_seconds=1.2,
+    )
+
+    class FakeBot:
+        self_id = "999"
+
+        async def call_api(self, action: str, **params):
+            calls.append((action, params))
+            return {"message_id": len(calls)}
+
+    async def fake_send(payload: dict):
+        sent.append(payload)
+
+    async def fake_can_send(bot, action, params):
+        return True
+
+    async def fake_record_statistics(attr, bot_id):
+        return None
+
+    monkeypatch.setattr(
+        session,
+        "_resolve_action_bot",
+        lambda settings, attr: FakeBot(),
+    )
+    monkeypatch.setattr(session, "_can_send_action", fake_can_send)
+    monkeypatch.setattr(session, "_record_statistics", fake_record_statistics)
+    monkeypatch.setattr(session, "_send_action_response", fake_send)
+    monkeypatch.setattr(
+        gateway_module.driver.config,
+        "superusers",
+        {"10000"},
+        raising=False,
+    )
+
+    def make_payload() -> dict:
+        return {
+            "action": "send_group_msg",
+            "params": {
+                "group_id": 444,
+                "message": [
+                    {"type": "reply", "data": {"id": "1001"}},
+                    {"type": "text", "data": {"text": "ok"}},
+                ],
+            },
+            "echo": "e4",
+        }
+
+    await session._handle_action(make_payload())
+    await session._handle_action(make_payload())
+
+    group_notices = [
+        params["message"]
+        for action, params in calls
+        if action == "send_group_msg" and "疑似在响应 PJSK 回复" in str(params)
+    ]
+    superuser_notices = [
+        params["message"] for action, params in calls if action == "send_private_msg"
+    ]
+    assert len(group_notices) == 1
+    assert "暂停该账号自动补 /" in group_notices[0]
+    assert len(superuser_notices) == 1
+    assert "message_id: 1001" in superuser_notices[0]
+    assert "echo_suspect: True" in superuser_notices[0]
+    assert "echo_gap: 1.2" in superuser_notices[0]
+    assert "source: 活动测试" in superuser_notices[0]
+    assert [item["echo"] for item in sent] == ["e4", "e4"]
+
+
+def test_auto_slash_fuse_superuser_notice_truncates_source_text():
+    session = _session(_settings())
+    cache = AttributionCache(ttl_seconds=10, max_size=10)
+    cache.put(
+        "1001",
+        user_id="222",
+        group_id="444",
+        source_bot_self_id="999",
+        plugin_module="pjsk",
+        app_name="pjsk",
+        auto_slash_applied=True,
+        source_plain_text="x" * 200,
+        echo_suspect=True,
+        echo_source_gap_seconds=1.2,
+        now=100,
+    )
+    record = cache.get("1001", now=101)
+    assert record is not None
+
+    notice = session._build_auto_slash_fuse_superuser_notice(
+        attribution=record,
+        routed_bot_self_id="999",
+        suspend_seconds=30,
+    )
+
+    assert "source: " + "x" * 120 + "..." in notice
+    assert "x" * 121 not in notice

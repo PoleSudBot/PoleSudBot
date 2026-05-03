@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import json
 import random
@@ -42,6 +42,8 @@ LOG_COMMAND = "ExternalOneBotGateway"
 
 _REPLY_CQ_PATTERN = re.compile(r"\[CQ:reply,(?:[^\]]*?,)?id=([^,\]]+)")
 _TEXT_WHITESPACE_PATTERN = re.compile(r"^(\s*)(.*)$", re.S)
+_ECHO_SOURCE_MAX_SIZE = 10000
+_SUPERUSER_NOTICE_TEXT_LIMIT = 120
 
 
 class _OneBotSelfIdUnavailable(RuntimeError):
@@ -65,13 +67,231 @@ class QueuedOneBotEvent:
 
 
 @dataclass(frozen=True)
+class BuiltOneBotEvent:
+    """OneBot event payload plus local-only metadata used for attribution."""
+
+    payload: dict[str, Any]
+    auto_slash_applied: bool
+    source_plain_text: str
+    echo_suspect: bool
+    echo_source_gap_seconds: float | None
+
+
+@dataclass(frozen=True)
 class AttributionRecord:
+    message_id: str
     user_id: str
     group_id: str | None
     source_bot_self_id: str
     plugin_module: str
     app_name: str
+    auto_slash_applied: bool
+    source_plain_text: str
+    echo_suspect: bool
+    echo_source_gap_seconds: float | None
     expires_at: float
+
+
+@dataclass
+class _AutoSlashFuseState:
+    timestamps: deque[float] = field(default_factory=deque)
+    seen_reply_ids: dict[str, float] = field(default_factory=dict)
+    suspend_until: float = 0.0
+
+
+@dataclass(frozen=True)
+class AutoSlashFuseTrigger:
+    suspend_until: float
+
+
+class AutoSlashFuse:
+    """Track users whose same-source auto-slash replies look like a feedback loop."""
+
+    def __init__(self) -> None:
+        self._states: dict[tuple[str, str], _AutoSlashFuseState] = {}
+
+    def is_suspended(
+        self,
+        *,
+        app_name: str,
+        user_id: str | int,
+        enabled: bool,
+        now: float | None = None,
+    ) -> bool:
+        # 熔断只影响 auto-slash 开关，不参与用户/群硬拦截判断。
+        if not enabled:
+            return False
+        current = time.monotonic() if now is None else now
+        state = self._states.get((app_name, str(user_id)))
+        return bool(state and state.suspend_until > current)
+
+    def record_reply(
+        self,
+        *,
+        attribution: AttributionRecord,
+        reply_id: str,
+        enabled: bool,
+        window_seconds: float,
+        max_replies: int,
+        suspend_seconds: float,
+        now: float | None = None,
+    ) -> AutoSlashFuseTrigger | None:
+        # 只把 same-source echo 捕获器标记过的 auto-slash 回复计入窗口。
+        if (
+            not enabled
+            or not attribution.auto_slash_applied
+            or not attribution.echo_suspect
+        ):
+            return None
+        current = time.monotonic() if now is None else now
+        window = max(1.0, float(window_seconds))
+        max_count = max(1, int(max_replies))
+        suspend = max(1.0, float(suspend_seconds))
+        key = (attribution.app_name, attribution.user_id)
+        state = self._states.setdefault(key, _AutoSlashFuseState())
+        self._prune_state(state, current, window, suspend)
+
+        # 同一个 reply_id 往往代表一次 Haruki 指令的多段回复；只记一次，
+        # 否则单次长回复就可能把兜底熔断误打满。
+        if reply_id in state.seen_reply_ids:
+            return None
+        state.seen_reply_ids[reply_id] = current
+        if state.suspend_until > current:
+            return None
+
+        state.timestamps.append(current)
+        if len(state.timestamps) < max_count:
+            return None
+        state.suspend_until = current + suspend
+        state.timestamps.clear()
+        return AutoSlashFuseTrigger(suspend_until=state.suspend_until)
+
+    def sweep(
+        self,
+        *,
+        window_seconds: float,
+        suspend_seconds: float,
+        now: float | None = None,
+    ) -> int:
+        current = time.monotonic() if now is None else now
+        window = max(1.0, float(window_seconds))
+        suspend = max(1.0, float(suspend_seconds))
+        removed = 0
+        for key, state in list(self._states.items()):
+            self._prune_state(state, current, window, suspend)
+            if (
+                not state.timestamps
+                and not state.seen_reply_ids
+                and state.suspend_until <= current
+            ):
+                self._states.pop(key, None)
+                removed += 1
+        return removed
+
+    def clear(self) -> None:
+        self._states.clear()
+
+    def __len__(self) -> int:
+        return len(self._states)
+
+    @staticmethod
+    def _prune_state(
+        state: _AutoSlashFuseState,
+        current: float,
+        window_seconds: float,
+        suspend_seconds: float,
+    ) -> None:
+        while state.timestamps and current - state.timestamps[0] > window_seconds:
+            state.timestamps.popleft()
+        reply_ttl = max(window_seconds, suspend_seconds)
+        for reply_id, seen_at in list(state.seen_reply_ids.items()):
+            if current - seen_at > reply_ttl:
+                state.seen_reply_ids.pop(reply_id, None)
+
+
+@dataclass(frozen=True)
+class EchoSourceRecord:
+    sent_at: float
+    source_message_id: str
+    source_auto_slash_applied: bool
+
+
+class EchoSourceTracker:
+    def __init__(self, max_size: int = _ECHO_SOURCE_MAX_SIZE) -> None:
+        self.max_size = max(1, int(max_size))
+        self._items: dict[tuple[str, str], EchoSourceRecord] = {}
+        self._order: deque[tuple[tuple[str, str], float]] = deque()
+
+    def put(
+        self,
+        *,
+        group_id: str | int | None,
+        user_id: str | int | None,
+        source_message_id: str,
+        source_auto_slash_applied: bool,
+        now: float | None = None,
+    ) -> None:
+        if group_id is None or user_id is None:
+            return
+        current = time.monotonic() if now is None else now
+        key = (str(group_id), str(user_id))
+        record = EchoSourceRecord(
+            sent_at=current,
+            source_message_id=str(source_message_id),
+            source_auto_slash_applied=source_auto_slash_applied,
+        )
+        self._items[key] = record
+        self._order.append((key, current))
+        self._evict_overflow()
+
+    def get(
+        self,
+        *,
+        group_id: str | int | None,
+        user_id: str | int | None,
+        ttl_seconds: float,
+        now: float | None = None,
+    ) -> EchoSourceRecord | None:
+        if group_id is None or user_id is None:
+            return None
+        current = time.monotonic() if now is None else now
+        key = (str(group_id), str(user_id))
+        record = self._items.get(key)
+        if record is None:
+            return None
+        if current - record.sent_at > max(1.0, float(ttl_seconds)):
+            self._items.pop(key, None)
+            return None
+        return record
+
+    def sweep(self, *, ttl_seconds: float, now: float | None = None) -> int:
+        current = time.monotonic() if now is None else now
+        ttl = max(1.0, float(ttl_seconds))
+        removed = 0
+        while self._order:
+            key, sent_at = self._order[0]
+            if current - sent_at <= ttl:
+                break
+            self._order.popleft()
+            record = self._items.get(key)
+            if record is not None and record.sent_at == sent_at:
+                self._items.pop(key, None)
+                removed += 1
+        return removed
+
+    def clear(self) -> None:
+        self._items.clear()
+        self._order.clear()
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def _evict_overflow(self) -> None:
+        while len(self._items) > self.max_size and self._order:
+            key, sent_at = self._order.popleft()
+            record = self._items.get(key)
+            if record is not None and record.sent_at == sent_at:
+                self._items.pop(key, None)
 
 
 class AttributionCache:
@@ -95,6 +315,10 @@ class AttributionCache:
         source_bot_self_id: str,
         plugin_module: str,
         app_name: str,
+        auto_slash_applied: bool = False,
+        source_plain_text: str = "",
+        echo_suspect: bool = False,
+        echo_source_gap_seconds: float | None = None,
         now: float | None = None,
     ) -> None:
         if not message_id:
@@ -103,11 +327,16 @@ class AttributionCache:
         expires_at = current + self.ttl_seconds
         key = (str(source_bot_self_id), str(message_id))
         record = AttributionRecord(
+            message_id=str(message_id),
             user_id=user_id,
             group_id=group_id,
             source_bot_self_id=source_bot_self_id,
             plugin_module=plugin_module,
             app_name=app_name,
+            auto_slash_applied=auto_slash_applied,
+            source_plain_text=source_plain_text,
+            echo_suspect=echo_suspect,
+            echo_source_gap_seconds=echo_source_gap_seconds,
             expires_at=expires_at,
         )
         self._items[key] = record
@@ -416,6 +645,8 @@ class ExternalOneBotSession:
             settings.attribution_ttl_seconds,
             settings.attribution_max_size,
         )
+        self._auto_slash_fuse = AutoSlashFuse()
+        self._echo_source_tracker = EchoSourceTracker()
         self._event_queue: asyncio.Queue[QueuedOneBotEvent] = asyncio.Queue(
             maxsize=settings.event_queue_max_size
         )
@@ -492,6 +723,8 @@ class ExternalOneBotSession:
         self._connected.clear()
         self._runtime_self_id = None
         self._attribution.clear()
+        self._auto_slash_fuse.clear()
+        self._echo_source_tracker.clear()
         self._drain_event_queue()
 
     async def _connection_loop(self) -> None:
@@ -638,6 +871,13 @@ class ExternalOneBotSession:
             )
             await asyncio.sleep(settings.attribution_sweep_interval_seconds)
             self._attribution.sweep()
+            self._auto_slash_fuse.sweep(
+                window_seconds=settings.auto_slash_fuse_window_seconds,
+                suspend_seconds=settings.auto_slash_fuse_suspend_seconds,
+            )
+            self._echo_source_tracker.sweep(
+                ttl_seconds=settings.auto_slash_fuse_echo_source_seconds
+            )
 
     async def _send_queued_event(self, item: QueuedOneBotEvent) -> None:
         settings = self.spec.settings_factory()
@@ -645,9 +885,10 @@ class ExternalOneBotSession:
             settings.attribution_ttl_seconds,
             settings.attribution_max_size,
         )
-        payload = self._build_event_payload(item, settings)
-        if payload is None:
+        built_event = self._build_event_payload(item, settings)
+        if built_event is None:
             return
+        payload = built_event.payload
         await self._send_ws(payload)
         message_id = payload.get("message_id")
         if message_id is None:
@@ -659,13 +900,20 @@ class ExternalOneBotSession:
             source_bot_self_id=item.bot_self_id,
             plugin_module=self.spec.plugin_module,
             app_name=self.spec.name,
+            auto_slash_applied=built_event.auto_slash_applied,
+            source_plain_text=built_event.source_plain_text,
+            echo_suspect=built_event.echo_suspect,
+            echo_source_gap_seconds=built_event.echo_source_gap_seconds,
         )
 
     def _build_event_payload(
         self,
         item: QueuedOneBotEvent,
         settings: ExternalOneBotAppSettings,
-    ) -> dict[str, Any] | None:
+        *,
+        now: float | None = None,
+    ) -> BuiltOneBotEvent | None:
+        current = time.monotonic() if now is None else now
         event = item.event
         if not isinstance(event, GroupMessageEvent | PrivateMessageEvent):
             return None
@@ -703,15 +951,43 @@ class ExternalOneBotSession:
         ):
             return None
 
-        # auto-slash 是内容改写策略；分群禁用只跳过补斜杠，不改变硬拦截语义。
-        apply_auto_slash(
+        auto_slash_enabled = should_apply_auto_slash(settings, group_id)
+        if auto_slash_enabled and self._auto_slash_fuse.is_suspended(
+            app_name=self.spec.name,
+            user_id=event.user_id,
+            enabled=settings.auto_slash_fuse_enabled,
+            now=current,
+        ):
+            auto_slash_enabled = False
+
+        # auto-slash 是内容改写策略；分群禁用或用户熔断只跳过补斜杠，
+        # 不改变显式 / 指令转发与硬拦截语义。
+        auto_slash_applied = apply_auto_slash(
             segments,
-            enabled=should_apply_auto_slash(settings, group_id),
+            enabled=auto_slash_enabled,
         )
+        echo_suspect = False
+        echo_source_gap_seconds = None
+        if auto_slash_applied:
+            echo_source = self._echo_source_tracker.get(
+                group_id=group_id,
+                user_id=event.user_id,
+                ttl_seconds=settings.auto_slash_fuse_echo_source_seconds,
+                now=current,
+            )
+            if echo_source is not None and echo_source.source_auto_slash_applied:
+                echo_suspect = True
+                echo_source_gap_seconds = max(0.0, current - echo_source.sent_at)
         apply_token_rewrites(segments, settings.token_rewrites)
         payload["message"] = segments
         payload["raw_message"] = str(normalize_action_message(segments))
-        return payload
+        return BuiltOneBotEvent(
+            payload=payload,
+            auto_slash_applied=auto_slash_applied,
+            source_plain_text=plain_text,
+            echo_suspect=echo_suspect,
+            echo_source_gap_seconds=echo_source_gap_seconds,
+        )
 
     async def _send_lifecycle_event(
         self,
@@ -803,6 +1079,7 @@ class ExternalOneBotSession:
             return
 
         result = await bot.call_api(action, **params)
+        fuse_trigger = None
         if action.startswith("send") and attribution is not None:
             try:
                 await self._record_statistics(attribution, bot.self_id)
@@ -813,9 +1090,25 @@ class ExternalOneBotSession:
                     level="warning",
                     e=exc,
                 )
+            self._record_echo_source(action, params, attribution)
+            fuse_trigger = self._auto_slash_fuse.record_reply(
+                attribution=attribution,
+                reply_id=reply_id or attribution.message_id,
+                enabled=settings.auto_slash_fuse_enabled,
+                window_seconds=settings.auto_slash_fuse_window_seconds,
+                max_replies=settings.auto_slash_fuse_max_replies,
+                suspend_seconds=settings.auto_slash_fuse_suspend_seconds,
+            )
         await self._send_action_response(
             build_action_response(echo=echo, ok=True, data=result)
         )
+        if fuse_trigger is not None and attribution is not None:
+            await self._notify_auto_slash_fuse(
+                bot=bot,
+                attribution=attribution,
+                trigger=fuse_trigger,
+                settings=settings,
+            )
 
     def _resolve_action_bot(
         self,
@@ -938,6 +1231,109 @@ class ExternalOneBotSession:
             plugin_name=attribution.plugin_module,
             create_time=datetime.now(),
             bot_id=str(routed_bot_self_id),
+        )
+
+    def _record_echo_source(
+        self,
+        action: str,
+        params: dict[str, Any],
+        attribution: AttributionRecord,
+    ) -> None:
+        if not attribution.auto_slash_applied:
+            return
+        group_id = self._resolve_action_group_id(action, params)
+        if not group_id:
+            return
+        # 每个被回复账号独立维护短时捕获器，避免大群多人协作互相覆盖。
+        self._echo_source_tracker.put(
+            group_id=group_id,
+            user_id=attribution.user_id,
+            source_message_id=attribution.message_id,
+            source_auto_slash_applied=attribution.auto_slash_applied,
+        )
+
+    async def _notify_auto_slash_fuse(
+        self,
+        *,
+        bot: OneBotV11Bot,
+        attribution: AttributionRecord,
+        trigger: AutoSlashFuseTrigger,
+        settings: ExternalOneBotAppSettings,
+    ) -> None:
+        # 通知是事故定位辅助；任何发送失败都只记录日志，不影响原回复。
+        suspend_seconds = max(
+            1,
+            int(round(trigger.suspend_until - time.monotonic())),
+        )
+        if settings.auto_slash_fuse_group_notice_enabled and attribution.group_id:
+            try:
+                await bot.call_api(
+                    "send_group_msg",
+                    group_id=attribution.group_id,
+                    message=(
+                        f"{self.spec.display_name} 检测到该账号疑似在响应 "
+                        f"{self.spec.display_name} 回复并反复触发自动补 /，"
+                        "已暂停该账号自动补 / "
+                        f"{suspend_seconds} 秒；"
+                        "期间仍可使用 /xxx 指令。"
+                    ),
+                )
+            except Exception as exc:
+                self._log_throttled(
+                    "auto_slash_fuse_group_notice_failed",
+                    f"{self.spec.display_name} auto-slash 熔断群提示发送失败。",
+                    level="warning",
+                    e=exc,
+                )
+
+        if not settings.auto_slash_fuse_superuser_notice_enabled:
+            return
+        superusers = getattr(driver.config, "superusers", set())
+        for superuser_id in sorted(str(uid) for uid in superusers):
+            if not superuser_id:
+                continue
+            try:
+                await bot.call_api(
+                    "send_private_msg",
+                    user_id=superuser_id,
+                    message=self._build_auto_slash_fuse_superuser_notice(
+                        attribution=attribution,
+                        routed_bot_self_id=str(bot.self_id),
+                        suspend_seconds=suspend_seconds,
+                    ),
+                )
+            except Exception as exc:
+                self._log_throttled(
+                    f"auto_slash_fuse_superuser_notice_failed:{superuser_id}",
+                    (
+                        f"{self.spec.display_name} auto-slash 熔断超级用户"
+                        "提示发送失败。"
+                    ),
+                    level="warning",
+                    e=exc,
+                )
+
+    def _build_auto_slash_fuse_superuser_notice(
+        self,
+        *,
+        attribution: AttributionRecord,
+        routed_bot_self_id: str,
+        suspend_seconds: int,
+    ) -> str:
+        source_text = attribution.source_plain_text.replace("\n", "\\n")
+        if len(source_text) > _SUPERUSER_NOTICE_TEXT_LIMIT:
+            source_text = f"{source_text[:_SUPERUSER_NOTICE_TEXT_LIMIT]}..."
+        return (
+            f"{self.spec.display_name} auto-slash 熔断触发\n"
+            f"app: {attribution.app_name}\n"
+            f"user_id: {attribution.user_id}\n"
+            f"group_id: {attribution.group_id or '-'}\n"
+            f"bot_id: {routed_bot_self_id}\n"
+            f"message_id: {attribution.message_id}\n"
+            f"echo_suspect: {attribution.echo_suspect}\n"
+            f"echo_gap: {attribution.echo_source_gap_seconds or '-'}\n"
+            f"cooldown: {suspend_seconds}s\n"
+            f"source: {source_text}"
         )
 
     def _build_mock_action_data(self, action: str) -> dict[str, Any]:

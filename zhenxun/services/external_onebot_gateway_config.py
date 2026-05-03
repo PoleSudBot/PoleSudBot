@@ -18,6 +18,13 @@ DEFAULT_ATTRIBUTION_SWEEP_INTERVAL_SECONDS = 15
 DEFAULT_EVENT_QUEUE_MAX_SIZE = 1000
 DEFAULT_ENABLE_AUTO_SLASH = True
 DEFAULT_AUTO_SLASH_DISABLED_GROUP_IDS: list[str] = []
+DEFAULT_AUTO_SLASH_FUSE_ENABLED = True
+DEFAULT_AUTO_SLASH_FUSE_ECHO_SOURCE_SECONDS = 3.0
+DEFAULT_AUTO_SLASH_FUSE_WINDOW_SECONDS = 15.0
+DEFAULT_AUTO_SLASH_FUSE_MAX_REPLIES = 4
+DEFAULT_AUTO_SLASH_FUSE_SUSPEND_SECONDS = 30.0
+DEFAULT_AUTO_SLASH_FUSE_GROUP_NOTICE_ENABLED = True
+DEFAULT_AUTO_SLASH_FUSE_SUPERUSER_NOTICE_ENABLED = True
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 5.0
 
 DEFAULT_USER_FILTER_MODE = "blacklist"
@@ -128,6 +135,62 @@ REGISTER_CONFIGS = [
         default_value=DEFAULT_AUTO_SLASH_DISABLED_GROUP_IDS,
         help="这些群只使用显式 / 指令，不自动补 /",
         type=list,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="AUTO_SLASH_FUSE_ENABLED",
+        value=DEFAULT_AUTO_SLASH_FUSE_ENABLED,
+        default_value=DEFAULT_AUTO_SLASH_FUSE_ENABLED,
+        help="是否启用 auto-slash 用户级回声熔断兜底",
+        type=bool,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="AUTO_SLASH_FUSE_ECHO_SOURCE_SECONDS",
+        value=DEFAULT_AUTO_SLASH_FUSE_ECHO_SOURCE_SECONDS,
+        default_value=DEFAULT_AUTO_SLASH_FUSE_ECHO_SOURCE_SECONDS,
+        help="PJSK 回复后多少秒内同账号 auto-slash 会被视为回响嫌疑",
+        type=float,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="AUTO_SLASH_FUSE_WINDOW_SECONDS",
+        value=DEFAULT_AUTO_SLASH_FUSE_WINDOW_SECONDS,
+        default_value=DEFAULT_AUTO_SLASH_FUSE_WINDOW_SECONDS,
+        help="auto-slash 熔断统计窗口秒数",
+        type=float,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="AUTO_SLASH_FUSE_MAX_REPLIES",
+        value=DEFAULT_AUTO_SLASH_FUSE_MAX_REPLIES,
+        default_value=DEFAULT_AUTO_SLASH_FUSE_MAX_REPLIES,
+        help="统计窗口内触发多少次有效回复后暂停该用户 auto-slash",
+        type=int,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="AUTO_SLASH_FUSE_SUSPEND_SECONDS",
+        value=DEFAULT_AUTO_SLASH_FUSE_SUSPEND_SECONDS,
+        default_value=DEFAULT_AUTO_SLASH_FUSE_SUSPEND_SECONDS,
+        help="auto-slash 熔断后暂停该用户自动补 / 的秒数",
+        type=float,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="AUTO_SLASH_FUSE_GROUP_NOTICE_ENABLED",
+        value=DEFAULT_AUTO_SLASH_FUSE_GROUP_NOTICE_ENABLED,
+        default_value=DEFAULT_AUTO_SLASH_FUSE_GROUP_NOTICE_ENABLED,
+        help="auto-slash 熔断触发时是否在群内发送提示",
+        type=bool,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="AUTO_SLASH_FUSE_SUPERUSER_NOTICE_ENABLED",
+        value=DEFAULT_AUTO_SLASH_FUSE_SUPERUSER_NOTICE_ENABLED,
+        default_value=DEFAULT_AUTO_SLASH_FUSE_SUPERUSER_NOTICE_ENABLED,
+        help="auto-slash 熔断触发时是否私聊通知超级用户",
+        type=bool,
     ),
     RegisterConfig(
         module=MODULE_NAME,
@@ -274,6 +337,13 @@ class ExternalOneBotAppSettings:
     event_queue_max_size: int
     enable_auto_slash: bool
     auto_slash_disabled_group_ids: set[str]
+    auto_slash_fuse_enabled: bool
+    auto_slash_fuse_echo_source_seconds: float
+    auto_slash_fuse_window_seconds: float
+    auto_slash_fuse_max_replies: int
+    auto_slash_fuse_suspend_seconds: float
+    auto_slash_fuse_group_notice_enabled: bool
+    auto_slash_fuse_superuser_notice_enabled: bool
     heartbeat_interval_seconds: float
     action_allowlist: set[str]
     user_filter: IdFilterSettings
@@ -388,6 +458,60 @@ def get_pjsk_app_settings() -> ExternalOneBotAppSettings:
             config_group.get(
                 "AUTO_SLASH_DISABLED_GROUP_IDS",
                 DEFAULT_AUTO_SLASH_DISABLED_GROUP_IDS,
+            )
+        ),
+        auto_slash_fuse_enabled=bool(
+            config_group.get(
+                "AUTO_SLASH_FUSE_ENABLED",
+                DEFAULT_AUTO_SLASH_FUSE_ENABLED,
+            )
+        ),
+        auto_slash_fuse_echo_source_seconds=max(
+            1.0,
+            float(
+                config_group.get(
+                    "AUTO_SLASH_FUSE_ECHO_SOURCE_SECONDS",
+                    DEFAULT_AUTO_SLASH_FUSE_ECHO_SOURCE_SECONDS,
+                )
+            ),
+        ),
+        auto_slash_fuse_window_seconds=max(
+            1.0,
+            float(
+                config_group.get(
+                    "AUTO_SLASH_FUSE_WINDOW_SECONDS",
+                    DEFAULT_AUTO_SLASH_FUSE_WINDOW_SECONDS,
+                )
+            ),
+        ),
+        auto_slash_fuse_max_replies=max(
+            1,
+            int(
+                config_group.get(
+                    "AUTO_SLASH_FUSE_MAX_REPLIES",
+                    DEFAULT_AUTO_SLASH_FUSE_MAX_REPLIES,
+                )
+            ),
+        ),
+        auto_slash_fuse_suspend_seconds=max(
+            1.0,
+            float(
+                config_group.get(
+                    "AUTO_SLASH_FUSE_SUSPEND_SECONDS",
+                    DEFAULT_AUTO_SLASH_FUSE_SUSPEND_SECONDS,
+                )
+            ),
+        ),
+        auto_slash_fuse_group_notice_enabled=bool(
+            config_group.get(
+                "AUTO_SLASH_FUSE_GROUP_NOTICE_ENABLED",
+                DEFAULT_AUTO_SLASH_FUSE_GROUP_NOTICE_ENABLED,
+            )
+        ),
+        auto_slash_fuse_superuser_notice_enabled=bool(
+            config_group.get(
+                "AUTO_SLASH_FUSE_SUPERUSER_NOTICE_ENABLED",
+                DEFAULT_AUTO_SLASH_FUSE_SUPERUSER_NOTICE_ENABLED,
             )
         ),
         heartbeat_interval_seconds=max(
