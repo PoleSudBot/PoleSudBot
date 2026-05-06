@@ -77,7 +77,7 @@ REGISTER_CONFIGS = [
         key="VIRTUAL_SELF_ID",
         value=DEFAULT_VIRTUAL_SELF_ID,
         default_value=DEFAULT_VIRTUAL_SELF_ID,
-        help="上报给 Haruki 的 bot QQ；留空时使用接收消息的真寻 bot self_id",
+        help="兼容单虚拟 bot QQ；留空时按每个在线真寻 bot 建立独立连接",
         type=str,
     ),
     RegisterConfig(
@@ -85,7 +85,7 @@ REGISTER_CONFIGS = [
         key="ROUTE_BOT_SELF_ID",
         value=DEFAULT_ROUTE_BOT_SELF_ID,
         default_value=DEFAULT_ROUTE_BOT_SELF_ID,
-        help="Haruki 主动发送时使用的真寻 bot self_id；留空时自动选择",
+        help="无连接上下文时的兜底发送 bot self_id；多 bot 模式通常留空",
         type=str,
     ),
     RegisterConfig(

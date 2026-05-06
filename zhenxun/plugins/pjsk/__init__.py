@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import nonebot
 from nonebot import on_message
 from nonebot.adapters import Event
 from nonebot.adapters.onebot.v11 import Bot as OneBotV11Bot
@@ -41,13 +42,17 @@ async def _pjsk_rule(event: Event) -> bool:
         return False
     if not str(event.get_plaintext() or "").strip():
         return False
-    return str(event.user_id) != str(event.self_id)
+    # PJSK 是黑箱转发入口，先过滤当前后端所有 bot，避免同进程多 bot 互相回响。
+    connected_bot_ids = {str(bot_id) for bot_id in nonebot.get_bots()}
+    return str(event.user_id) not in connected_bot_ids
 
 
 async def _pjsk_help_rule(event: Event) -> bool:
     if not isinstance(event, GroupMessageEvent | PrivateMessageEvent):
         return False
-    if str(event.user_id) == str(event.self_id):
+    # 帮助指令同样跳过同后端 bot，防止 bot 自己的说明文本被二次响应。
+    connected_bot_ids = {str(bot_id) for bot_id in nonebot.get_bots()}
+    if str(event.user_id) in connected_bot_ids:
         return False
     plain_text = str(event.get_plaintext() or "").strip().lower()
     if plain_text.startswith("/"):

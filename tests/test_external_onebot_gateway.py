@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
+import importlib
 
 import nonebot
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegment
@@ -10,9 +12,11 @@ nonebot.init()
 
 from zhenxun.services import external_onebot_gateway as gateway_module
 from zhenxun.services.external_onebot_gateway import (
+    _VIRTUAL_SESSION_KEY,
     AttributionCache,
     AutoSlashFuse,
     EchoSourceTracker,
+    ExternalOneBotAppRuntime,
     ExternalOneBotAppSpec,
     ExternalOneBotSession,
     QueuedOneBotEvent,
@@ -77,6 +81,19 @@ def _session(settings: ExternalOneBotAppSettings) -> ExternalOneBotSession:
     )
 
 
+def _spec(settings: ExternalOneBotAppSettings) -> ExternalOneBotAppSpec:
+    return ExternalOneBotAppSpec(
+        name="pjsk",
+        display_name="PJSK",
+        plugin_module="pjsk",
+        settings_factory=lambda: settings,
+    )
+
+
+def _pjsk_plugin():
+    return importlib.import_module("zhenxun.plugins.pjsk")
+
+
 def _group_event(text: str, *, group_id: int = 444) -> GroupMessageEvent:
     return GroupMessageEvent(
         time=1,
@@ -103,6 +120,29 @@ def _group_event(text: str, *, group_id: int = 444) -> GroupMessageEvent:
         },
         group_id=group_id,
     )
+
+
+@pytest.mark.asyncio
+async def test_pjsk_rule_ignores_all_connected_backend_bots(monkeypatch):
+    event = _group_event("查卡")
+    event.user_id = 222
+    pjsk_plugin = _pjsk_plugin()
+
+    monkeypatch.setattr(nonebot, "get_bots", lambda: {"111": object(), "222": object()})
+
+    assert await pjsk_plugin._pjsk_rule(event) is False
+    assert await pjsk_plugin._pjsk_help_rule(event) is False
+
+
+@pytest.mark.asyncio
+async def test_pjsk_rule_allows_normal_user(monkeypatch):
+    event = _group_event("查卡")
+    event.user_id = 333
+    pjsk_plugin = _pjsk_plugin()
+
+    monkeypatch.setattr(nonebot, "get_bots", lambda: {"111": object(), "222": object()})
+
+    assert await pjsk_plugin._pjsk_rule(event) is True
 
 
 def test_auto_slash_rewrites_first_text_segment_after_at():
@@ -322,6 +362,19 @@ def test_attribution_cache_ambiguous_message_id_returns_none():
     record = cache.get("1", group_id="g", source_bot_self_id="bot1", now=101)
     assert record is not None
     assert record.user_id == "u1"
+
+
+def test_attribution_cache_clear_source_also_prunes_fifo_order():
+    cache = AttributionCache(ttl_seconds=10, max_size=10)
+    base = {"group_id": "g", "plugin_module": "pjsk", "app_name": "pjsk"}
+    cache.put("1", user_id="u1", source_bot_self_id="bot1", now=100, **base)
+    cache.put("2", user_id="u2", source_bot_self_id="bot2", now=101, **base)
+
+    cache.clear(source_bot_self_id="bot1")
+
+    assert cache.get("1", source_bot_self_id="bot1", now=102) is None
+    assert cache.get("2", source_bot_self_id="bot2", now=102) is not None
+    assert all(key[0] != "bot1" for key, _ in cache._order)
 
 
 def test_build_event_payload_rewrites_segments_and_raw_message():
@@ -763,6 +816,318 @@ async def test_run_connection_waits_when_runtime_self_id_unavailable(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_app_runtime_reconciles_available_real_bot_sessions(monkeypatch):
+    settings = replace(_settings(), virtual_self_id="", route_bot_self_id="")
+    created: list[object] = []
+
+    class FakeBot:
+        def __init__(self, self_id: str) -> None:
+            self.self_id = self_id
+
+    class FakeSession:
+        def __init__(self, spec, *, bound_bot_self_id=None, **kwargs):
+            self.spec = spec
+            self.bound_bot_self_id = bound_bot_self_id
+            self.is_running = False
+            self.is_closing = False
+            self.closed = False
+            self.shared = kwargs
+            created.append(self)
+
+        def update_spec(self, spec):
+            self.spec = spec
+
+        async def start(self):
+            self.is_running = True
+
+        async def close(self):
+            self.closed = True
+            self.is_running = False
+            self.is_closing = True
+
+        def submit_event(self, bot, event):
+            return str(bot.self_id) == self.bound_bot_self_id
+
+    monkeypatch.setattr(
+        gateway_module,
+        "_get_available_onebot_bots",
+        lambda: {"111": FakeBot("111"), "222": FakeBot("222")},
+    )
+    monkeypatch.setattr(gateway_module, "ExternalOneBotSession", FakeSession)
+    runtime = ExternalOneBotAppRuntime(_spec(settings))
+
+    await runtime.reconcile()
+
+    assert set(runtime._sessions) == {"111", "222"}
+    assert {session.bound_bot_self_id for session in created} == {"111", "222"}
+    assert len({id(session.shared["attribution"]) for session in created}) == 1
+    assert len({id(session.shared["auto_slash_fuse"]) for session in created}) == 1
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_app_runtime_virtual_mode_uses_single_virtual_session(monkeypatch):
+    settings = _settings()
+    created: list[object] = []
+
+    class FakeSession:
+        def __init__(self, spec, *, bound_bot_self_id=None, **kwargs):
+            self.bound_bot_self_id = bound_bot_self_id
+            self.is_running = False
+            self.is_closing = False
+            created.append(self)
+
+        def update_spec(self, spec):
+            return None
+
+        async def start(self):
+            self.is_running = True
+
+        async def close(self):
+            self.is_running = False
+            self.is_closing = True
+
+    monkeypatch.setattr(gateway_module, "_get_available_onebot_bots", lambda: {})
+    monkeypatch.setattr(gateway_module, "ExternalOneBotSession", FakeSession)
+    runtime = ExternalOneBotAppRuntime(_spec(settings))
+
+    await runtime.reconcile()
+
+    assert list(runtime._sessions) == [_VIRTUAL_SESSION_KEY]
+    assert created[0].bound_bot_self_id is None
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_app_runtime_reconcile_closes_stale_sessions(monkeypatch):
+    settings = replace(_settings(), virtual_self_id="", route_bot_self_id="")
+    available: dict[str, object] = {"111": object()}
+    closed: list[str | None] = []
+
+    class FakeSession:
+        def __init__(self, spec, *, bound_bot_self_id=None, **kwargs):
+            self.bound_bot_self_id = bound_bot_self_id
+            self.is_running = False
+            self.is_closing = False
+
+        def update_spec(self, spec):
+            return None
+
+        async def start(self):
+            self.is_running = True
+
+        async def close(self):
+            closed.append(self.bound_bot_self_id)
+            self.is_running = False
+            self.is_closing = True
+
+    monkeypatch.setattr(
+        gateway_module,
+        "_get_available_onebot_bots",
+        lambda: available,
+    )
+    monkeypatch.setattr(gateway_module, "ExternalOneBotSession", FakeSession)
+    runtime = ExternalOneBotAppRuntime(_spec(settings))
+
+    await runtime.reconcile()
+    available.clear()
+    await runtime.reconcile()
+
+    assert runtime._sessions == {}
+    assert closed == ["111"]
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_app_runtime_reconcile_runs_pending_request(monkeypatch):
+    runtime = ExternalOneBotAppRuntime(_spec(_settings()))
+    calls = 0
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def fake_reconcile_once():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_started.set()
+            await release_first.wait()
+
+    monkeypatch.setattr(runtime, "_reconcile_once", fake_reconcile_once)
+
+    task = asyncio.create_task(runtime.reconcile())
+    await first_started.wait()
+    runtime.request_reconcile()
+    release_first.set()
+    await task
+    if runtime._reconcile_task is not None:
+        await runtime._reconcile_task
+
+    assert calls == 2
+    await runtime.close()
+
+
+@pytest.mark.asyncio
+async def test_app_runtime_reconcile_request_after_loop_check_runs_again(monkeypatch):
+    runtime = ExternalOneBotAppRuntime(_spec(_settings()))
+    calls = 0
+    second_call_started = asyncio.Event()
+
+    async def fake_reconcile_once():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            runtime.request_reconcile()
+        else:
+            second_call_started.set()
+
+    monkeypatch.setattr(runtime, "_reconcile_once", fake_reconcile_once)
+
+    await runtime.reconcile()
+
+    assert calls == 2
+    assert second_call_started.is_set()
+    await runtime.close()
+
+
+def test_resolve_action_bot_prefers_attribution_then_bound(monkeypatch):
+    settings = replace(_settings(), virtual_self_id="", route_bot_self_id="")
+    session = ExternalOneBotSession(_spec(settings), bound_bot_self_id="111")
+
+    class FakeBot:
+        def __init__(self, self_id: str) -> None:
+            self.self_id = self_id
+
+    monkeypatch.setattr(
+        gateway_module,
+        "_get_available_onebot_bots",
+        lambda: {"111": FakeBot("111"), "222": FakeBot("222")},
+    )
+    cache = AttributionCache(ttl_seconds=10, max_size=10)
+    cache.put(
+        "1001",
+        user_id="333",
+        group_id="444",
+        source_bot_self_id="222",
+        plugin_module="pjsk",
+        app_name="pjsk",
+    )
+    attribution = cache.get("1001", source_bot_self_id="222")
+
+    assert attribution is not None
+    assert session._resolve_action_bot(settings, attribution).self_id == "222"
+    assert (
+        session._resolve_action_bot(
+            settings,
+            None,
+            bound_bot_self_id=session.bound_bot_self_id,
+        ).self_id
+        == "111"
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_action_returns_failed_when_bound_bot_offline(monkeypatch):
+    sent: list[dict] = []
+    settings = replace(
+        _settings(action_allowlist={"send_group_msg"}),
+        virtual_self_id="",
+        route_bot_self_id="",
+    )
+    session = ExternalOneBotSession(_spec(settings), bound_bot_self_id="111")
+
+    async def fake_send(payload: dict):
+        sent.append(payload)
+
+    monkeypatch.setattr(gateway_module, "_get_available_onebot_bots", lambda: {})
+    monkeypatch.setattr(session, "_send_action_response", fake_send)
+
+    await session._handle_action(
+        {
+            "action": "send_group_msg",
+            "params": {"group_id": 444, "message": "ok"},
+            "echo": "offline",
+        }
+    )
+
+    assert sent == [
+        {
+            "status": "failed",
+            "retcode": 100,
+            "data": None,
+            "msg": "no available OneBot V11 bot for action routing",
+            "wording": "no available OneBot V11 bot for action routing",
+            "echo": "offline",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_action_uses_bound_bot_for_attribution_lookup(monkeypatch):
+    sent: list[dict] = []
+    captured: list[object] = []
+    settings = replace(
+        _settings(action_allowlist={"send_group_msg"}),
+        virtual_self_id="",
+        route_bot_self_id="",
+    )
+    session = ExternalOneBotSession(_spec(settings), bound_bot_self_id="111")
+    for bot_id, user_id in (("111", "user-a"), ("222", "user-b")):
+        session._attribution.put(
+            "1001",
+            user_id=user_id,
+            group_id="444",
+            source_bot_self_id=bot_id,
+            plugin_module="pjsk",
+            app_name="pjsk",
+            auto_slash_applied=True,
+            source_plain_text="查卡",
+            echo_suspect=True,
+        )
+
+    class FakeBot:
+        self_id = "111"
+
+        async def call_api(self, action: str, **params):
+            return {"message_id": 2001}
+
+    async def fake_send(payload: dict):
+        sent.append(payload)
+
+    async def fake_can_send(bot, action, params):
+        return True
+
+    async def fake_record_statistics(attr, bot_id):
+        captured.append(attr)
+
+    monkeypatch.setattr(
+        session,
+        "_resolve_action_bot",
+        lambda settings, attr, **kwargs: FakeBot(),
+    )
+    monkeypatch.setattr(session, "_can_send_action", fake_can_send)
+    monkeypatch.setattr(session, "_record_statistics", fake_record_statistics)
+    monkeypatch.setattr(session, "_send_action_response", fake_send)
+
+    await session._handle_action(
+        {
+            "action": "send_group_msg",
+            "params": {
+                "group_id": 444,
+                "message": [
+                    {"type": "reply", "data": {"id": "1001"}},
+                    {"type": "text", "data": {"text": "ok"}},
+                ],
+            },
+            "echo": "e-bound",
+        }
+    )
+
+    assert captured
+    assert captured[0].user_id == "user-a"
+    assert sent[0]["status"] == "ok"
+
+
+@pytest.mark.asyncio
 async def test_handle_action_denies_unknown_action_with_echo(monkeypatch):
     sent: list[dict] = []
     session = _session(_settings(action_allowlist={"get_status"}))
@@ -810,7 +1175,7 @@ async def test_handle_action_normalizes_message_before_call_api(monkeypatch):
     monkeypatch.setattr(
         session,
         "_resolve_action_bot",
-        lambda settings, attr: FakeBot(),
+        lambda settings, attr, **kwargs: FakeBot(),
     )
     monkeypatch.setattr(session, "_can_send_action", fake_can_send)
     monkeypatch.setattr(session, "_send_action_response", fake_send)
@@ -858,7 +1223,7 @@ async def test_handle_action_blocks_send_when_plugin_disabled(monkeypatch):
     monkeypatch.setattr(
         session,
         "_resolve_action_bot",
-        lambda settings, attr: FakeBot(),
+        lambda settings, attr, **kwargs: FakeBot(),
     )
     monkeypatch.setattr(session, "_can_send_action", fake_can_send)
     monkeypatch.setattr(session, "_send_action_response", fake_send)
@@ -902,7 +1267,7 @@ async def test_handle_action_without_reply_does_not_count_fuse(monkeypatch):
     monkeypatch.setattr(
         session,
         "_resolve_action_bot",
-        lambda settings, attr: FakeBot(),
+        lambda settings, attr, **kwargs: FakeBot(),
     )
     monkeypatch.setattr(session, "_can_send_action", fake_can_send)
     monkeypatch.setattr(session, "_record_statistics", fake_record_statistics)
@@ -965,7 +1330,7 @@ async def test_handle_action_with_expired_reply_does_not_count_fuse(monkeypatch)
     monkeypatch.setattr(
         session,
         "_resolve_action_bot",
-        lambda settings, attr: FakeBot(),
+        lambda settings, attr, **kwargs: FakeBot(),
     )
     monkeypatch.setattr(session, "_can_send_action", fake_can_send)
     monkeypatch.setattr(session, "_record_statistics", fake_record_statistics)
@@ -1035,7 +1400,7 @@ async def test_handle_action_triggers_auto_slash_fuse_notices_once(monkeypatch):
     monkeypatch.setattr(
         session,
         "_resolve_action_bot",
-        lambda settings, attr: FakeBot(),
+        lambda settings, attr, **kwargs: FakeBot(),
     )
     monkeypatch.setattr(session, "_can_send_action", fake_can_send)
     monkeypatch.setattr(session, "_record_statistics", fake_record_statistics)

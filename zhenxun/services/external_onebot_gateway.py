@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 import nonebot
+from nonebot.adapters import Bot
 from nonebot.adapters.onebot.v11 import Bot as OneBotV11Bot
 from nonebot.adapters.onebot.v11 import (
     GroupMessageEvent,
@@ -24,6 +25,7 @@ import websockets
 
 from zhenxun.models.plugin_info import PluginInfo
 from zhenxun.models.statistics import Statistics
+from zhenxun.services import onebot_transport
 from zhenxun.services.cache.runtime_cache import (
     BotMemoryCache,
     GroupMemoryCache,
@@ -44,6 +46,8 @@ _REPLY_CQ_PATTERN = re.compile(r"\[CQ:reply,(?:[^\]]*?,)?id=([^,\]]+)")
 _TEXT_WHITESPACE_PATTERN = re.compile(r"^(\s*)(.*)$", re.S)
 _ECHO_SOURCE_MAX_SIZE = 10000
 _SUPERUSER_NOTICE_TEXT_LIMIT = 120
+_RECONCILE_INTERVAL_SECONDS = 20.0
+_VIRTUAL_SESSION_KEY = "__virtual__"
 
 
 class _OneBotSelfIdUnavailable(RuntimeError):
@@ -398,9 +402,20 @@ class AttributionCache:
                 removed += 1
         return removed
 
-    def clear(self) -> None:
-        self._items.clear()
-        self._order.clear()
+    def clear(self, *, source_bot_self_id: str | int | None = None) -> None:
+        if source_bot_self_id is None:
+            self._items.clear()
+            self._order.clear()
+            return
+        normalized = str(source_bot_self_id)
+        for key in list(self._items):
+            if key[0] == normalized:
+                self._items.pop(key, None)
+        self._order = deque(
+            (key, expires_at)
+            for key, expires_at in self._order
+            if key[0] != normalized
+        )
 
     def __len__(self) -> int:
         return len(self._items)
@@ -429,6 +444,14 @@ def _coerce_onebot_id(value: str | int | None) -> int | str | None:
     if not text:
         return None
     return int(text) if text.isdigit() else text
+
+
+def _get_available_onebot_bots() -> dict[str, OneBotV11Bot]:
+    return {
+        str(bot.self_id): bot
+        for bot in nonebot.get_bots().values()
+        if isinstance(bot, OneBotV11Bot) and onebot_transport.is_available(bot)
+    }
 
 
 def _copy_message_segments(message: Any) -> list[dict[str, Any]]:
@@ -638,15 +661,31 @@ def build_action_response(
 
 
 class ExternalOneBotSession:
-    def __init__(self, spec: ExternalOneBotAppSpec) -> None:
+    def __init__(
+        self,
+        spec: ExternalOneBotAppSpec,
+        *,
+        bound_bot_self_id: str | None = None,
+        attribution: AttributionCache | None = None,
+        auto_slash_fuse: AutoSlashFuse | None = None,
+        echo_source_tracker: EchoSourceTracker | None = None,
+    ) -> None:
         self.spec = spec
         settings = spec.settings_factory()
-        self._attribution = AttributionCache(
+        self.bound_bot_self_id = (
+            str(bound_bot_self_id).strip() if bound_bot_self_id else None
+        )
+        self._owns_state = (
+            attribution is None
+            and auto_slash_fuse is None
+            and echo_source_tracker is None
+        )
+        self._attribution = attribution or AttributionCache(
             settings.attribution_ttl_seconds,
             settings.attribution_max_size,
         )
-        self._auto_slash_fuse = AutoSlashFuse()
-        self._echo_source_tracker = EchoSourceTracker()
+        self._auto_slash_fuse = auto_slash_fuse or AutoSlashFuse()
+        self._echo_source_tracker = echo_source_tracker or EchoSourceTracker()
         self._event_queue: asyncio.Queue[QueuedOneBotEvent] = asyncio.Queue(
             maxsize=settings.event_queue_max_size
         )
@@ -664,6 +703,18 @@ class ExternalOneBotSession:
         self.spec = spec
 
     def submit_event(self, bot: OneBotV11Bot, event: MessageEvent) -> bool:
+        if self.is_closing:
+            return False
+        if self.bound_bot_self_id and str(bot.self_id) != self.bound_bot_self_id:
+            self._log_throttled(
+                f"drop_wrong_bound_bot:{bot.self_id}",
+                (
+                    f"{self.spec.display_name} session 绑定 bot "
+                    f"{self.bound_bot_self_id}，已丢弃来自 {bot.self_id} 的事件。"
+                ),
+                level="warning",
+            )
+            return False
         if not self._connected.is_set() or self._ws is None:
             self._log_throttled(
                 "drop_disconnected",
@@ -689,12 +740,14 @@ class ExternalOneBotSession:
         if self._connection_task is None or self._connection_task.done():
             self._connection_task = asyncio.create_task(
                 self._connection_loop(),
-                name=f"external-onebot-{self.spec.name}-connection",
+                name=self._task_name("connection"),
             )
-        if self._sweep_task is None or self._sweep_task.done():
+        if self._owns_state and (
+            self._sweep_task is None or self._sweep_task.done()
+        ):
             self._sweep_task = asyncio.create_task(
                 self._sweep_loop(),
-                name=f"external-onebot-{self.spec.name}-attribution-sweep",
+                name=self._task_name("attribution-sweep"),
             )
 
     async def close(self) -> None:
@@ -722,10 +775,27 @@ class ExternalOneBotSession:
             self._ws = None
         self._connected.clear()
         self._runtime_self_id = None
-        self._attribution.clear()
-        self._auto_slash_fuse.clear()
-        self._echo_source_tracker.clear()
+        if self._owns_state:
+            self._attribution.clear()
+            self._auto_slash_fuse.clear()
+            self._echo_source_tracker.clear()
+        else:
+            # 多 bot 共享 app 状态时，只清理当前 session 可归属的短 TTL 归因；
+            # 熔断与 echo 捕获器是 app 级事故防线，不能被单个 bot 断线清空。
+            self._attribution.clear(source_bot_self_id=self.bound_bot_self_id)
         self._drain_event_queue()
+
+    @property
+    def is_closing(self) -> bool:
+        return self._closing
+
+    @property
+    def is_running(self) -> bool:
+        return bool(self._connection_task and not self._connection_task.done())
+
+    def _task_name(self, suffix: str) -> str:
+        session_id = self.bound_bot_self_id or "virtual"
+        return f"external-onebot-{self.spec.name}-{session_id}-{suffix}"
 
     async def _connection_loop(self) -> None:
         backoff = 1.0
@@ -754,7 +824,7 @@ class ExternalOneBotSession:
                 )
 
             self._connected.clear()
-            self._attribution.clear()
+            self._attribution.clear(source_bot_self_id=self.bound_bot_self_id)
             self._drain_event_queue()
             if self._closing:
                 break
@@ -786,11 +856,11 @@ class ExternalOneBotSession:
                 await self._send_lifecycle_event("connect", settings)
                 self._sender_task = asyncio.create_task(
                     self._sender_loop(),
-                    name=f"external-onebot-{self.spec.name}-sender",
+                    name=self._task_name("sender"),
                 )
                 self._heartbeat_task = asyncio.create_task(
                     self._heartbeat_loop(),
-                    name=f"external-onebot-{self.spec.name}-heartbeat",
+                    name=self._task_name("heartbeat"),
                 )
                 await self._receive_loop()
             finally:
@@ -1057,13 +1127,28 @@ class ExternalOneBotSession:
             params["message"] = normalize_action_message(params["message"])
         target_group_id = params.get("group_id")
         attribution = (
-            self._attribution.get(reply_id, group_id=target_group_id)
+            self._attribution.get(
+                reply_id,
+                group_id=target_group_id,
+                source_bot_self_id=self.bound_bot_self_id,
+            )
             if reply_id
             else None
         )
-        bot = self._resolve_action_bot(settings, attribution)
+        bot = self._resolve_action_bot(
+            settings,
+            attribution,
+            bound_bot_self_id=self.bound_bot_self_id,
+        )
         if bot is None:
-            raise RuntimeError("no available OneBot V11 bot for action routing")
+            await self._send_action_response(
+                build_action_response(
+                    echo=echo,
+                    ok=False,
+                    message="no available OneBot V11 bot for action routing",
+                )
+            )
+            return
         if action.startswith("send") and not await self._can_send_action(
             bot,
             action,
@@ -1114,17 +1199,16 @@ class ExternalOneBotSession:
         self,
         settings: ExternalOneBotAppSettings,
         attribution: AttributionRecord | None,
+        *,
+        bound_bot_self_id: str | None = None,
     ) -> OneBotV11Bot | None:
         candidates = [
             attribution.source_bot_self_id if attribution else "",
+            bound_bot_self_id or "",
             settings.route_bot_self_id,
             settings.virtual_self_id,
         ]
-        bots = {
-            bot_id: bot
-            for bot_id, bot in nonebot.get_bots().items()
-            if isinstance(bot, OneBotV11Bot)
-        }
+        bots = _get_available_onebot_bots()
         for bot_id in candidates:
             if bot_id and (bot := bots.get(str(bot_id))):
                 return bot
@@ -1208,17 +1292,17 @@ class ExternalOneBotSession:
         self,
         settings: ExternalOneBotAppSettings,
     ) -> int | str | None:
-        for bot_id in (settings.virtual_self_id, settings.route_bot_self_id):
+        for bot_id in (
+            settings.virtual_self_id,
+            self.bound_bot_self_id,
+            settings.route_bot_self_id,
+        ):
             if resolved := _coerce_onebot_id(bot_id):
                 return resolved
-        onebot_bots = [
-            bot
-            for bot in nonebot.get_bots().values()
-            if isinstance(bot, OneBotV11Bot)
-        ]
+        onebot_bots = _get_available_onebot_bots()
         if not onebot_bots:
             return None
-        return _coerce_onebot_id(onebot_bots[0].self_id)
+        return _coerce_onebot_id(next(iter(onebot_bots)))
 
     async def _record_statistics(
         self,
@@ -1383,16 +1467,219 @@ class ExternalOneBotSession:
             log_func(message, LOG_COMMAND)
 
 
+class ExternalOneBotAppRuntime:
+    def __init__(self, spec: ExternalOneBotAppSpec) -> None:
+        self.spec = spec
+        settings = spec.settings_factory()
+        self._attribution = AttributionCache(
+            settings.attribution_ttl_seconds,
+            settings.attribution_max_size,
+        )
+        self._auto_slash_fuse = AutoSlashFuse()
+        self._echo_source_tracker = EchoSourceTracker()
+        self._sessions: dict[str, ExternalOneBotSession] = {}
+        self._sweep_task: asyncio.Task[None] | None = None
+        self._reconcile_loop_task: asyncio.Task[None] | None = None
+        self._reconcile_task: asyncio.Task[None] | None = None
+        self._reconcile_lock = asyncio.Lock()
+        self._reconcile_requested = False
+        self._closing = False
+        self._last_log_times: dict[str, float] = {}
+
+    def update_spec(self, spec: ExternalOneBotAppSpec) -> None:
+        self.spec = spec
+        for session in self._sessions.values():
+            session.update_spec(spec)
+
+    def submit_event(self, bot: OneBotV11Bot, event: MessageEvent) -> bool:
+        settings = self.spec.settings_factory()
+        session_key = self._session_key_for_bot(bot, settings)
+        session = self._sessions.get(session_key)
+        if session is None or session.is_closing:
+            self.request_reconcile()
+            self._log_throttled(
+                f"drop_no_session:{session_key}",
+                (
+                    f"{self.spec.display_name} 尚未建立 bot {bot.self_id} 的"
+                    "外部连接，已丢弃本次转发。"
+                ),
+                level="warning",
+            )
+            return False
+        return session.submit_event(bot, event)
+
+    async def start(self) -> None:
+        self._closing = False
+        if self._sweep_task is None or self._sweep_task.done():
+            self._sweep_task = asyncio.create_task(
+                self._sweep_loop(),
+                name=f"external-onebot-{self.spec.name}-app-sweep",
+            )
+        if self._reconcile_loop_task is None or self._reconcile_loop_task.done():
+            self._reconcile_loop_task = asyncio.create_task(
+                self._reconcile_loop(),
+                name=f"external-onebot-{self.spec.name}-reconcile-loop",
+            )
+        await self.reconcile()
+
+    async def close(self) -> None:
+        self._closing = True
+        tasks = [
+            task
+            for task in (
+                self._sweep_task,
+                self._reconcile_loop_task,
+                self._reconcile_task,
+            )
+            if task is not None and task is not asyncio.current_task()
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._sweep_task = None
+        self._reconcile_loop_task = None
+        self._reconcile_task = None
+
+        sessions = list(self._sessions.values())
+        self._sessions.clear()
+        if sessions:
+            await asyncio.gather(
+                *(session.close() for session in sessions),
+                return_exceptions=True,
+            )
+        self._attribution.clear()
+        self._auto_slash_fuse.clear()
+        self._echo_source_tracker.clear()
+
+    def request_reconcile(self) -> None:
+        if self._closing:
+            return
+        self._reconcile_requested = True
+        if self._reconcile_task is not None and not self._reconcile_task.done():
+            return
+        self._reconcile_task = asyncio.create_task(
+            self._run_reconcile_requests(),
+            name=f"external-onebot-{self.spec.name}-reconcile",
+        )
+
+    async def reconcile(self) -> None:
+        if self._closing:
+            return
+        self._reconcile_requested = True
+        await self._run_reconcile_requests()
+
+    async def _run_reconcile_requests(self) -> None:
+        async with self._reconcile_lock:
+            while not self._closing:
+                # 以 pending 标志作为唯一入口状态，避免触发发生在返回前窗口时丢失。
+                if not self._reconcile_requested:
+                    return
+                self._reconcile_requested = False
+                await self._reconcile_once()
+
+    async def _reconcile_once(self) -> None:
+        settings = self.spec.settings_factory()
+        desired_sessions = self._desired_sessions(settings)
+        existing_keys = set(self._sessions)
+        desired_keys = set(desired_sessions)
+
+        # 先移除不再属于期望状态的 session，避免 bot 断线或配置切换后继续接收事件。
+        stale_sessions = [
+            self._sessions.pop(key)
+            for key in existing_keys - desired_keys
+            if key in self._sessions
+        ]
+        if stale_sessions:
+            await asyncio.gather(
+                *(session.close() for session in stale_sessions),
+                return_exceptions=True,
+            )
+
+        for key, bound_bot_self_id in desired_sessions.items():
+            session = self._sessions.get(key)
+            if session is not None and session.is_running and not session.is_closing:
+                session.update_spec(self.spec)
+                continue
+            if session is not None:
+                self._sessions.pop(key, None)
+                await session.close()
+
+            # 创建 session 只启动内部连接循环，不等待 WS 握手完成；
+            # 这样 reconcile 不会被外部 Haruki 连接耗时阻塞。
+            session = ExternalOneBotSession(
+                self.spec,
+                bound_bot_self_id=bound_bot_self_id,
+                attribution=self._attribution,
+                auto_slash_fuse=self._auto_slash_fuse,
+                echo_source_tracker=self._echo_source_tracker,
+            )
+            self._sessions[key] = session
+            await session.start()
+
+    def _desired_sessions(
+        self,
+        settings: ExternalOneBotAppSettings,
+    ) -> dict[str, str | None]:
+        if settings.virtual_self_id:
+            return {_VIRTUAL_SESSION_KEY: None}
+        return {bot_id: bot_id for bot_id in _get_available_onebot_bots()}
+
+    @staticmethod
+    def _session_key_for_bot(
+        bot: OneBotV11Bot,
+        settings: ExternalOneBotAppSettings,
+    ) -> str:
+        return _VIRTUAL_SESSION_KEY if settings.virtual_self_id else str(bot.self_id)
+
+    async def _sweep_loop(self) -> None:
+        while True:
+            settings = self.spec.settings_factory()
+            self._attribution.configure(
+                settings.attribution_ttl_seconds,
+                settings.attribution_max_size,
+            )
+            await asyncio.sleep(settings.attribution_sweep_interval_seconds)
+            self._attribution.sweep()
+            self._auto_slash_fuse.sweep(
+                window_seconds=settings.auto_slash_fuse_window_seconds,
+                suspend_seconds=settings.auto_slash_fuse_suspend_seconds,
+            )
+            self._echo_source_tracker.sweep(
+                ttl_seconds=settings.auto_slash_fuse_echo_source_seconds
+            )
+
+    async def _reconcile_loop(self) -> None:
+        while True:
+            await asyncio.sleep(_RECONCILE_INTERVAL_SECONDS)
+            await self.reconcile()
+
+    def _log_throttled(
+        self,
+        key: str,
+        message: str,
+        *,
+        level: str = "info",
+        interval: float = 30.0,
+    ) -> None:
+        now = time.monotonic()
+        if now - self._last_log_times.get(key, 0.0) < interval:
+            return
+        self._last_log_times[key] = now
+        log_func = logger.warning if level == "warning" else logger.info
+        log_func(message, LOG_COMMAND)
+
+
 class ExternalOneBotGateway:
     def __init__(self) -> None:
-        self._sessions: dict[str, ExternalOneBotSession] = {}
+        self._runtimes: dict[str, ExternalOneBotAppRuntime] = {}
 
     def register_app(self, spec: ExternalOneBotAppSpec) -> None:
-        session = self._sessions.get(spec.name)
-        if session is None:
-            self._sessions[spec.name] = ExternalOneBotSession(spec)
+        runtime = self._runtimes.get(spec.name)
+        if runtime is None:
+            self._runtimes[spec.name] = ExternalOneBotAppRuntime(spec)
         else:
-            session.update_spec(spec)
+            runtime.update_spec(spec)
 
     def submit_event(
         self,
@@ -1400,19 +1687,29 @@ class ExternalOneBotGateway:
         bot: OneBotV11Bot,
         event: MessageEvent,
     ) -> bool:
-        session = self._sessions.get(app_name)
-        if session is None:
+        runtime = self._runtimes.get(app_name)
+        if runtime is None:
             logger.warning(f"未注册外部 OneBot app: {app_name}", LOG_COMMAND)
             return False
-        return session.submit_event(bot, event)
+        return runtime.submit_event(bot, event)
 
     async def start_background_tasks(self) -> None:
-        for session in self._sessions.values():
-            await session.start()
+        for runtime in self._runtimes.values():
+            await runtime.start()
+
+    def request_reconcile(self) -> None:
+        for runtime in self._runtimes.values():
+            runtime.request_reconcile()
+
+    async def reconcile(self) -> None:
+        await asyncio.gather(
+            *(runtime.reconcile() for runtime in self._runtimes.values()),
+            return_exceptions=True,
+        )
 
     async def close(self) -> None:
         await asyncio.gather(
-            *(session.close() for session in self._sessions.values()),
+            *(runtime.close() for runtime in self._runtimes.values()),
             return_exceptions=True,
         )
 
@@ -1432,6 +1729,18 @@ async def _start_external_onebot_gateway() -> None:
             LOG_COMMAND,
             e=exc,
         )
+
+
+@driver.on_bot_connect
+async def _reconcile_external_onebot_gateway_on_connect(bot: Bot) -> None:
+    if onebot_transport.is_onebot_v11(bot):
+        external_onebot_gateway.request_reconcile()
+
+
+@driver.on_bot_disconnect
+async def _reconcile_external_onebot_gateway_on_disconnect(bot: Bot) -> None:
+    if onebot_transport.is_onebot_v11(bot):
+        external_onebot_gateway.request_reconcile()
 
 
 driver.on_shutdown(external_onebot_gateway.close)
