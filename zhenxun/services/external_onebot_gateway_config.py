@@ -26,6 +26,11 @@ DEFAULT_AUTO_SLASH_FUSE_SUSPEND_SECONDS = 30.0
 DEFAULT_AUTO_SLASH_FUSE_GROUP_NOTICE_ENABLED = True
 DEFAULT_AUTO_SLASH_FUSE_SUPERUSER_NOTICE_ENABLED = True
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 5.0
+DEFAULT_TIMING_ENABLED = True
+DEFAULT_TIMING_SLOW_MS = 300.0
+DEFAULT_TIMING_SUMMARY_INTERVAL_SECONDS = 300.0
+DEFAULT_TIMING_RECENT_SLOW_LIMIT = 30
+DEFAULT_TIMING_TEXT_LIMIT = 80
 
 DEFAULT_USER_FILTER_MODE = "blacklist"
 DEFAULT_GROUP_FILTER_MODE = "blacklist"
@@ -202,6 +207,46 @@ REGISTER_CONFIGS = [
     ),
     RegisterConfig(
         module=MODULE_NAME,
+        key="TIMING_ENABLED",
+        value=DEFAULT_TIMING_ENABLED,
+        default_value=DEFAULT_TIMING_ENABLED,
+        help="是否记录 PJSK 网关专用慢链路统计",
+        type=bool,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="TIMING_SLOW_MS",
+        value=DEFAULT_TIMING_SLOW_MS,
+        default_value=DEFAULT_TIMING_SLOW_MS,
+        help="PJSK 网关链路超过多少毫秒时记录慢请求明细",
+        type=float,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="TIMING_SUMMARY_INTERVAL_SECONDS",
+        value=DEFAULT_TIMING_SUMMARY_INTERVAL_SECONDS,
+        default_value=DEFAULT_TIMING_SUMMARY_INTERVAL_SECONDS,
+        help="PJSK 网关链路统计摘要输出间隔秒数",
+        type=float,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="TIMING_RECENT_SLOW_LIMIT",
+        value=DEFAULT_TIMING_RECENT_SLOW_LIMIT,
+        default_value=DEFAULT_TIMING_RECENT_SLOW_LIMIT,
+        help="PJSK 网关统计摘要中保留的最近慢请求数量",
+        type=int,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="TIMING_TEXT_LIMIT",
+        value=DEFAULT_TIMING_TEXT_LIMIT,
+        default_value=DEFAULT_TIMING_TEXT_LIMIT,
+        help="PJSK 网关 timing 日志中消息文本截断长度",
+        type=int,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
         key="ACTION_ALLOWLIST",
         value=DEFAULT_ACTION_ALLOWLIST,
         default_value=DEFAULT_ACTION_ALLOWLIST,
@@ -345,6 +390,11 @@ class ExternalOneBotAppSettings:
     auto_slash_fuse_group_notice_enabled: bool
     auto_slash_fuse_superuser_notice_enabled: bool
     heartbeat_interval_seconds: float
+    timing_enabled: bool
+    timing_slow_ms: float
+    timing_summary_interval_seconds: float
+    timing_recent_slow_limit: int
+    timing_text_limit: int
     action_allowlist: set[str]
     user_filter: IdFilterSettings
     group_filter: IdFilterSettings
@@ -522,6 +572,35 @@ def get_pjsk_app_settings() -> ExternalOneBotAppSettings:
                     DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
                 )
             ),
+        ),
+        timing_enabled=bool(
+            config_group.get("TIMING_ENABLED", DEFAULT_TIMING_ENABLED)
+        ),
+        timing_slow_ms=max(
+            1.0,
+            float(config_group.get("TIMING_SLOW_MS", DEFAULT_TIMING_SLOW_MS)),
+        ),
+        timing_summary_interval_seconds=max(
+            1.0,
+            float(
+                config_group.get(
+                    "TIMING_SUMMARY_INTERVAL_SECONDS",
+                    DEFAULT_TIMING_SUMMARY_INTERVAL_SECONDS,
+                )
+            ),
+        ),
+        timing_recent_slow_limit=max(
+            1,
+            int(
+                config_group.get(
+                    "TIMING_RECENT_SLOW_LIMIT",
+                    DEFAULT_TIMING_RECENT_SLOW_LIMIT,
+                )
+            ),
+        ),
+        timing_text_limit=max(
+            1,
+            int(config_group.get("TIMING_TEXT_LIMIT", DEFAULT_TIMING_TEXT_LIMIT)),
         ),
         action_allowlist=_as_str_set(
             config_group.get("ACTION_ALLOWLIST", DEFAULT_ACTION_ALLOWLIST)

@@ -4,7 +4,7 @@ import asyncio
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import random
 import re
@@ -21,8 +21,10 @@ from nonebot.adapters.onebot.v11 import (
     MessageSegment,
     PrivateMessageEvent,
 )
+from nonebot.log import default_format
 import websockets
 
+from zhenxun.configs.path_config import LOG_PATH
 from zhenxun.models.plugin_info import PluginInfo
 from zhenxun.models.statistics import Statistics
 from zhenxun.services import onebot_transport
@@ -37,10 +39,11 @@ from zhenxun.services.external_onebot_gateway_config import (
     ExternalOneBotAppSettings,
     IdFilterSettings,
 )
-from zhenxun.services.log import logger
+from zhenxun.services.log import logger, logger_
 from zhenxun.utils.enum import BlockType
 
 LOG_COMMAND = "ExternalOneBotGateway"
+TIMING_LOG_COMMAND = "PJSKTiming"
 
 _REPLY_CQ_PATTERN = re.compile(r"\[CQ:reply,(?:[^\]]*?,)?id=([^,\]]+)")
 _TEXT_WHITESPACE_PATTERN = re.compile(r"^(\s*)(.*)$", re.S)
@@ -48,6 +51,7 @@ _ECHO_SOURCE_MAX_SIZE = 10000
 _SUPERUSER_NOTICE_TEXT_LIMIT = 120
 _RECONCILE_INTERVAL_SECONDS = 20.0
 _VIRTUAL_SESSION_KEY = "__virtual__"
+_TIMING_LOG_SINK_ADDED = False
 
 
 class _OneBotSelfIdUnavailable(RuntimeError):
@@ -68,6 +72,9 @@ class ExternalOneBotAppSpec:
 class QueuedOneBotEvent:
     bot_self_id: str
     event: MessageEvent
+    enqueued_at: float = 0.0
+    queue_size: int = 0
+    trace_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -94,6 +101,16 @@ class AttributionRecord:
     echo_suspect: bool
     echo_source_gap_seconds: float | None
     expires_at: float
+
+
+@dataclass
+class _TimingAggregate:
+    count: int = 0
+    slow_count: int = 0
+    total_ms: float = 0.0
+    max_ms: float = 0.0
+    stage_max_ms: dict[str, float] = field(default_factory=dict)
+    recent_slow: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -211,6 +228,164 @@ class AutoSlashFuse:
         for reply_id, seen_at in list(state.seen_reply_ids.items()):
             if current - seen_at > reply_ttl:
                 state.seen_reply_ids.pop(reply_id, None)
+
+
+def _ensure_timing_log_sink() -> None:
+    global _TIMING_LOG_SINK_ADDED
+    if _TIMING_LOG_SINK_ADDED:
+        return
+    logger_.add(
+        LOG_PATH / "pjsk_timing_{time:YYYY-MM-DD}.log",
+        level="INFO",
+        rotation="00:00",
+        format=default_format,
+        filter=lambda record: TIMING_LOG_COMMAND in record["message"],
+        retention=timedelta(days=30),
+    )
+    _TIMING_LOG_SINK_ADDED = True
+
+
+def _elapsed_ms(started_at: float, ended_at: float | None = None) -> float:
+    current = time.monotonic() if ended_at is None else ended_at
+    return max(0.0, (current - started_at) * 1000)
+
+
+def _format_ms(value: float) -> str:
+    return f"{value:.1f}"
+
+
+def _truncate_text(text: str, limit: int) -> str:
+    normalized = " ".join(str(text or "").split())
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[:limit]}..."
+
+
+def _first_token(text: str) -> str:
+    stripped = str(text or "").strip()
+    return stripped.split(maxsplit=1)[0] if stripped else ""
+
+
+def _message_preview(message: Any, limit: int) -> str:
+    try:
+        plain_text = Message(message).extract_plain_text()
+    except Exception:
+        plain_text = str(message or "")
+    return _truncate_text(plain_text, limit)
+
+
+def _format_timing_fields(fields: dict[str, Any]) -> str:
+    def format_value(value: Any) -> str:
+        text = str(value)
+        if any(ch.isspace() for ch in text) or "|" in text:
+            return json.dumps(text, ensure_ascii=False)
+        return text
+
+    return " ".join(
+        f"{key}={format_value(value)}"
+        for key, value in fields.items()
+        if value is not None and value != ""
+    )
+
+
+def _format_stage_timings(stages: dict[str, float]) -> str:
+    return ",".join(
+        f"{key}={_format_ms(value)}"
+        for key, value in sorted(stages.items())
+    )
+
+
+class PJSKTimingStats:
+    """Collect low-noise PJSK gateway timing data for slow-path diagnosis."""
+
+    def __init__(self) -> None:
+        self._aggregates = {
+            "inbound": _TimingAggregate(),
+            "action": _TimingAggregate(),
+            "lifecycle": _TimingAggregate(),
+        }
+        self._last_summary_at = time.monotonic()
+
+    def record(
+        self,
+        *,
+        kind: str,
+        settings: ExternalOneBotAppSettings,
+        total_ms: float,
+        stages: dict[str, float],
+        fields: dict[str, Any],
+        force_log: bool = False,
+    ) -> None:
+        if not settings.timing_enabled:
+            return
+        _ensure_timing_log_sink()
+        # 所有事件都进入聚合统计，只有慢请求或异常才输出明细日志。
+        aggregate = self._aggregates.setdefault(kind, _TimingAggregate())
+        aggregate.count += 1
+        aggregate.total_ms += total_ms
+        aggregate.max_ms = max(aggregate.max_ms, total_ms)
+        for stage, elapsed in stages.items():
+            aggregate.stage_max_ms[stage] = max(
+                aggregate.stage_max_ms.get(stage, 0.0),
+                elapsed,
+            )
+
+        is_slow = total_ms >= settings.timing_slow_ms
+        fields = {**fields, "kind": kind, "total_ms": _format_ms(total_ms)}
+        if stages:
+            fields["stages"] = _format_stage_timings(stages)
+        line = _format_timing_fields(fields)
+        if is_slow:
+            aggregate.slow_count += 1
+            aggregate.recent_slow.append(line)
+            overflow = len(aggregate.recent_slow) - settings.timing_recent_slow_limit
+            if overflow > 0:
+                del aggregate.recent_slow[:overflow]
+        if force_log or is_slow:
+            logger.info(line, TIMING_LOG_COMMAND)
+
+    def maybe_log_summary(
+        self,
+        settings: ExternalOneBotAppSettings,
+        *,
+        force: bool = False,
+    ) -> None:
+        if not settings.timing_enabled:
+            return
+        current = time.monotonic()
+        summary_interval = settings.timing_summary_interval_seconds
+        if (
+            not force
+            and current - self._last_summary_at < summary_interval
+        ):
+            return
+        _ensure_timing_log_sink()
+        self._last_summary_at = current
+        for kind, aggregate in self._aggregates.items():
+            if aggregate.count == 0:
+                continue
+            # summary 输出后重置窗口，让复制出来的日志反映最近一个统计周期。
+            avg_ms = aggregate.total_ms / aggregate.count
+            fields: dict[str, Any] = {
+                "summary": kind,
+                "count": aggregate.count,
+                "slow_count": aggregate.slow_count,
+                "avg_ms": _format_ms(avg_ms),
+                "max_ms": _format_ms(aggregate.max_ms),
+            }
+            if aggregate.stage_max_ms:
+                fields["stage_max"] = _format_stage_timings(aggregate.stage_max_ms)
+            if aggregate.recent_slow:
+                fields["recent_slow"] = " | ".join(
+                    aggregate.recent_slow[-settings.timing_recent_slow_limit :]
+                )
+            logger.info(_format_timing_fields(fields), TIMING_LOG_COMMAND)
+            self._aggregates[kind] = _TimingAggregate()
+
+    def clear(self) -> None:
+        for kind in list(self._aggregates):
+            self._aggregates[kind] = _TimingAggregate()
+        self._last_summary_at = time.monotonic()
 
 
 @dataclass(frozen=True)
@@ -669,6 +844,7 @@ class ExternalOneBotSession:
         attribution: AttributionCache | None = None,
         auto_slash_fuse: AutoSlashFuse | None = None,
         echo_source_tracker: EchoSourceTracker | None = None,
+        timing_stats: PJSKTimingStats | None = None,
     ) -> None:
         self.spec = spec
         settings = spec.settings_factory()
@@ -686,6 +862,7 @@ class ExternalOneBotSession:
         )
         self._auto_slash_fuse = auto_slash_fuse or AutoSlashFuse()
         self._echo_source_tracker = echo_source_tracker or EchoSourceTracker()
+        self._timing_stats = timing_stats or PJSKTimingStats()
         self._event_queue: asyncio.Queue[QueuedOneBotEvent] = asyncio.Queue(
             maxsize=settings.event_queue_max_size
         )
@@ -703,7 +880,26 @@ class ExternalOneBotSession:
         self.spec = spec
 
     def submit_event(self, bot: OneBotV11Bot, event: MessageEvent) -> bool:
+        settings = self.spec.settings_factory()
+        trace_id = f"{bot.self_id}:{getattr(event, 'message_id', '-')}"
+        group_id = getattr(event, "group_id", None)
+        # 入队前先准备诊断上下文，丢弃路径也能进入 PJSKTiming 聚合。
+        timing_fields = {
+            "trace_id": trace_id,
+            "session_bot_id": self.bound_bot_self_id or "virtual",
+            "bot_id": bot.self_id,
+            "group_id": group_id,
+            "user_id": getattr(event, "user_id", None),
+            "message_id": getattr(event, "message_id", None),
+        }
         if self.is_closing:
+            self._timing_stats.record(
+                kind="inbound",
+                settings=settings,
+                total_ms=0.0,
+                stages={},
+                fields={**timing_fields, "status": "drop", "reason": "closing"},
+            )
             return False
         if self.bound_bot_self_id and str(bot.self_id) != self.bound_bot_self_id:
             self._log_throttled(
@@ -714,6 +910,17 @@ class ExternalOneBotSession:
                 ),
                 level="warning",
             )
+            self._timing_stats.record(
+                kind="inbound",
+                settings=settings,
+                total_ms=0.0,
+                stages={},
+                fields={
+                    **timing_fields,
+                    "status": "drop",
+                    "reason": "wrong_bound_bot",
+                },
+            )
             return False
         if not self._connected.is_set() or self._ws is None:
             self._log_throttled(
@@ -721,16 +928,47 @@ class ExternalOneBotSession:
                 f"{self.spec.display_name} 未连接，已丢弃本次转发。",
                 level="warning",
             )
+            self._timing_stats.record(
+                kind="inbound",
+                settings=settings,
+                total_ms=0.0,
+                stages={},
+                fields={
+                    **timing_fields,
+                    "status": "drop",
+                    "reason": "disconnected",
+                },
+            )
             return False
+        queue_size = self._event_queue.qsize()
         try:
             self._event_queue.put_nowait(
-                QueuedOneBotEvent(bot_self_id=str(bot.self_id), event=event)
+                QueuedOneBotEvent(
+                    bot_self_id=str(bot.self_id),
+                    event=event,
+                    enqueued_at=time.monotonic(),
+                    queue_size=queue_size,
+                    trace_id=trace_id,
+                )
             )
         except asyncio.QueueFull:
             self._log_throttled(
                 "drop_queue_full",
                 f"{self.spec.display_name} 转发队列已满，已丢弃新消息。",
                 level="warning",
+            )
+            self._timing_stats.record(
+                kind="inbound",
+                settings=settings,
+                total_ms=0.0,
+                stages={},
+                fields={
+                    **timing_fields,
+                    "status": "drop",
+                    "reason": "queue_full",
+                    "queue_size": queue_size,
+                },
+                force_log=True,
             )
             return False
         return True
@@ -779,6 +1017,7 @@ class ExternalOneBotSession:
             self._attribution.clear()
             self._auto_slash_fuse.clear()
             self._echo_source_tracker.clear()
+            self._timing_stats.clear()
         else:
             # 多 bot 共享 app 状态时，只清理当前 session 可归属的短 TTL 归因；
             # 熔断与 echo 捕获器是 app 级事故防线，不能被单个 bot 断线清空。
@@ -843,17 +1082,33 @@ class ExternalOneBotSession:
             raise _OneBotSelfIdUnavailable(
                 "no OneBot self_id available for lifecycle event"
             )
+        connect_started_at = time.monotonic()
         async with websockets.connect(
             settings.ws_url,
             additional_headers=headers,
             proxy=None,
         ) as ws:
+            stages = {"ws_connect": _elapsed_ms(connect_started_at)}
             self._ws = ws
             self._runtime_self_id = runtime_self_id
             self._connected.set()
             logger.info(f"{self.spec.display_name} 已连接。", LOG_COMMAND)
             try:
+                lifecycle_started_at = time.monotonic()
                 await self._send_lifecycle_event("connect", settings)
+                stages["lifecycle_send"] = _elapsed_ms(lifecycle_started_at)
+                self._timing_stats.record(
+                    kind="lifecycle",
+                    settings=settings,
+                    total_ms=sum(stages.values()),
+                    stages=stages,
+                    fields={
+                        "operation": "ws_connect",
+                        "session_bot_id": self.bound_bot_self_id or "virtual",
+                        "runtime_self_id": runtime_self_id,
+                        "status": "ok",
+                    },
+                )
                 self._sender_task = asyncio.create_task(
                     self._sender_loop(),
                     name=self._task_name("sender"),
@@ -886,12 +1141,20 @@ class ExternalOneBotSession:
             return
         async for raw_payload in ws:
             echo = None
+            received_at = time.monotonic()
+            json_parse_ms = 0.0
             try:
+                json_started_at = time.monotonic()
                 payload = json.loads(raw_payload)
+                json_parse_ms = _elapsed_ms(json_started_at)
                 if not isinstance(payload, dict):
                     raise ValueError("OneBot action payload must be a JSON object")
                 echo = payload.get("echo")
-                await self._handle_action(payload)
+                await self._handle_action(
+                    payload,
+                    received_at=received_at,
+                    json_parse_ms=json_parse_ms,
+                )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -948,33 +1211,113 @@ class ExternalOneBotSession:
             self._echo_source_tracker.sweep(
                 ttl_seconds=settings.auto_slash_fuse_echo_source_seconds
             )
+            self._timing_stats.maybe_log_summary(settings)
 
     async def _send_queued_event(self, item: QueuedOneBotEvent) -> None:
+        started_at = time.monotonic()
         settings = self.spec.settings_factory()
         self._attribution.configure(
             settings.attribution_ttl_seconds,
             settings.attribution_max_size,
         )
-        built_event = self._build_event_payload(item, settings)
+        # 入站链路按队列等待、payload 构造、WS 发送和归因写入分段计时。
+        stages: dict[str, float] = {}
+        event = item.event
+        group_id = getattr(event, "group_id", None)
+        plain_preview = _truncate_text(
+            str(event.get_plaintext() or ""),
+            settings.timing_text_limit,
+        )
+        fields: dict[str, Any] = {
+            "trace_id": item.trace_id
+            or f"{item.bot_self_id}:{getattr(event, 'message_id', '-')}",
+            "session_bot_id": self.bound_bot_self_id or "virtual",
+            "bot_id": item.bot_self_id,
+            "group_id": group_id,
+            "user_id": getattr(event, "user_id", None),
+            "message_id": getattr(event, "message_id", None),
+            "queue_size": item.queue_size,
+            "event_age_ms": _format_ms(max(0.0, (time.time() - event.time) * 1000)),
+            "text": plain_preview,
+        }
+        if token := _first_token(plain_preview):
+            fields["token"] = token
+        if item.enqueued_at:
+            stages["queue_wait"] = _elapsed_ms(item.enqueued_at)
+        build_started_at = time.monotonic()
+        drop_reason: list[str] = []
+        built_event = self._build_event_payload(
+            item,
+            settings,
+            drop_reason=drop_reason,
+        )
+        stages["build_payload"] = _elapsed_ms(build_started_at)
         if built_event is None:
+            self._timing_stats.record(
+                kind="inbound",
+                settings=settings,
+                total_ms=_elapsed_ms(started_at),
+                stages=stages,
+                fields={
+                    **fields,
+                    "status": "drop",
+                    "reason": drop_reason[0] if drop_reason else "filtered",
+                },
+            )
             return
         payload = built_event.payload
-        await self._send_ws(payload)
-        message_id = payload.get("message_id")
-        if message_id is None:
-            return
-        self._attribution.put(
-            str(message_id),
-            user_id=str(payload.get("user_id") or ""),
-            group_id=str(payload.get("group_id")) if payload.get("group_id") else None,
-            source_bot_self_id=item.bot_self_id,
-            plugin_module=self.spec.plugin_module,
-            app_name=self.spec.name,
-            auto_slash_applied=built_event.auto_slash_applied,
-            source_plain_text=built_event.source_plain_text,
-            echo_suspect=built_event.echo_suspect,
-            echo_source_gap_seconds=built_event.echo_source_gap_seconds,
-        )
+        fields["auto_slash"] = built_event.auto_slash_applied
+        fields["echo_suspect"] = built_event.echo_suspect
+        try:
+            ws_started_at = time.monotonic()
+            await self._send_ws(payload)
+            stages["ws_send"] = _elapsed_ms(ws_started_at)
+            message_id = payload.get("message_id")
+            if message_id is None:
+                fields["status"] = "ok"
+                fields["reason"] = "missing_message_id"
+                return
+            attribution_started_at = time.monotonic()
+            self._attribution.put(
+                str(message_id),
+                user_id=str(payload.get("user_id") or ""),
+                group_id=(
+                    str(payload.get("group_id")) if payload.get("group_id") else None
+                ),
+                source_bot_self_id=item.bot_self_id,
+                plugin_module=self.spec.plugin_module,
+                app_name=self.spec.name,
+                auto_slash_applied=built_event.auto_slash_applied,
+                source_plain_text=built_event.source_plain_text,
+                echo_suspect=built_event.echo_suspect,
+                echo_source_gap_seconds=built_event.echo_source_gap_seconds,
+            )
+            stages["attribution_put"] = _elapsed_ms(attribution_started_at)
+            fields["status"] = "ok"
+        except Exception as exc:
+            self._timing_stats.record(
+                kind="inbound",
+                settings=settings,
+                total_ms=_elapsed_ms(started_at),
+                stages=stages,
+                fields={
+                    **fields,
+                    "status": "error",
+                    "error": f"{type(exc).__name__}:{exc}",
+                },
+                force_log=True,
+            )
+            raise
+        finally:
+            if fields.get("status"):
+                # 正常路径统一在 finally 记录，确保 early return 不漏统计。
+                self._timing_stats.record(
+                    kind="inbound",
+                    settings=settings,
+                    total_ms=_elapsed_ms(started_at),
+                    stages=stages,
+                    fields=fields,
+                )
 
     def _build_event_payload(
         self,
@@ -982,18 +1325,25 @@ class ExternalOneBotSession:
         settings: ExternalOneBotAppSettings,
         *,
         now: float | None = None,
+        drop_reason: list[str] | None = None,
     ) -> BuiltOneBotEvent | None:
         current = time.monotonic() if now is None else now
         event = item.event
         if not isinstance(event, GroupMessageEvent | PrivateMessageEvent):
+            if drop_reason is not None:
+                drop_reason.append("unsupported_event")
             return None
         if not id_filter_allows(settings.user_filter, event.user_id):
+            if drop_reason is not None:
+                drop_reason.append("user_filter")
             return None
         group_id = getattr(event, "group_id", None)
         if group_id is not None and not id_filter_allows(
             settings.group_filter,
             group_id,
         ):
+            if drop_reason is not None:
+                drop_reason.append("group_filter")
             return None
 
         payload = event.model_dump()
@@ -1013,12 +1363,16 @@ class ExternalOneBotSession:
         )
         plain_text = _message_plain_text(segments).strip()
         if not plain_text:
+            if drop_reason is not None:
+                drop_reason.append("empty_text")
             return None
         if not content_filter_allows(
             settings.content_filter,
             plain_text,
             bypass=bypass_content_filter,
         ):
+            if drop_reason is not None:
+                drop_reason.append("content_filter")
             return None
 
         auto_slash_enabled = should_apply_auto_slash(settings, group_id)
@@ -1088,14 +1442,44 @@ class ExternalOneBotSession:
             }
         )
 
-    async def _handle_action(self, payload: dict[str, Any]) -> None:
+    async def _handle_action(
+        self,
+        payload: dict[str, Any],
+        *,
+        received_at: float | None = None,
+        json_parse_ms: float = 0.0,
+    ) -> None:
+        started_at = received_at or time.monotonic()
+        stages: dict[str, float] = {}
+        if json_parse_ms:
+            stages["json_parse"] = json_parse_ms
         action = str(payload.get("action") or "").strip()
         echo = payload.get("echo")
+        settings = self.spec.settings_factory()
+        fields: dict[str, Any] = {
+            "trace_id": echo or f"{self.bound_bot_self_id or 'virtual'}:{id(payload)}",
+            "session_bot_id": self.bound_bot_self_id or "virtual",
+            "action": action or "-",
+            "echo": echo,
+        }
+
+        # action 可能在多个 early return 结束，局部收口函数保证统计格式一致。
+        def record_timing(status: str, *, force_log: bool = False) -> None:
+            self._timing_stats.record(
+                kind="action",
+                settings=settings,
+                total_ms=_elapsed_ms(started_at),
+                stages=stages,
+                fields={**fields, "status": status},
+                force_log=force_log,
+            )
+
         if not action:
+            record_timing("missing_action", force_log=True)
             raise ValueError("OneBot action is missing")
 
-        settings = self.spec.settings_factory()
         if action not in settings.action_allowlist:
+            response_started_at = time.monotonic()
             await self._send_action_response(
                 build_action_response(
                     echo=echo,
@@ -1103,8 +1487,11 @@ class ExternalOneBotSession:
                     message=f"action {action} is not allowed",
                 )
             )
+            stages["action_response"] = _elapsed_ms(response_started_at)
+            record_timing("blocked_action")
             return
         if action in {"get_status", "get_version_info"}:
+            response_started_at = time.monotonic()
             await self._send_action_response(
                 build_action_response(
                     echo=echo,
@@ -1112,6 +1499,8 @@ class ExternalOneBotSession:
                     data=self._build_mock_action_data(action),
                 )
             )
+            stages["action_response"] = _elapsed_ms(response_started_at)
+            record_timing("mock")
             return
 
         params = payload.get("params")
@@ -1124,8 +1513,18 @@ class ExternalOneBotSession:
 
         reply_id = extract_reply_id(params.get("message"))
         if "message" in params:
+            normalize_started_at = time.monotonic()
             params["message"] = normalize_action_message(params["message"])
+            stages["normalize"] = _elapsed_ms(normalize_started_at)
+            fields["message"] = _message_preview(
+                params["message"],
+                settings.timing_text_limit,
+            )
         target_group_id = params.get("group_id")
+        fields["group_id"] = target_group_id
+        fields["user_id"] = params.get("user_id")
+        fields["reply_id"] = reply_id
+        attribution_started_at = time.monotonic()
         attribution = (
             self._attribution.get(
                 reply_id,
@@ -1135,12 +1534,22 @@ class ExternalOneBotSession:
             if reply_id
             else None
         )
+        stages["attribution_lookup"] = _elapsed_ms(attribution_started_at)
+        if attribution is not None:
+            fields["source_user_id"] = attribution.user_id
+            fields["source_bot_id"] = attribution.source_bot_self_id
+            fields["source_message_id"] = attribution.message_id
+            fields["auto_slash"] = attribution.auto_slash_applied
+            fields["echo_suspect"] = attribution.echo_suspect
+        route_started_at = time.monotonic()
         bot = self._resolve_action_bot(
             settings,
             attribution,
             bound_bot_self_id=self.bound_bot_self_id,
         )
+        stages["route_bot"] = _elapsed_ms(route_started_at)
         if bot is None:
+            response_started_at = time.monotonic()
             await self._send_action_response(
                 build_action_response(
                     echo=echo,
@@ -1148,24 +1557,47 @@ class ExternalOneBotSession:
                     message="no available OneBot V11 bot for action routing",
                 )
             )
+            stages["action_response"] = _elapsed_ms(response_started_at)
+            record_timing("no_route", force_log=True)
             return
-        if action.startswith("send") and not await self._can_send_action(
-            bot,
-            action,
-            params,
-        ):
-            await self._send_action_response(
-                build_action_response(
-                    echo=echo,
-                    ok=False,
-                    message=f"{self.spec.display_name} is disabled for this target",
-                )
+        fields["routed_bot_id"] = bot.self_id
+        if action.startswith("send"):
+            # 权限检查可能落到缓存或数据库，单独计时便于和 NapCat 发送耗时区分。
+            permission_started_at = time.monotonic()
+            can_send = await self._can_send_action(
+                bot,
+                action,
+                params,
+                timing_stages=stages,
             )
-            return
+            stages["permission_check"] = _elapsed_ms(permission_started_at)
+            if not can_send:
+                response_started_at = time.monotonic()
+                await self._send_action_response(
+                    build_action_response(
+                        echo=echo,
+                        ok=False,
+                        message=f"{self.spec.display_name} is disabled for this target",
+                    )
+                )
+                stages["action_response"] = _elapsed_ms(response_started_at)
+                record_timing("permission_denied")
+                return
 
-        result = await bot.call_api(action, **params)
+        call_api_started_at = time.monotonic()
+        try:
+            result = await bot.call_api(action, **params)
+        except Exception as exc:
+            stages["call_api"] = _elapsed_ms(call_api_started_at)
+            fields["error"] = f"{type(exc).__name__}:{exc}"
+            record_timing("call_api_error", force_log=True)
+            raise
+        stages["call_api"] = _elapsed_ms(call_api_started_at)
+        if isinstance(result, dict) and result.get("message_id") is not None:
+            fields["result_message_id"] = result.get("message_id")
         fuse_trigger = None
         if action.startswith("send") and attribution is not None:
+            statistics_started_at = time.monotonic()
             try:
                 await self._record_statistics(attribution, bot.self_id)
             except Exception as exc:
@@ -1175,6 +1607,9 @@ class ExternalOneBotSession:
                     level="warning",
                     e=exc,
                 )
+                fields["statistics_error"] = type(exc).__name__
+            stages["statistics"] = _elapsed_ms(statistics_started_at)
+            fuse_started_at = time.monotonic()
             self._record_echo_source(action, params, attribution)
             fuse_trigger = self._auto_slash_fuse.record_reply(
                 attribution=attribution,
@@ -1184,9 +1619,13 @@ class ExternalOneBotSession:
                 max_replies=settings.auto_slash_fuse_max_replies,
                 suspend_seconds=settings.auto_slash_fuse_suspend_seconds,
             )
+            stages["echo_fuse"] = _elapsed_ms(fuse_started_at)
+        response_started_at = time.monotonic()
         await self._send_action_response(
             build_action_response(echo=echo, ok=True, data=result)
         )
+        stages["action_response"] = _elapsed_ms(response_started_at)
+        record_timing("ok")
         if fuse_trigger is not None and attribution is not None:
             await self._notify_auto_slash_fuse(
                 bot=bot,
@@ -1221,18 +1660,33 @@ class ExternalOneBotSession:
         bot: OneBotV11Bot,
         action: str,
         params: dict[str, Any],
+        *,
+        timing_stages: dict[str, float] | None = None,
     ) -> bool:
+        plugin_started_at = time.monotonic()
         plugin = await self._resolve_plugin_info()
+        if timing_stages is not None:
+            timing_stages["permission_plugin"] = _elapsed_ms(plugin_started_at)
         if plugin is None:
             return False
 
+        bot_started_at = time.monotonic()
         if not await self._is_bot_enabled(bot.self_id, plugin.module):
+            if timing_stages is not None:
+                timing_stages["permission_bot"] = _elapsed_ms(bot_started_at)
             return False
+        if timing_stages is not None:
+            timing_stages["permission_bot"] = _elapsed_ms(bot_started_at)
 
         group_id = self._resolve_action_group_id(action, params)
+        target_started_at = time.monotonic()
         if group_id:
-            return await self._is_group_enabled(str(group_id), plugin)
-        return self._is_private_enabled(plugin)
+            result = await self._is_group_enabled(str(group_id), plugin)
+        else:
+            result = self._is_private_enabled(plugin)
+        if timing_stages is not None:
+            timing_stages["permission_target"] = _elapsed_ms(target_started_at)
+        return result
 
     async def _resolve_plugin_info(self) -> PluginInfo | None:
         plugin = await PluginInfoMemoryCache.get_by_module(self.spec.plugin_module)
@@ -1477,6 +1931,7 @@ class ExternalOneBotAppRuntime:
         )
         self._auto_slash_fuse = AutoSlashFuse()
         self._echo_source_tracker = EchoSourceTracker()
+        self._timing_stats = PJSKTimingStats()
         self._sessions: dict[str, ExternalOneBotSession] = {}
         self._sweep_task: asyncio.Task[None] | None = None
         self._reconcile_loop_task: asyncio.Task[None] | None = None
@@ -1551,6 +2006,7 @@ class ExternalOneBotAppRuntime:
         self._attribution.clear()
         self._auto_slash_fuse.clear()
         self._echo_source_tracker.clear()
+        self._timing_stats.clear()
 
     def request_reconcile(self) -> None:
         if self._closing:
@@ -1579,10 +2035,19 @@ class ExternalOneBotAppRuntime:
                 await self._reconcile_once()
 
     async def _reconcile_once(self) -> None:
+        started_at = time.monotonic()
+        stages: dict[str, float] = {}
         settings = self.spec.settings_factory()
         desired_sessions = self._desired_sessions(settings)
         existing_keys = set(self._sessions)
         desired_keys = set(desired_sessions)
+        fields: dict[str, Any] = {
+            "operation": "reconcile",
+            "app": self.spec.name,
+            "existing": len(existing_keys),
+            "desired": len(desired_keys),
+            "stale": len(existing_keys - desired_keys),
+        }
 
         # 先移除不再属于期望状态的 session，避免 bot 断线或配置切换后继续接收事件。
         stale_sessions = [
@@ -1591,11 +2056,14 @@ class ExternalOneBotAppRuntime:
             if key in self._sessions
         ]
         if stale_sessions:
+            close_started_at = time.monotonic()
             await asyncio.gather(
                 *(session.close() for session in stale_sessions),
                 return_exceptions=True,
             )
+            stages["close_stale"] = _elapsed_ms(close_started_at)
 
+        created = 0
         for key, bound_bot_self_id in desired_sessions.items():
             session = self._sessions.get(key)
             if session is not None and session.is_running and not session.is_closing:
@@ -1603,19 +2071,37 @@ class ExternalOneBotAppRuntime:
                 continue
             if session is not None:
                 self._sessions.pop(key, None)
+                close_started_at = time.monotonic()
                 await session.close()
+                stages["close_replaced"] = stages.get(
+                    "close_replaced",
+                    0.0,
+                ) + _elapsed_ms(close_started_at)
 
             # 创建 session 只启动内部连接循环，不等待 WS 握手完成；
             # 这样 reconcile 不会被外部 Haruki 连接耗时阻塞。
+            create_started_at = time.monotonic()
             session = ExternalOneBotSession(
                 self.spec,
                 bound_bot_self_id=bound_bot_self_id,
                 attribution=self._attribution,
                 auto_slash_fuse=self._auto_slash_fuse,
                 echo_source_tracker=self._echo_source_tracker,
+                timing_stats=self._timing_stats,
             )
             self._sessions[key] = session
             await session.start()
+            created += 1
+            stages["create_session"] = stages.get("create_session", 0.0) + _elapsed_ms(
+                create_started_at
+            )
+        self._timing_stats.record(
+            kind="lifecycle",
+            settings=settings,
+            total_ms=_elapsed_ms(started_at),
+            stages=stages,
+            fields={**fields, "created": created, "status": "ok"},
+        )
 
     def _desired_sessions(
         self,
@@ -1648,6 +2134,7 @@ class ExternalOneBotAppRuntime:
             self._echo_source_tracker.sweep(
                 ttl_seconds=settings.auto_slash_fuse_echo_source_seconds
             )
+            self._timing_stats.maybe_log_summary(settings)
 
     async def _reconcile_loop(self) -> None:
         while True:

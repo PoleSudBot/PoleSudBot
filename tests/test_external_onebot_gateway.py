@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 import importlib
+import time
 
 import nonebot
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegment
@@ -19,6 +20,7 @@ from zhenxun.services.external_onebot_gateway import (
     ExternalOneBotAppRuntime,
     ExternalOneBotAppSpec,
     ExternalOneBotSession,
+    PJSKTimingStats,
     QueuedOneBotEvent,
     _OneBotSelfIdUnavailable,
     apply_auto_slash,
@@ -60,6 +62,11 @@ def _settings(
         auto_slash_fuse_group_notice_enabled=True,
         auto_slash_fuse_superuser_notice_enabled=True,
         heartbeat_interval_seconds=5,
+        timing_enabled=True,
+        timing_slow_ms=300,
+        timing_summary_interval_seconds=300,
+        timing_recent_slow_limit=30,
+        timing_text_limit=80,
         action_allowlist=action_allowlist or {"get_status"},
         user_filter=IdFilterSettings(mode="blacklist", ids=set()),
         group_filter=IdFilterSettings(mode="blacklist", ids=set()),
@@ -377,6 +384,59 @@ def test_attribution_cache_clear_source_also_prunes_fifo_order():
     assert all(key[0] != "bot1" for key, _ in cache._order)
 
 
+def test_pjsk_timing_logs_slow_detail_and_summary(monkeypatch):
+    logs: list[tuple[str, str]] = []
+    settings = replace(_settings(), timing_slow_ms=1, timing_summary_interval_seconds=1)
+    stats = PJSKTimingStats()
+
+    monkeypatch.setattr(gateway_module, "_ensure_timing_log_sink", lambda: None)
+    monkeypatch.setattr(
+        gateway_module.logger,
+        "info",
+        lambda info, command=None, **kwargs: logs.append((info, command)),
+    )
+
+    stats.record(
+        kind="inbound",
+        settings=settings,
+        total_ms=350,
+        stages={"ws_send": 320, "queue_wait": 20},
+        fields={"trace_id": "t1", "status": "ok"},
+    )
+    stats.maybe_log_summary(settings, force=True)
+
+    assert logs[0][1] == gateway_module.TIMING_LOG_COMMAND
+    assert "kind=inbound" in logs[0][0]
+    assert "ws_send=320.0" in logs[0][0]
+    assert "summary=inbound" in logs[1][0]
+    assert "slow_count=1" in logs[1][0]
+
+
+def test_pjsk_timing_disabled_skips_logs(monkeypatch):
+    logs: list[tuple[str, str]] = []
+    settings = replace(_settings(), timing_enabled=False)
+    stats = PJSKTimingStats()
+
+    monkeypatch.setattr(gateway_module, "_ensure_timing_log_sink", lambda: None)
+    monkeypatch.setattr(
+        gateway_module.logger,
+        "info",
+        lambda info, command=None, **kwargs: logs.append((info, command)),
+    )
+
+    stats.record(
+        kind="action",
+        settings=settings,
+        total_ms=10000,
+        stages={"call_api": 10000},
+        fields={"status": "ok"},
+        force_log=True,
+    )
+    stats.maybe_log_summary(settings, force=True)
+
+    assert logs == []
+
+
 def test_build_event_payload_rewrites_segments_and_raw_message():
     event = GroupMessageEvent(
         time=1,
@@ -507,6 +567,42 @@ def test_build_event_payload_group_filter_remains_hard_block():
 
     assert explicit_payload is None
     assert implicit_payload is None
+
+
+@pytest.mark.asyncio
+async def test_send_queued_event_records_slow_inbound_timing(monkeypatch):
+    logs: list[tuple[str, str]] = []
+    settings = replace(_settings(), timing_slow_ms=1)
+    session = _session(settings)
+
+    async def fake_send_ws(payload: dict):
+        await asyncio.sleep(0.002)
+
+    monkeypatch.setattr(gateway_module, "_ensure_timing_log_sink", lambda: None)
+    monkeypatch.setattr(
+        gateway_module.logger,
+        "info",
+        lambda info, command=None, **kwargs: logs.append((info, command)),
+    )
+    monkeypatch.setattr(session, "_send_ws", fake_send_ws)
+
+    await session._send_queued_event(
+        QueuedOneBotEvent(
+            "111",
+            _group_event("查卡", group_id=444),
+            enqueued_at=time.monotonic() - 0.002,
+            queue_size=3,
+            trace_id="trace-inbound",
+        )
+    )
+
+    assert logs
+    assert logs[0][1] == gateway_module.TIMING_LOG_COMMAND
+    assert "kind=inbound" in logs[0][0]
+    assert "trace_id=trace-inbound" in logs[0][0]
+    assert "queue_size=3" in logs[0][0]
+    assert "auto_slash=True" in logs[0][0]
+    assert "ws_send=" in logs[0][0]
 
 
 def test_echo_source_tracker_keeps_per_source_records():
@@ -1093,7 +1189,7 @@ async def test_handle_action_uses_bound_bot_for_attribution_lookup(monkeypatch):
     async def fake_send(payload: dict):
         sent.append(payload)
 
-    async def fake_can_send(bot, action, params):
+    async def fake_can_send(bot, action, params, **kwargs):
         return True
 
     async def fake_record_statistics(attr, bot_id):
@@ -1169,7 +1265,7 @@ async def test_handle_action_normalizes_message_before_call_api(monkeypatch):
     async def fake_send(payload: dict):
         sent.append(payload)
 
-    async def fake_can_send(bot, action, params):
+    async def fake_can_send(bot, action, params, **kwargs):
         return True
 
     monkeypatch.setattr(
@@ -1202,6 +1298,64 @@ async def test_handle_action_normalizes_message_before_call_api(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_handle_action_records_slow_action_timing(monkeypatch):
+    logs: list[tuple[str, str]] = []
+    sent: list[dict] = []
+    settings = replace(
+        _settings(action_allowlist={"send_group_msg"}),
+        timing_slow_ms=1,
+    )
+    session = _session(settings)
+
+    class FakeBot:
+        self_id = "999"
+
+        async def call_api(self, action: str, **params):
+            await asyncio.sleep(0.002)
+            return {"message_id": 2001}
+
+    async def fake_send(payload: dict):
+        sent.append(payload)
+
+    async def fake_can_send(bot, action, params, **kwargs):
+        timing_stages = kwargs.get("timing_stages")
+        if timing_stages is not None:
+            timing_stages["permission_plugin"] = 0.1
+        return True
+
+    monkeypatch.setattr(gateway_module, "_ensure_timing_log_sink", lambda: None)
+    monkeypatch.setattr(
+        gateway_module.logger,
+        "info",
+        lambda info, command=None, **kwargs: logs.append((info, command)),
+    )
+    monkeypatch.setattr(
+        session,
+        "_resolve_action_bot",
+        lambda settings, attr, **kwargs: FakeBot(),
+    )
+    monkeypatch.setattr(session, "_can_send_action", fake_can_send)
+    monkeypatch.setattr(session, "_send_action_response", fake_send)
+
+    await session._handle_action(
+        {
+            "action": "send_group_msg",
+            "params": {"group_id": 444, "message": "ok"},
+            "echo": "trace-action",
+        }
+    )
+
+    assert sent[0]["status"] == "ok"
+    assert logs
+    assert logs[0][1] == gateway_module.TIMING_LOG_COMMAND
+    assert "kind=action" in logs[0][0]
+    assert "trace_id=trace-action" in logs[0][0]
+    assert "action=send_group_msg" in logs[0][0]
+    assert "call_api=" in logs[0][0]
+    assert "permission_plugin=0.1" in logs[0][0]
+
+
+@pytest.mark.asyncio
 async def test_handle_action_blocks_send_when_plugin_disabled(monkeypatch):
     sent: list[dict] = []
     calls: list[tuple[str, dict]] = []
@@ -1217,7 +1371,7 @@ async def test_handle_action_blocks_send_when_plugin_disabled(monkeypatch):
     async def fake_send(payload: dict):
         sent.append(payload)
 
-    async def fake_can_send(bot, action, params):
+    async def fake_can_send(bot, action, params, **kwargs):
         return False
 
     monkeypatch.setattr(
@@ -1258,7 +1412,7 @@ async def test_handle_action_without_reply_does_not_count_fuse(monkeypatch):
     async def fake_send(payload: dict):
         sent.append(payload)
 
-    async def fake_can_send(bot, action, params):
+    async def fake_can_send(bot, action, params, **kwargs):
         return True
 
     async def fake_record_statistics(attr, bot_id):
@@ -1316,7 +1470,7 @@ async def test_handle_action_with_expired_reply_does_not_count_fuse(monkeypatch)
     async def fake_send(payload: dict):
         sent.append(payload)
 
-    async def fake_can_send(bot, action, params):
+    async def fake_can_send(bot, action, params, **kwargs):
         return True
 
     async def fake_record_statistics(attr, bot_id):
@@ -1391,7 +1545,7 @@ async def test_handle_action_triggers_auto_slash_fuse_notices_once(monkeypatch):
     async def fake_send(payload: dict):
         sent.append(payload)
 
-    async def fake_can_send(bot, action, params):
+    async def fake_can_send(bot, action, params, **kwargs):
         return True
 
     async def fake_record_statistics(attr, bot_id):
