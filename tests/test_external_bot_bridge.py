@@ -226,6 +226,168 @@ async def test_start_background_tasks_starts_reconcile_when_connect_on_startup_e
 
 
 @pytest.mark.asyncio
+async def test_ensure_connected_background_mode_does_not_wait_for_websocket(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    created_clients: list[object] = []
+    connect_calls = 0
+
+    class _FakeClient:
+        def __init__(
+            self,
+            host,
+            port,
+            bot_id,
+            callback,
+            *,
+            is_retry=True,
+        ):
+            self.host = host
+            self.port = port
+            self.bot_id = bot_id
+            self.callback = callback
+            self.is_retry = is_retry
+            self._tasks = []
+            created_clients.append(self)
+
+        async def connect(self):
+            nonlocal connect_calls
+            connect_calls += 1
+
+    async def fail_wait(_timeout: float) -> None:
+        raise AssertionError("background reconcile must not wait for websocket")
+
+    monkeypatch.setattr(
+        bridge_module,
+        "_load_bridge_library",
+        lambda: SimpleNamespace(gs_client_cls=_FakeClient),
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "get_external_bot_bridge_settings",
+        lambda: SimpleNamespace(
+            client_id="",
+            host="127.0.0.1",
+            port=8765,
+            request_timeout=20.0,
+        ),
+    )
+
+    bridge = bridge_module.ExternalBotBridge()
+    monkeypatch.setattr(bridge, "_wait_until_connected", fail_wait)
+
+    await bridge.ensure_connected("bot_1", wait_connected=False)
+
+    assert connect_calls == 1
+    assert bridge._client_id == "bot_1"
+    assert created_clients[0].is_retry is False
+
+
+@pytest.mark.asyncio
+async def test_ensure_connected_request_mode_still_waits_for_websocket(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    wait_calls: list[float] = []
+
+    class _FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            self._tasks = []
+
+        async def connect(self):
+            return None
+
+    async def fake_wait(timeout: float) -> None:
+        wait_calls.append(timeout)
+
+    monkeypatch.setattr(
+        bridge_module,
+        "_load_bridge_library",
+        lambda: SimpleNamespace(gs_client_cls=_FakeClient),
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "get_external_bot_bridge_settings",
+        lambda: SimpleNamespace(
+            client_id="",
+            host="127.0.0.1",
+            port=8765,
+            request_timeout=20.0,
+        ),
+    )
+
+    bridge = bridge_module.ExternalBotBridge()
+    monkeypatch.setattr(bridge, "_is_connected", lambda: False)
+    monkeypatch.setattr(bridge, "_wait_until_connected", fake_wait)
+
+    await bridge.ensure_connected("bot_1")
+
+    assert wait_calls == [5.0]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_connection_offline_skips_health_probe(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    ensure_calls: list[tuple[str, bool]] = []
+    bot = SimpleNamespace(self_id="bot_1")
+
+    async def fake_ensure_connected(bot_id: str, *, wait_connected: bool) -> None:
+        ensure_calls.append((bot_id, wait_connected))
+
+    async def fail_probe_ready() -> bool:
+        raise AssertionError("offline reconcile must not probe health")
+
+    monkeypatch.setattr(
+        bridge_module,
+        "get_external_bot_bridge_settings",
+        lambda: SimpleNamespace(
+            connect_on_startup=True,
+            enable_proactive_push=False,
+            client_id="",
+        ),
+    )
+
+    bridge = bridge_module.ExternalBotBridge()
+    bridge._ready_event.set()
+    monkeypatch.setattr(bridge, "_get_online_onebot_bots", lambda: {"bot_1": bot})
+    monkeypatch.setattr(bridge, "ensure_connected", fake_ensure_connected)
+    monkeypatch.setattr(bridge, "_is_connected", lambda: False)
+    monkeypatch.setattr(bridge, "_probe_ready", fail_probe_ready)
+
+    await bridge._reconcile_connection()
+
+    assert ensure_calls == [("bot_1", False)]
+    assert bridge._ready_event.is_set() is False
+
+
+def test_prune_client_tasks_reads_done_task_exception() -> None:
+    exception = RuntimeError("connect failed")
+    exception_read = False
+
+    class _DoneTask:
+        @staticmethod
+        def done():
+            return True
+
+        @staticmethod
+        def cancelled():
+            return False
+
+        @staticmethod
+        def exception():
+            nonlocal exception_read
+            exception_read = True
+            return exception
+
+    bridge = bridge_module.ExternalBotBridge()
+    bridge._client = SimpleNamespace(_tasks=[_DoneTask()])
+
+    assert bridge._prune_client_tasks() == []
+    assert bridge._client._tasks == []
+    assert exception_read is True
+
+
+@pytest.mark.asyncio
 async def test_probe_ready_sets_event_when_health_reports_healthy(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -749,6 +911,54 @@ async def test_ensure_connected_restarts_when_existing_tasks_are_done(
 
     assert connect_calls == 1
     assert bridge._client._tasks == []
+
+
+@pytest.mark.asyncio
+async def test_concurrent_ensure_connected_reuses_pending_client_task(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    connect_calls = 0
+
+    class _PendingTask:
+        @staticmethod
+        def done():
+            return False
+
+    class _FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            self._tasks = []
+
+        async def connect(self):
+            nonlocal connect_calls
+            connect_calls += 1
+            self._tasks.append(_PendingTask())
+
+    async def fake_wait(_timeout: float) -> None:
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(
+        bridge_module,
+        "_load_bridge_library",
+        lambda: SimpleNamespace(gs_client_cls=_FakeClient),
+    )
+    monkeypatch.setattr(
+        bridge_module,
+        "get_external_bot_bridge_settings",
+        lambda: SimpleNamespace(
+            client_id="",
+            host="127.0.0.1",
+            port=8765,
+            request_timeout=20.0,
+        ),
+    )
+
+    bridge = bridge_module.ExternalBotBridge()
+    monkeypatch.setattr(bridge, "_is_connected", lambda: False)
+    monkeypatch.setattr(bridge, "_wait_until_connected", fake_wait)
+
+    await asyncio.gather(*(bridge.ensure_connected("bot_1") for _ in range(10)))
+
+    assert connect_calls == 1
 
 
 @pytest.mark.asyncio

@@ -259,6 +259,47 @@ class ExternalBotBridge:
         ws = getattr(self._client, "_client", None)
         return id(ws) if ws is not None else None
 
+    def _prune_client_tasks(self) -> list[asyncio.Task[Any]]:
+        client = self._client
+        if client is None:
+            return []
+
+        tasks = list(getattr(client, "_tasks", []) or [])
+        if not tasks:
+            return []
+
+        active_tasks: list[asyncio.Task[Any]] = []
+        for task in tasks:
+            done = getattr(task, "done", None)
+            if not callable(done) or not done():
+                active_tasks.append(task)
+                continue
+
+            cancelled = getattr(task, "cancelled", None)
+            if callable(cancelled) and cancelled():
+                continue
+
+            exception = getattr(task, "exception", None)
+            if not callable(exception):
+                continue
+            try:
+                exc = exception()
+            except asyncio.CancelledError:
+                continue
+            if exc is not None:
+                logger.debug(
+                    "外部侧车连接任务已结束，将由 bridge 后台重试。",
+                    "ExternalBotBridge",
+                    e=exc,
+                )
+
+        if len(active_tasks) != len(tasks):
+            # vendor client 会保留已结束的连接 task；这里主动读取异常并清理，
+            # 让下一轮 reconcile/request 能重新发起连接，
+            # 且避免 asyncio 输出未取异常警告。
+            client._tasks = active_tasks
+        return active_tasks
+
     def _is_ready_for_requests(self) -> bool:
         # ready 标记必须绑定到“最近一次探活成功的具体 WS 连接”；
         # 否则 sidecar 断线重连后，旧 ready 状态会误放行新连接上的首个请求。
@@ -632,7 +673,9 @@ class ExternalBotBridge:
             await asyncio.sleep(0.2)
         raise BridgeConnectionTimeout("连接侧车超时")
 
-    async def ensure_connected(self, bot_id: str) -> None:
+    async def ensure_connected(
+        self, bot_id: str, *, wait_connected: bool = True
+    ) -> None:
         library = _load_bridge_library()
         settings = get_external_bot_bridge_settings()
         desired_client_id = settings.client_id or bot_id
@@ -655,7 +698,7 @@ class ExternalBotBridge:
                     settings.port,
                     desired_client_id,
                     self._handle_response,
-                    is_retry=settings.retry,
+                    is_retry=False,
                 )
                 self._client_id = desired_client_id
                 await self._client.connect()
@@ -667,17 +710,15 @@ class ExternalBotBridge:
                     "ExternalBotBridge",
                     session=bot_id,
                 )
-            elif not getattr(self._client, "_tasks", None):
+            elif not self._prune_client_tasks():
                 await self._client.connect()
+
+        if not wait_connected:
+            if self._is_connected():
+                self._set_connect_state(True)
             else:
-                tasks = list(getattr(self._client, "_tasks", []) or [])
-                active_tasks = [task for task in tasks if not task.done()]
-                if len(active_tasks) != len(tasks):
-                    # vendor GsClient 在 retry=False 的失败路径会留下已结束 task；
-                    # 不清理的话后续请求看见 _tasks 非空就不会重新 connect。
-                    self._client._tasks = active_tasks
-                if not active_tasks:
-                    await self._client.connect()
+                self._set_ready_state(False, reason="ws_not_connected")
+            return
 
         try:
             await self._wait_until_connected(min(settings.request_timeout, 5.0))
@@ -875,12 +916,21 @@ class ExternalBotBridge:
             return
 
         try:
-            await self.ensure_connected(desired_client_id)
+            await self.ensure_connected(desired_client_id, wait_connected=False)
         except BridgeConnectionTimeout as exc:
             self._log_throttled(
                 "background_connect_failed",
                 "外部侧车后台连接超时，将在下个协调周期重试。",
                 e=exc,
+            )
+            return
+
+        if not self._is_connected():
+            self._mark_transport_unavailable(reason="ws_not_connected")
+            self._log_throttled(
+                "background_wait_connect",
+                "外部侧车连接任务已启动，等待 WebSocket 建立。",
+                level="info",
             )
             return
 
