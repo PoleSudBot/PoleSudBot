@@ -85,7 +85,6 @@ uv run --no-project nbm.py update
 - [nonebot-plugin-memes](https://github.com/MemeCrafters/nonebot-plugin-memes)
 - [nonebot-plugin-heweather](https://github.com/kexue-z/nonebot-plugin-heweather)
 - [nonebot-plugin-paper](https://github.com/BalconyJH/nonebot-plugin-paper)
-- [YetAnotherPicSearch](https://github.com/lgc-NB2Dev/YetAnotherPicSearch)
 - [nonebot-plugin-sticker-saver](https://github.com/colasama/nonebot-plugin-sticker-saver)
 - [nonebot-plugin-tsugu-bangdream-bot](https://github.com/WindowsSov8forUs/nonebot-plugin-tsugu-bangdream-bot)
 - [nonebot-plugin-manosaba-memes](https://github.com/zhaomaoniu/nonebot-plugin-manosaba-memes)

@@ -59,7 +59,6 @@ dependencies = [
     "nonebot-plugin-datastore",
     "nonebot-plugin-memes",
     "nonebot-plugin-heweather",
-    "yetanotherpicsearch",
     "nonebot-plugin-paper",
     "nonebot-plugin-fortune",
     "nonebot-plugin-today-waifu",
@@ -110,7 +109,6 @@ allow-direct-references = true
 [tool.uv.sources]
 nonebot-plugin-memes = {path = "plugins/nonebot-plugin-memes", editable = true}
 nonebot-plugin-heweather = {path = "plugins/nonebot-plugin-heweather", editable = true}
-yetanotherpicsearch = {path = "plugins/YetAnotherPicSearch", editable = true}
 nonebot-plugin-paper = {path = "plugins/nonebot-plugin-paper", editable = true}
 nonebot-plugin-fortune = {path = "plugins/nonebot_plugin_fortune", editable = true}
 nonebot-plugin-today-waifu = {path = "plugins/nonebot-plugin-today-waifu", editable = true}

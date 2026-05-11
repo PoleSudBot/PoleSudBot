@@ -48,8 +48,6 @@ https://github.com/BalconyJH/nonebot-plugin-paper
 # 这是什么
 #语录
 #https://github.com/webjoin111/zhenxun_plugin_quote
-#搜图
-https://github.com/lgc-NB2Dev/YetAnotherPicSearch
 #pixiv
 #https://github.com/bot-ssttkkl/nonebot-plugin-pixivbot
 #简单图片处理
