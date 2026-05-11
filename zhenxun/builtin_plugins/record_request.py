@@ -15,6 +15,7 @@ from nonebot_plugin_session import EventSession
 
 from zhenxun.configs.config import BotConfig, Config
 from zhenxun.configs.utils import PluginExtraData, RegisterConfig
+from zhenxun.models.ban_console import BanConsole
 from zhenxun.models.event_log import EventLog
 from zhenxun.models.fg_request import FgRequest
 from zhenxun.models.friend_user import FriendUser
@@ -76,6 +77,7 @@ _API_TIMEOUT = 5.0
 
 
 async def _safe_get_group_info(bot, group_id: str):
+    # 获取群信息用于补全入群申请通知，失败时保留原申请处理流程。
     try:
         return await asyncio.wait_for(
             bot.get_group_info(group_id=group_id),
@@ -84,6 +86,62 @@ async def _safe_get_group_info(bot, group_id: str):
     except (asyncio.TimeoutError, ActionFailed, Exception) as e:
         logger.warning("获取群信息失败", "群邀请", e=e)
         return None
+
+
+async def _get_request_ban_record(
+    user_id: str | None, group_id: str | None
+) -> BanConsole | None:
+    # 请求通知只补充展示信息，不改变 BanConsole 的全局查询与缓存语义。
+    ban_data = await BanConsole.get_ban(user_id=user_id, group_id=group_id)
+    if ban_data or user_id or not group_id:
+        return ban_data
+    # 历史群组黑名单记录可能以 user_id=NULL 存储，局部补查避免漏报群黑名单。
+    return await BanConsole.safe_get_or_none(
+        user_id__isnull=True,
+        group_id=group_id,
+        clean_duplicates=False,
+    )
+
+
+def _format_ban_target(ban_data: BanConsole) -> str:
+    # 将黑名单记录转换成管理员通知中可直接识别的目标文本。
+    user_id = ban_data.user_id or ""
+    group_id = ban_data.group_id or ""
+    if user_id and group_id:
+        return f"用户 {user_id} 在群组 {group_id}"
+    if user_id:
+        return f"用户 {user_id}"
+    return f"群组 {group_id}"
+
+
+async def _build_permanent_ban_tip(
+    *targets: tuple[str | None, str | None],
+) -> str:
+    # 汇总请求相关的永久黑名单记录，避免把临时封禁噪音推给超级用户。
+    ban_list: list[BanConsole] = []
+    seen: set[tuple[str, str]] = set()
+    for user_id, group_id in targets:
+        ban_data = await _get_request_ban_record(user_id, group_id)
+        if not ban_data or ban_data.duration != -1:
+            continue
+        # 多个匹配维度可能命中同一条记录，去重后再展示可避免重复提醒。
+        key = (ban_data.user_id or "", ban_data.group_id or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        ban_list.append(ban_data)
+    if not ban_list:
+        return ""
+    lines = ["", "永久黑名单提示："]
+    for ban_data in ban_list:
+        lines.extend(
+            [
+                f"- {_format_ban_target(ban_data)} 在黑名单中",
+                f"  操作员ID：{ban_data.operator}",
+                f"  封禁原因：{ban_data.ban_reason or '无'}",
+            ]
+        )
+    return "\n".join(lines)
 
 
 @friend_req.handle()
@@ -124,6 +182,7 @@ async def _(bot: v12Bot | v11Bot, event: FriendRequestEvent, session: EventSessi
         cache_key = str(event.user_id)
         if not cache.get(cache_key):
             cache.set(cache_key, "1")
+            ban_tip = await _build_permanent_ban_tip((str(event.user_id), None))
             results = await PlatformUtils.send_superuser(
                 bot,
                 f"*****一份好友申请*****\n"
@@ -131,7 +190,8 @@ async def _(bot: v12Bot | v11Bot, event: FriendRequestEvent, session: EventSessi
                 f"昵称：{nickname}({event.user_id})\n"
                 f"自动同意：{'√' if base_config.get('AUTO_ADD_FRIEND') else '×'}\n"
                 f"日期：{datetime.now().replace(microsecond=0)}\n"
-                f"备注：{event.comment}",
+                f"备注：{event.comment}"
+                f"{ban_tip}",
             )
             if message_ids := [
                 str(r[1].msg_ids[0]["message_id"])
@@ -210,13 +270,19 @@ async def _(bot: v12Bot | v11Bot, event: GroupRequestEvent, session: EventSessio
                 group_id=str(event.group_id),
                 handle_type=RequestHandleType.APPROVE,
             )
+            ban_tip = await _build_permanent_ban_tip(
+                (str(event.user_id), None),
+                (str(event.user_id), str(event.group_id)),
+                (None, str(event.group_id)),
+            )
             results = await PlatformUtils.send_superuser(
                 bot,
                 f"*****一份入群申请*****\n"
                 f"ID：{f.id}\n"
                 f"申请人：{nickname}({event.user_id})\n群聊："
                 f"{event.group_id}\n邀请日期：{datetime.now().replace(microsecond=0)}\n"
-                "注: 该请求已自动同意",
+                "注: 该请求已自动同意"
+                f"{ban_tip}",
             )
             await asyncio.sleep(random.randint(1, 5))
             await bot.send_private_msg(
@@ -263,13 +329,19 @@ async def _(bot: v12Bot | v11Bot, event: GroupRequestEvent, session: EventSessio
             if kick_count
             else ""
         )
+        ban_tip = await _build_permanent_ban_tip(
+            (str(event.user_id), None),
+            (str(event.user_id), str(event.group_id)),
+            (None, str(event.group_id)),
+        )
         results = await PlatformUtils.send_superuser(
             bot,
             f"*****一份入群申请*****\n"
             f"ID：{f.id}\n"
             f"申请人：{nickname}({event.user_id})\n群聊："
             f"{event.group_id}\n邀请日期：{datetime.now().replace(microsecond=0)}"
-            f"{kick_message}",
+            f"{kick_message}"
+            f"{ban_tip}",
         )
         if message_ids := [
             str(r[1].msg_ids[0]["message_id"]) for r in results if r[1] and r[1].msg_ids
