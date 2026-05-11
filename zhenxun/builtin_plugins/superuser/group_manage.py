@@ -1,5 +1,6 @@
 from nonebot.adapters import Bot
 from nonebot.adapters.onebot.v11 import Bot as v11Bot
+from nonebot.exception import ActionFailed
 from nonebot.params import Depends
 from nonebot.permission import SUPERUSER
 from nonebot.plugin import PluginMetadata
@@ -16,12 +17,20 @@ from nonebot_plugin_alconna import (
 )
 from nonebot_plugin_session import EventSession
 
-from zhenxun.configs.config import BotConfig
 from zhenxun.configs.utils import PluginExtraData
 from zhenxun.models.group_console import GroupConsole
+from zhenxun.services.group_leave import (
+    consume_leave_confirmation,
+    create_leave_confirmation,
+    execute_group_leave,
+    is_bot_joined_group,
+)
 from zhenxun.services.log import logger
 from zhenxun.utils.enum import PluginType
 from zhenxun.utils.message import MessageUtils
+
+CONFIRM_TIMEOUT_SECONDS = 60
+LEAVE_DELAY_SECONDS = 3
 
 __plugin_meta__ = PluginMetadata(
     name="管理群操作",
@@ -34,20 +43,21 @@ __plugin_meta__ = PluginMetadata(
         group-manage modify-level [权限等级] ?[群组Id]      : 修改群权限
         group-manage super-handle [群组Id] [--del 删除操作] : 添加/删除群白名单
         group-manage auth-handle [群组Id] [--del 删除操作]  : 添加/删除群认证
-        group-manage del-group [群组Id]                    : 退出指定群
+        group-manage del-group [群组Id] ?[确认码]           : 退出指定群
 
         快捷:
         group-manage modify-level : 修改群权限
         group-manage super-handle : 添加/删除群白名单
         group-manage auth-handle  : 添加/删除群认证
-        group-manage del-group    : 退群
+        group-manage del-group    : 申请退群确认码
 
         示例:
         修改群权限 7                              : 在群组中修改当前群组权限为7
         修改群权限 7 1234556                     : 修改 123456 群组的权限等级为7
         添加/删除群白名单 1234567                  : 添加/删除 1234567 为群白名单
         添加/删除群认证 1234567                    : 添加/删除 1234567 为群认证
-        退群 12344566                            : 退出指定群组
+        group-manage del-group 12344566          : 申请退出指定群组
+        group-manage del-group 12344566 1234     : 确认退出指定群组
     """.strip(),
     extra=PluginExtraData(
         author="HibiKier",
@@ -74,7 +84,11 @@ _matcher = on_alconna(
             Args["group_id", int],
             help_text="添加/删除群认证",
         ),
-        Subcommand("del-group", Args["group_id", int], help_text="退出群组"),
+        Subcommand(
+            "del-group",
+            Args["group_id", int]["confirm_code?", str],
+            help_text="退出群组",
+        ),
     ),
     permission=SUPERUSER,
     priority=1,
@@ -115,14 +129,6 @@ _matcher.shortcut(
     arguments=["auth-handle", "{%0}", "--delete"],
     prefix=True,
 )
-
-_matcher.shortcut(
-    "退群",
-    command="group-manage",
-    arguments=["del-group", "{%0}"],
-    prefix=True,
-)
-
 
 def CheckGroupId():
     """
@@ -187,27 +193,81 @@ async def _(session: EventSession, arparma: Arparma, state: T_State):
 
 
 @_matcher.assign("del-group")
-async def _(bot: Bot, session: EventSession, arparma: Arparma, group_id: int):
+async def _(
+    bot: Bot,
+    session: EventSession,
+    arparma: Arparma,
+    group_id: int,
+    confirm_code: Match[str],
+):
     if isinstance(bot, v11Bot):
-        group_list = [g["group_id"] for g in await bot.get_group_list()]
-        if group_id not in group_list:
-            logger.debug("群组不存在", "退群", session=session, target=group_id)
-            await MessageUtils.build_message(
-                f"{BotConfig.self_nickname}未在该群组中..."
-            ).finish()
         try:
-            await bot.set_group_leave(group_id=group_id)
-            logger.info(
-                f"{BotConfig.self_nickname}退出群组成功",
+            is_joined_group = await is_bot_joined_group(bot, group_id)
+        except ActionFailed as e:
+            logger.warning(
+                "获取 Bot 群列表失败",
                 "退群",
                 session=session,
                 target=group_id,
+                e=e,
             )
-            await MessageUtils.build_message(f"退出群组 {group_id} 成功!").send()
-            await GroupConsole.filter(group_id=group_id).delete()
-        except Exception as e:
+            await MessageUtils.build_message(
+                "无法确认 Bot 所在群列表，已拒绝退群操作。"
+            ).finish(reply_to=True)
+
+        if not is_joined_group:
+            logger.debug("群组不存在", "退群", session=session, target=group_id)
+            await MessageUtils.build_message("Bot 未在该群组中...").finish()
+
+        if not confirm_code.available:
+            # 跨群退群同样需要确认码，避免超级用户误输入后立即退出群聊。
+            confirmation = create_leave_confirmation(
+                bot.self_id,
+                group_id,
+                session.id1 or "superuser",
+                CONFIRM_TIMEOUT_SECONDS,
+            )
+            await MessageUtils.build_message(
+                f"收到申请啦！如果已经决定让我离开群组 {group_id}，"
+                f"请在 {CONFIRM_TIMEOUT_SECONDS} 秒内发送：\n\n"
+                f"group-manage del-group {group_id} {confirmation.code}\n\n"
+                "确认码要认真核对哦，过时就需要重新申请啦。"
+            ).send(reply_to=True)
+            logger.info("发出退群确认码", "退群", session=session, target=group_id)
+            return
+
+        status = consume_leave_confirmation(
+            bot.self_id,
+            group_id,
+            session.id1 or "superuser",
+            confirm_code.result,
+        )
+        if status != "ok":
+            await MessageUtils.build_message(
+                "唔，这个确认码好像对不上……\n"
+                "可能是输错了，或者已经过期啦。\n\n"
+                "请重新申请新的退群确认码吧。"
+            ).finish(reply_to=True)
+
+        await MessageUtils.build_message(
+            f"确认收到！我会在 {LEAVE_DELAY_SECONDS} 秒后离开群组 {group_id}。\n"
+            "虽然有点舍不得，但既然已经决定好了，我会好好道别的。"
+        ).send(reply_to=True)
+        try:
+            await execute_group_leave(
+                bot,
+                group_id,
+                delay_seconds=LEAVE_DELAY_SECONDS,
+                log_command="退群",
+                operator_id=session.id1 or "superuser",
+                log_session=session,
+            )
+        except ActionFailed as e:
             logger.error("退出群组失败", "退群", session=session, target=group_id, e=e)
-            await MessageUtils.build_message(f"退出群组 {group_id} 失败...").send()
+            await MessageUtils.build_message(
+                f"退群请求没有成功……群组 {group_id} 暂时还没能退出。\n"
+                "可能是 OneBot 端状态不太对，请检查协议端日志后再试一次吧。"
+            ).send()
     else:
         # TODO: 其他平台的退群操作
         await MessageUtils.build_message("暂未支持退群操作...").send()
