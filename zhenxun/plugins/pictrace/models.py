@@ -1,0 +1,97 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass(slots=True)
+class ImageInput:
+    """用户输入图片在插件内部的统一表示。"""
+
+    content: bytes
+    url: str | None = None
+    filename: str = "image.jpg"
+    mimetype: str = "image/jpeg"
+
+
+@dataclass(slots=True)
+class SearchCandidate:
+    """单个结果内部的候选项。"""
+
+    title: str
+    subtitle: str = ""
+
+
+@dataclass(slots=True)
+class SearchResultItem:
+    """单条搜索结果的统一展示模型。"""
+
+    title: str
+    display_index: int | None = None
+    url: str = ""
+    links: list[str] = field(default_factory=list)
+    source: str = ""
+    author: str = ""
+    similarity: float | None = None
+    thumbnail_url: str = ""
+    thumbnail_data_uri: str = ""
+    thumbnail_visible: bool = True
+    hidden: bool = False
+    metadata: dict[str, str] = field(default_factory=dict)
+    candidates: list[SearchCandidate] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class SearchSection:
+    """一个搜索来源在结果页中的展示区块。"""
+
+    title: str
+    subtitle: str = ""
+    items: list[SearchResultItem] = field(default_factory=list)
+    notices: list[str] = field(default_factory=list)
+    link_lines: list[str] = field(default_factory=list)
+    error: str = ""
+
+
+@dataclass(slots=True)
+class SearchPresentation:
+    """命令处理层最终发送给用户的内容。"""
+
+    title: str
+    sections: list[SearchSection] = field(default_factory=list)
+    notices: list[str] = field(default_factory=list)
+    link_lines: list[str] = field(default_factory=list)
+
+    def build_link_text(self) -> str:
+        """生成与汇总图编号对应的链接清单。"""
+
+        lines = [line for line in self.link_lines if line.strip()]
+        return "\n".join(lines) if lines else "本次结果没有可展示的来源链接。"
+
+
+@dataclass(slots=True)
+class SauceNAOQuota:
+    """SauceNAO 返回的配额信息。"""
+
+    short_remaining: int | None = None
+    long_remaining: int | None = None
+
+
+@dataclass(slots=True)
+class SauceNAOResult:
+    """SauceNAO 查询结果和配额状态。"""
+
+    items: list[SearchResultItem] = field(default_factory=list)
+    quota: SauceNAOQuota = field(default_factory=SauceNAOQuota)
+    search_url: str = ""
+
+
+@dataclass(slots=True)
+class AniListInfo:
+    """AniList 补全后的番剧信息。"""
+
+    title: str = ""
+    is_adult: bool = False
+    cover_image: str = ""
+    site_url: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
