@@ -41,6 +41,7 @@ AI:
 | `SUMMARY_MODEL_NAME`        | `str`  | `Gemini/gemini-2.5-flash` | 本插件**全局默认**使用的 AI 模型，格式为 `ProviderName/ModelName`。会被分群配置覆盖。   |
 | `SUMMARY_DEFAULT_STYLE`     | `str`  | `null`                    | 本插件**全局默认**的总结风格。会被分群配置覆盖。                                        |
 | `SUMMARY_MAX_LENGTH`        | `int`  | `1000`                    | 手动触发总结时，可获取的最大消息数量。                                                  |
+| `SUMMARY_DB_SUPPLEMENT_MAX_LENGTH` | `int`  | `3000`                    | 时间范围总结超过 API 覆盖范围时，最多额外从 `chat_history` 表补充的消息数量；`USE_DB_HISTORY=true` 时也作为 DB 时间范围额外读取额度；`0` 表示关闭 API 补全。 |
 | `SUMMARY_MIN_LENGTH`        | `int`  | `50`                      | 触发总结所需的最少有效消息数量。                                                        |
 | `SUMMARY_COOL_DOWN`         | `int`  | `60`                      | 用户手动触发总结的冷却时间（秒）。                                                      |
 | `summary_output_type`       | `str`  | `image`                   | 总结报告的输出格式，可选值为 `image` 或 `text`。                                        |

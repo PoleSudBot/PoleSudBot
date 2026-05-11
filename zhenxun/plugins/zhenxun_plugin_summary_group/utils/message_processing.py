@@ -24,6 +24,8 @@ from ..config import summary_config
 from .core import ErrorCode, SummaryException
 from .scope import (
     SummaryScope,
+    build_db_supplement_warning,
+    build_db_time_range_limit_warning,
     build_partial_coverage_warning,
     get_scope_timezone,
 )
@@ -75,6 +77,12 @@ class MessageFetchResult:
     coverage_complete: bool
     warning_message: str | None
     source: str
+
+
+@dataclass(frozen=True)
+class _DbTimeRangeFetchResult:
+    messages: list[dict[str, Any]]
+    has_more: bool
 
 
 _message_cache: dict[str, tuple[MessageFetchResult, float]] = {}
@@ -150,6 +158,55 @@ def _sort_raw_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             _extract_message_timestamp(msg),
             str(_extract_message_id(msg) or ""),
         ),
+    )
+
+
+def _raw_message_identity_text(message: dict[str, Any]) -> str:
+    """提取跨 API/DB 去重时可比较的纯文本内容。"""
+    raw_message = message.get("raw_message")
+    if raw_message:
+        return _compact_whitespace(str(raw_message))
+
+    text_parts: list[str] = []
+    for segment in _normalize_segments(message.get("message", [])):
+        if segment.get("type") != "text":
+            continue
+        text_parts.append(str(segment.get("data", {}).get("text", "")))
+    return _compact_whitespace(" ".join(text_parts))
+
+
+def _raw_message_content_key(message: dict[str, Any]) -> tuple:
+    """构建跨源重复消息的保守比较键。"""
+    text = _raw_message_identity_text(message)
+    if text:
+        return (
+            "content",
+            _extract_message_timestamp(message),
+            _extract_message_user_id(message) or "",
+            text,
+        )
+    return (
+        "fallback",
+        _extract_message_timestamp(message),
+        _extract_message_user_id(message) or "",
+        _extract_message_id(message) or "",
+    )
+
+
+def _merge_supplemented_messages(
+    supplement_messages: list[dict[str, Any]],
+    api_messages: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], int]:
+    """合并 DB 补全和 API 消息，只去掉跨源重复记录。"""
+    api_keys = {_raw_message_content_key(message) for message in api_messages}
+    unique_supplement_messages = [
+        message
+        for message in supplement_messages
+        if _raw_message_content_key(message) not in api_keys
+    ]
+    return (
+        _sort_raw_messages(unique_supplement_messages + api_messages),
+        len(unique_supplement_messages),
     )
 
 
@@ -247,6 +304,53 @@ def _segment_to_text(
     return ""
 
 
+def _get_db_supplement_limit() -> int:
+    """读取时间范围数据库补全的独立上限。"""
+    raw_supplement_limit = base_config.get("SUMMARY_DB_SUPPLEMENT_MAX_LENGTH", 3000)
+    try:
+        return max(0, int(raw_supplement_limit))
+    except (TypeError, ValueError):
+        logger.warning(
+            "配置 SUMMARY_DB_SUPPLEMENT_MAX_LENGTH 不是有效整数，使用默认值 3000。",
+            command="DB历史",
+        )
+        return 3000
+
+
+def _get_db_time_range_limit(max_len: int) -> int:
+    """计算纯数据库时间范围查询允许纳入的总消息数。"""
+    return max_len + _get_db_supplement_limit()
+
+
+def _timestamp_to_scope_datetime(timestamp: int) -> datetime:
+    """将范围时间戳转换为数据库查询使用的本地时区时间。"""
+    return datetime.fromtimestamp(timestamp, get_scope_timezone())
+
+
+def _format_db_messages(db_messages: list[Any]) -> list[dict[str, Any]]:
+    """将 ChatHistory 行转换成后续处理函数可复用的消息字典。"""
+    formatted_messages: list[dict[str, Any]] = []
+    for msg in db_messages:
+        user_id = str(getattr(msg, "user_id", "") or "")
+        numeric_user_id = int(user_id) if user_id.isdigit() else 0
+        plain_text = getattr(msg, "plain_text", None) or ""
+        create_time = getattr(msg, "create_time", None)
+
+        formatted_messages.append(
+            {
+                "message_id": getattr(msg, "id", None),
+                "user_id": numeric_user_id,
+                "time": int(create_time.timestamp()) if create_time else 0,
+                "message_type": "group",
+                "message": [{"type": "text", "data": {"text": plain_text}}],
+                "raw_message": plain_text,
+                "sender": {"user_id": numeric_user_id},
+                "_summary_source": "db",
+            }
+        )
+    return formatted_messages
+
+
 async def _fetch_raw_messages_from_db(
     group_id: int,
     count: int,
@@ -270,20 +374,7 @@ async def _fetch_raw_messages_from_db(
             )
             return []
 
-        formatted_messages = [
-            {
-                "message_id": msg.id,
-                "user_id": int(msg.user_id) if msg.user_id.isdigit() else 0,
-                "time": int(msg.create_time.timestamp()),
-                "message_type": "group",
-                "message": [{"type": "text", "data": {"text": msg.plain_text or ""}}],
-                "raw_message": msg.plain_text or "",
-                "sender": {
-                    "user_id": int(msg.user_id) if msg.user_id.isdigit() else 0,
-                },
-            }
-            for msg in reversed(db_messages)
-        ]
+        formatted_messages = _format_db_messages(list(reversed(db_messages)))
         logger.debug(
             "从数据库成功获取并格式化 "
             f"{len(formatted_messages)} 条消息 (使用 plain_text)",
@@ -306,6 +397,82 @@ async def _fetch_raw_messages_from_db(
             message=f"数据库历史记录获取失败: {e!s}",
             code=ErrorCode.DB_QUERY_ERROR,
             details={"error": str(e), "group_id": group_id, "count": count},
+            cause=e,
+        ) from e
+
+
+async def _fetch_raw_messages_from_db_time_range(
+    group_id: int,
+    start_ts: int,
+    end_ts: int,
+    limit: int,
+    *,
+    include_end: bool = True,
+) -> _DbTimeRangeFetchResult:
+    """按时间范围从数据库获取聊天记录，并返回是否达到读取上限。"""
+    group_id_str = str(group_id)
+    safe_limit = max(0, int(limit))
+    start_dt = _timestamp_to_scope_datetime(start_ts)
+    end_dt = _timestamp_to_scope_datetime(end_ts)
+    end_lookup = "create_time__lte" if include_end else "create_time__lt"
+    filters = {
+        "group_id": group_id_str,
+        "create_time__gte": start_dt,
+        end_lookup: end_dt,
+    }
+
+    logger.debug(
+        "尝试从数据库按时间范围获取群 "
+        f"{group_id} 的聊天记录: {start_dt} ~ {end_dt}, limit={safe_limit}",
+        command="DB历史",
+    )
+    try:
+        if safe_limit <= 0:
+            return _DbTimeRangeFetchResult(messages=[], has_more=False)
+
+        # 时间范围可能远大于 API 上限，额外多取一条只用于判断是否仍有缺失。
+        db_messages = (
+            await ChatHistory.filter(**filters)
+            .order_by("-create_time", "-id")
+            .limit(safe_limit + 1)
+            .all()
+        )
+        has_more = len(db_messages) > safe_limit
+        if has_more:
+            db_messages = db_messages[:safe_limit]
+
+        messages = _format_db_messages(list(reversed(db_messages)))
+        logger.debug(
+            "从数据库按时间范围成功获取并格式化 "
+            f"{len(messages)} 条消息，has_more={has_more} (使用 plain_text)",
+            command="DB历史",
+            group_id=group_id,
+        )
+        logger.warning(
+            "使用数据库历史记录时，图片、@、引用回复等非文本信息可能无法正确处理。",
+            command="DB历史",
+        )
+        return _DbTimeRangeFetchResult(
+            messages=messages,
+            has_more=has_more,
+        )
+    except Exception as e:
+        logger.error(
+            f"从数据库按时间范围获取群 {group_id} 历史记录失败: {e}",
+            command="DB历史",
+            group_id=group_id,
+            e=e,
+        )
+        raise SummaryException(
+            message=f"数据库时间范围历史记录获取失败: {e!s}",
+            code=ErrorCode.DB_QUERY_ERROR,
+            details={
+                "error": str(e),
+                "group_id": group_id,
+                "start_ts": start_ts,
+                "end_ts": end_ts,
+                "limit": safe_limit,
+            },
             cause=e,
         ) from e
 
@@ -350,6 +517,81 @@ async def _fetch_raw_messages_from_api(
         ) from e
 
 
+async def _supplement_time_scope_with_db(
+    group_id: int,
+    scope: SummaryScope,
+    raw_messages: list[dict[str, Any]],
+    fetch_count: int,
+) -> tuple[list[dict[str, Any]], bool, str | None, str]:
+    """在 API 历史无法覆盖时间范围起点时，用数据库记录补齐较早片段。"""
+    coverage_complete = True
+    warning_message: str | None = None
+    source = "api"
+
+    if not scope.is_time_based or not raw_messages:
+        return raw_messages, coverage_complete, warning_message, source
+
+    start_ts = int(scope.start_ts or 0)
+    end_ts = int(scope.end_ts or 0)
+    earliest_ts = _extract_message_timestamp(raw_messages[0])
+    if earliest_ts <= start_ts:
+        return raw_messages, coverage_complete, warning_message, source
+
+    coverage_complete = False
+    warning_message = build_partial_coverage_warning(scope, fetch_count)
+
+    if not ChatHistory:
+        logger.warning(
+            "时间范围超过 API 覆盖范围，但 ChatHistory 不可用，无法补全数据库历史。",
+            command="DB历史",
+            group_id=group_id,
+        )
+        return raw_messages, coverage_complete, warning_message, source
+
+    supplement_limit = _get_db_supplement_limit()
+    if supplement_limit <= 0:
+        return raw_messages, coverage_complete, warning_message, source
+
+    # API 只能拿最近固定条数时，用数据库补左侧缺口；边界秒随后用内容去重处理。
+    gap_end_ts = min(end_ts, earliest_ts)
+    if gap_end_ts < start_ts:
+        return raw_messages, coverage_complete, warning_message, source
+
+    try:
+        supplement_result = await _fetch_raw_messages_from_db_time_range(
+            group_id,
+            start_ts,
+            gap_end_ts,
+            supplement_limit,
+        )
+    except SummaryException as e:
+        logger.warning(
+            f"数据库补全时间范围历史失败，将继续使用 API 部分结果: {e}",
+            command="DB历史",
+            group_id=group_id,
+            e=e,
+        )
+        return raw_messages, coverage_complete, warning_message, source
+
+    if not supplement_result.messages:
+        return raw_messages, coverage_complete, warning_message, source
+
+    combined_messages, supplement_count = _merge_supplemented_messages(
+        supplement_result.messages,
+        raw_messages,
+    )
+    if supplement_count <= 0:
+        return raw_messages, coverage_complete, warning_message, source
+
+    warning_message = build_db_supplement_warning(
+        scope,
+        supplement_count,
+        supplement_result.has_more,
+    )
+    coverage_complete = not supplement_result.has_more
+    return combined_messages, coverage_complete, warning_message, "api+db"
+
+
 async def get_group_messages(
     bot: Bot,
     group_id: int,
@@ -375,8 +617,27 @@ async def get_group_messages(
                 )
                 return copy.deepcopy(cached_data)
 
+    warning_message: str | None = None
+    coverage_complete = True
+
     if use_db and ChatHistory:
-        raw_messages = await _fetch_raw_messages_from_db(group_id, fetch_count)
+        if scope.is_time_based:
+            # DB 主路径直接按时间查询，避免“最近 N 条”先截断后再过滤导致范围缺失。
+            db_result = await _fetch_raw_messages_from_db_time_range(
+                group_id,
+                int(scope.start_ts or 0),
+                int(scope.end_ts or 0),
+                _get_db_time_range_limit(max_len),
+            )
+            raw_messages = db_result.messages
+            if db_result.has_more:
+                coverage_complete = False
+                warning_message = build_db_time_range_limit_warning(
+                    scope,
+                    len(raw_messages),
+                )
+        else:
+            raw_messages = await _fetch_raw_messages_from_db(group_id, fetch_count)
         source = "db"
     else:
         if use_db and not ChatHistory:
@@ -387,14 +648,18 @@ async def get_group_messages(
         source = "api"
 
     raw_messages = _sort_raw_messages(raw_messages)
-    warning_message: str | None = None
-    coverage_complete = True
-
-    if scope.is_time_based and raw_messages:
-        earliest_ts = _extract_message_timestamp(raw_messages[0])
-        if len(raw_messages) >= fetch_count and earliest_ts > int(scope.start_ts or 0):
-            coverage_complete = False
-            warning_message = build_partial_coverage_warning(scope, fetch_count)
+    if source == "api":
+        (
+            raw_messages,
+            coverage_complete,
+            warning_message,
+            source,
+        ) = await _supplement_time_scope_with_db(
+            group_id,
+            scope,
+            raw_messages,
+            fetch_count,
+        )
 
     scoped_messages = _filter_by_scope(raw_messages, scope)
     filtered_messages = _filter_by_users(scoped_messages, target_user_ids)

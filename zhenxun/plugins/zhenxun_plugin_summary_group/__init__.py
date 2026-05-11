@@ -154,6 +154,18 @@ __plugin_meta__ = PluginMetadata(
             ),
             RegisterConfig(
                 module="summary_group",
+                key="SUMMARY_DB_SUPPLEMENT_MAX_LENGTH",
+                value=3000,
+                help=(
+                    "时间范围总结超过 API 覆盖范围时，最多额外从 "
+                    "chat_history 表补充的消息数量；USE_DB_HISTORY=True 时也作为 "
+                    "DB 时间范围额外读取额度；0 表示关闭 API 补全"
+                ),
+                default_value=3000,
+                type=int,
+            ),
+            RegisterConfig(
+                module="summary_group",
                 key="SUMMARY_MIN_LENGTH",
                 value=50,
                 help="触发总结所需的最少消息数量",

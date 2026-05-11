@@ -252,3 +252,38 @@ def build_partial_coverage_warning(scope: SummaryScope, max_count: int) -> str:
         f"超过最大信息获取数量，请求的 {scope.label} 仅部分覆盖，"
         f"以下结果仅基于最近 {max_count} 条记录。"
     )
+
+
+def build_db_supplement_warning(
+    scope: SummaryScope,
+    supplement_count: int,
+    has_more: bool = False,
+) -> str:
+    """构建 API 范围不足后数据库补全的用户提示。"""
+    storage_note = (
+        "数据库历史按存储时间近似匹配，非原始消息时间；"
+        "数据库记录仅含纯文本，图片、@、引用回复等非文本上下文可能不完整。"
+    )
+    if not has_more:
+        return (
+            f"已从数据库补充 {supplement_count} 条{scope.label}缺失记录；"
+            f"{storage_note}"
+        )
+    return (
+        f"已从数据库补充 {supplement_count} 条{scope.label}缺失记录，"
+        "已达到数据库补全上限，仍可能有更多较早记录未纳入，"
+        f"较早话题脉络可能不完整；{storage_note}"
+    )
+
+
+def build_db_time_range_limit_warning(
+    scope: SummaryScope,
+    included_count: int,
+) -> str:
+    """构建纯数据库时间范围查询被独立上限截断的用户提示。"""
+    return (
+        f"数据库中{scope.label}记录已达到时间范围读取上限，仅纳入最近 "
+        f"{included_count} 条；仍可能有更多较早数据库记录未纳入，"
+        "较早话题脉络可能不完整；数据库历史按存储时间近似匹配，"
+        "非原始消息时间。"
+    )
