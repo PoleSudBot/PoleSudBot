@@ -305,6 +305,9 @@ class TemplateFileRenderStrategy(RenderStrategy):
             final_render_options["frameless"] = True
 
         screenshot_options = final_render_options.copy()
+        # frameless 只控制模板包裹方式，Playwright new_page 不认识该参数，
+        # 必须在截图前移除。
+        screenshot_options.pop("frameless", None)
         screenshot_options.pop("_keep_html_content", None)
 
         image_bytes = await context.screenshot_engine.render(
