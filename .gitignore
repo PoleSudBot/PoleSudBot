@@ -174,7 +174,11 @@ zhenxun/plugins/**/__pycache__/
 zhenxun/builtin_plugins/**/__pycache__/
 
 # Local tooling and transient auth artifacts
+.claude/
 .codex/
+.playwright-mcp/
+.ruff_cache/
+.uv-cache/
 multincm-qrcode.png
 restart.sh
 AGENTS.override.md
