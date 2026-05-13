@@ -1,52 +1,14 @@
-from __future__ import annotations
+import importlib
+import sys
 
-from collections.abc import Sequence
+_asset_fetcher_module = importlib.import_module(
+    "zhenxun.services.sekai_resource.asset_fetcher"
+)
 
-import httpx
+AssetFetcher = _asset_fetcher_module.AssetFetcher
+AsyncHttpx = _asset_fetcher_module.AsyncHttpx
+asset_fetcher = _asset_fetcher_module.asset_fetcher
 
-from zhenxun.utils.exception import AllURIsFailedError
+sys.modules[__name__] = _asset_fetcher_module
 
-from ..adapters.runtime import AsyncHttpx
-
-
-class AssetFetcher:
-    @staticmethod
-    def _unwrap_http_error(exc: AllURIsFailedError) -> Exception:
-        if exc.exceptions:
-            last_error = exc.exceptions[-1]
-            if isinstance(last_error, Exception):
-                return last_error
-        return exc
-
-    async def fetch_content(
-        self,
-        url: str,
-        *,
-        timeout: float = 20,
-    ) -> bytes:
-        try:
-            return await AsyncHttpx.get_content(
-                url,
-                timeout=timeout,
-            )
-        except AllURIsFailedError as exc:
-            raise self._unwrap_http_error(exc) from exc
-
-    async def fetch_first_content(
-        self,
-        urls: Sequence[str],
-        *,
-        timeout: float = 20,
-    ) -> bytes | None:
-        candidates = [url for url in urls if url]
-        if not candidates:
-            return None
-        for candidate in candidates:
-            try:
-                return await self.fetch_content(candidate, timeout=timeout)
-            except httpx.HTTPError:
-                continue
-        return None
-
-
-asset_fetcher = AssetFetcher()
+__all__ = ["AssetFetcher", "AsyncHttpx", "asset_fetcher"]

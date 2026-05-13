@@ -5,21 +5,27 @@ import importlib
 import os
 import time
 from types import SimpleNamespace
+from typing import ClassVar
 
+import httpx
 import nonebot
 import pytest
-import httpx
 
 nonebot.init()
 
-from zhenxun.utils.exception import AllURIsFailedError
+from zhenxun.plugins.moesekai.constants import SCOPE_GLOBAL
 from zhenxun.plugins.moesekai.providers.aliases import AliasProvider
-from zhenxun.plugins.moesekai.providers.assets import AssetProvider
-from zhenxun.plugins.moesekai.providers.asset_cache import AssetCacheProvider
-from zhenxun.plugins.moesekai.providers.asset_fetcher import asset_fetcher
+from zhenxun.plugins.moesekai.providers.asset_cache import (
+    AssetCacheProvider as CompatAssetCacheProvider,
+)
+from zhenxun.plugins.moesekai.providers.assets import (
+    AssetProvider as CompatAssetProvider,
+)
 from zhenxun.plugins.moesekai.providers.character_cache import CharacterCacheProvider
 from zhenxun.plugins.moesekai.providers.hub import hub_provider
-from zhenxun.plugins.moesekai.providers.masterdata import MasterDataProvider
+from zhenxun.plugins.moesekai.providers.masterdata import (
+    MasterDataProvider as CompatMasterDataProvider,
+)
 from zhenxun.plugins.moesekai.providers.profile import (
     ProfileProcessor,
     ProfileProvider,
@@ -29,8 +35,38 @@ from zhenxun.plugins.moesekai.providers.ranking import RankingSnapshot, ranking_
 from zhenxun.plugins.moesekai.providers.story_cache import StoryCacheProvider
 from zhenxun.plugins.moesekai.storage import BinaryFileCacheStore, PathBinaryFileStore
 from zhenxun.plugins.moesekai.storage.state import JsonStateStore
-from zhenxun.plugins.moesekai.constants import SCOPE_GLOBAL
+import zhenxun.services.sekai_resource.asset_cache as service_asset_cache_module
+from zhenxun.services.sekai_resource.asset_cache import AssetCacheProvider
+from zhenxun.services.sekai_resource.asset_fetcher import asset_fetcher
+from zhenxun.services.sekai_resource.assets import AssetProvider
+from zhenxun.services.sekai_resource.master_data import MasterDataProvider
 from zhenxun.utils.exception import AllURIsFailedError
+
+
+def test_moesekai_resource_provider_compat_exports():
+    assert CompatAssetProvider is AssetProvider
+    assert CompatAssetCacheProvider is AssetCacheProvider
+    assert CompatMasterDataProvider is MasterDataProvider
+
+
+def test_moesekai_resource_provider_compat_monkeypatches_service_module(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    compat_module = importlib.import_module(
+        "zhenxun.plugins.moesekai.providers.asset_cache"
+    )
+
+    monkeypatch.setattr(
+        compat_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            audio_format_priority=["ogg"],
+            asset_miss_cache_ttl_seconds=1,
+        ),
+    )
+
+    assert compat_module is service_asset_cache_module
+    assert service_asset_cache_module.get_settings().audio_format_priority == ["ogg"]
 
 
 @pytest.mark.asyncio
@@ -143,7 +179,9 @@ async def test_alias_provider_merges_system_and_group_aliases(
             }
         ]
     )
-    provider._master_state_store.save({"jp": {"version": "6.0.0.1", "updated_at": "2026-04-07T00:00:00"}})
+    provider._master_state_store.save(
+        {"jp": {"version": "6.0.0.1", "updated_at": "2026-04-07T00:00:00"}}
+    )
 
     async def fake_get_musics(_server: str):
         return [
@@ -189,7 +227,9 @@ async def test_alias_provider_resolve_prefers_group_scope(
         music_snapshot_store=JsonStateStore(tmp_path / "music_alias_snapshot.json"),
         master_state_store=JsonStateStore(tmp_path / "master_state.json"),
     )
-    provider._master_state_store.save({"jp": {"version": "6.0.0.1", "updated_at": "2026-04-07T00:00:00"}})
+    provider._master_state_store.save(
+        {"jp": {"version": "6.0.0.1", "updated_at": "2026-04-07T00:00:00"}}
+    )
 
     async def fake_get_musics(_server: str):
         return [{"id": 277, "title": "フォニイ", "pronunciation": "ふぉにい"}]
@@ -232,6 +272,7 @@ async def test_alias_provider_remove_reports_system_for_snapshot_alias(
     provider.refresh_music_alias_snapshot(
         [{"music_id": 277, "title": "フォニイ", "aliases": ["phony"]}]
     )
+
     async def fake_get_alias_entry(**_kwargs):
         return None
 
@@ -289,7 +330,8 @@ async def test_alias_provider_character_profile_uses_lazy_seed(
 ):
     seed_path = tmp_path / "character_alias.sql"
     seed_path.write_text(
-        "INSERT INTO pjsk.character_alias (id, alias, character_id) VALUES (1, '一歌', 1);\n",
+        "INSERT INTO pjsk.character_alias (id, alias, character_id) "
+        "VALUES (1, '一歌', 1);\n",
         encoding="utf-8",
     )
     provider = AliasProvider(
@@ -297,7 +339,9 @@ async def test_alias_provider_character_profile_uses_lazy_seed(
         music_snapshot_store=JsonStateStore(tmp_path / "music_alias_snapshot.json"),
         master_state_store=JsonStateStore(tmp_path / "master_state.json"),
     )
-    provider._master_state_store.save({"jp": {"version": "6.0.0.1", "updated_at": "2026-04-07T00:00:00"}})
+    provider._master_state_store.save(
+        {"jp": {"version": "6.0.0.1", "updated_at": "2026-04-07T00:00:00"}}
+    )
 
     async def fake_get_game_characters(_server: str):
         return [
@@ -336,7 +380,10 @@ def test_character_cache_provider_respects_ttl_and_refresh_signature(
     provider = CharacterCacheProvider(BinaryFileCacheStore(tmp_path))
 
     class FakeSettings:
-        site_bases = ["https://snowyviewer.exmeaning.com", "https://pjsk.moe"]
+        site_bases: ClassVar[list[str]] = [
+            "https://snowyviewer.exmeaning.com",
+            "https://pjsk.moe",
+        ]
         deck_viewport_width = 650
         character_top_crop = 100
         screenshot_quality = 85
@@ -351,7 +398,9 @@ def test_character_cache_provider_respects_ttl_and_refresh_signature(
     provider.set(21, b"character-image")
     assert provider.get(21) == b"character-image"
 
-    cache_path = provider._store._path_for_key(provider.build_cache_key(21), suffix=".png")
+    cache_path = provider._store._path_for_key(
+        provider.build_cache_key(21), suffix=".png"
+    )
     stale_timestamp = time.time() - 60
     os.utime(cache_path, (stale_timestamp, stale_timestamp))
 
@@ -371,7 +420,9 @@ def test_story_cache_provider_never_expires_when_ttl_is_zero(tmp_path):
     provider.set(199, b"story-image")
     assert provider.get(199) == b"story-image"
 
-    cache_path = provider._store._path_for_key(provider.build_cache_key(199), suffix=".png")
+    cache_path = provider._store._path_for_key(
+        provider.build_cache_key(199), suffix=".png"
+    )
     stale_timestamp = time.time() - 60 * 60 * 24 * 30
     os.utime(cache_path, (stale_timestamp, stale_timestamp))
 
@@ -389,8 +440,7 @@ def test_asset_provider_prefers_event_story_banner_path():
 
     assert urls
     assert (
-        urls[0]
-        == "https://assets-direct.unipjsk.com/ondemand/event_story/"
+        urls[0] == "https://assets-direct.unipjsk.com/ondemand/event_story/"
         "event_wavering_2026/screen_image/banner_event_story.png"
     )
     assert not any("startapp/home/banner" in url for url in urls)
@@ -439,14 +489,17 @@ def test_asset_cache_provider_supports_positive_and_negative_cache(
 
     class FakeSettings:
         asset_miss_cache_ttl_seconds = 60
-        audio_format_priority = ["mp3"]
+        audio_format_priority: ClassVar[list[str]] = ["mp3"]
 
     monkeypatch.setattr(
-        "zhenxun.plugins.moesekai.providers.asset_cache.get_settings",
+        "zhenxun.services.sekai_resource.asset_cache.get_settings",
         lambda: FakeSettings(),
     )
 
-    assert provider.get("jp", kind="event_banner", assetbundle="event_wavering_2026") is None
+    assert (
+        provider.get("jp", kind="event_banner", assetbundle="event_wavering_2026")
+        is None
+    )
     provider.set(
         "jp",
         kind="event_banner",
@@ -502,10 +555,10 @@ def test_asset_cache_provider_reuses_in_memory_miss_state(
 
     class FakeSettings:
         asset_miss_cache_ttl_seconds = 60
-        audio_format_priority = ["mp3"]
+        audio_format_priority: ClassVar[list[str]] = ["mp3"]
 
     monkeypatch.setattr(
-        "zhenxun.plugins.moesekai.providers.asset_cache.get_settings",
+        "zhenxun.services.sekai_resource.asset_cache.get_settings",
         lambda: FakeSettings(),
     )
 
@@ -526,8 +579,12 @@ async def test_asset_fetcher_falls_back_between_urls(monkeypatch: pytest.MonkeyP
             raise AllURIsFailedError([url], [httpx.ReadTimeout("primary failed")])
         return b"image-bytes"
 
-    asset_fetcher_module = importlib.import_module("zhenxun.plugins.moesekai.providers.asset_fetcher")
-    monkeypatch.setattr(asset_fetcher_module.AsyncHttpx, "get_content", fake_get_content)
+    asset_fetcher_module = importlib.import_module(
+        "zhenxun.plugins.moesekai.providers.asset_fetcher"
+    )
+    monkeypatch.setattr(
+        asset_fetcher_module.AsyncHttpx, "get_content", fake_get_content
+    )
 
     result = await asset_fetcher.fetch_first_content(
         [
@@ -562,8 +619,12 @@ async def test_asset_fetcher_unwraps_all_uris_failed_to_httpx_error(
             ],
         )
 
-    asset_fetcher_module = importlib.import_module("zhenxun.plugins.moesekai.providers.asset_fetcher")
-    monkeypatch.setattr(asset_fetcher_module.AsyncHttpx, "get_content", fake_get_content)
+    asset_fetcher_module = importlib.import_module(
+        "zhenxun.plugins.moesekai.providers.asset_fetcher"
+    )
+    monkeypatch.setattr(
+        asset_fetcher_module.AsyncHttpx, "get_content", fake_get_content
+    )
 
     with pytest.raises(httpx.HTTPStatusError) as exc_info:
         await asset_fetcher.fetch_content(target_url)
@@ -609,7 +670,9 @@ async def test_ranking_provider_get_snapshot_does_not_fallback_to_legacy(
         fake_get_current_event,
     )
     monkeypatch.setattr(ranking_provider, "get_event_meta", fake_get_event_meta)
-    monkeypatch.setattr(ranking_provider, "get_latest_snapshot", fake_get_latest_snapshot)
+    monkeypatch.setattr(
+        ranking_provider, "get_latest_snapshot", fake_get_latest_snapshot
+    )
 
     snapshot, event_meta, used_previous_event = await ranking_provider.get_snapshot(
         "jp",
@@ -653,7 +716,7 @@ def test_profile_provider_build_profile_url_keeps_encoded_uni_placeholder():
     )
 
 
-def test_profile_provider_build_profile_url_keeps_encoded_uni_placeholder_with_profile_suffix():
+def test_profile_provider_build_url_keeps_encoded_uni_placeholder_profile_suffix():
     assert (
         ProfileProvider.build_profile_url(
             "https://api.unipjsk.com/api/user/%7Buser_id%7D/profile",
@@ -731,7 +794,12 @@ def test_profile_processor_matches_go_side_key_fields():
             "member5": 1005,
         },
         "userCards": [
-            {"cardId": 1001, "level": 60, "masterRank": 5, "defaultImage": "special_training"},
+            {
+                "cardId": 1001,
+                "level": 60,
+                "masterRank": 5,
+                "defaultImage": "special_training",
+            },
             {"cardId": 1002, "level": 50, "masterRank": 1, "defaultImage": "original"},
         ],
         "userCharacters": [
@@ -746,8 +814,18 @@ def test_profile_processor_matches_go_side_key_fields():
             {"seq": 3, "honorId": 601, "profileHonorType": "normal"},
         ],
         "userMusicDifficultyClearCount": [
-            {"musicDifficultyType": "master", "liveClear": 10, "fullCombo": 4, "allPerfect": 1},
-            {"musicDifficultyType": "easy", "liveClear": 120, "fullCombo": 120, "allPerfect": 118},
+            {
+                "musicDifficultyType": "master",
+                "liveClear": 10,
+                "fullCombo": 4,
+                "allPerfect": 1,
+            },
+            {
+                "musicDifficultyType": "easy",
+                "liveClear": 120,
+                "fullCombo": 120,
+                "allPerfect": 118,
+            },
         ],
         "userChallengeLiveSoloResult": {"characterId": 21, "highScore": 1234567},
         "userChallengeLiveSoloStages": [
@@ -862,7 +940,9 @@ async def test_master_data_provider_exposes_honor_datasets(
     monkeypatch.setattr(MasterDataProvider, "get_dataset", fake_get_dataset)
 
     assert await MasterDataProvider.get_honors("jp") == [{"dataset": "honors"}]
-    assert await MasterDataProvider.get_honor_groups("jp") == [{"dataset": "honorGroups"}]
+    assert await MasterDataProvider.get_honor_groups("jp") == [
+        {"dataset": "honorGroups"}
+    ]
 
 
 @pytest.mark.asyncio
@@ -878,7 +958,10 @@ async def test_profile_static_asset_provider_uses_source_fallback_and_local_cach
 
     class _FakeSettings:
         asset_miss_cache_ttl_seconds = 3600
-        profile_static_asset_bases = ["https://a.example.com", "https://b.example.com"]
+        profile_static_asset_bases: ClassVar[list[str]] = [
+            "https://a.example.com",
+            "https://b.example.com",
+        ]
 
     async def fake_get_content(url: str, *, timeout: float | None = None, **_kwargs):
         calls.append(url)
@@ -902,11 +985,34 @@ async def test_profile_static_asset_provider_uses_source_fallback_and_local_cach
     second_path = await provider.ensure_local_path(["credits.json"])
 
     assert payload == {"1001": {"author": "tester", "source_type": "original"}}
-    assert second_path is not None and second_path.is_file()
+    assert second_path is not None
+    assert second_path.is_file()
     assert calls == [
         "https://a.example.com/credits.json",
         "https://b.example.com/credits.json",
     ]
+
+
+def test_profile_static_asset_provider_uses_resource_miss_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    provider = ProfileStaticAssetProvider(
+        store=PathBinaryFileStore(tmp_path / "profile_static"),
+        miss_store=JsonStateStore(tmp_path / "profile_static_miss.json"),
+    )
+
+    monkeypatch.setattr(time, "time", lambda: 1000.0)
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.providers.profile.get_resource_settings",
+        lambda: SimpleNamespace(asset_miss_cache_ttl_seconds=42),
+    )
+
+    provider._record_missing("https://a.example.com/missing.png")
+
+    assert provider._miss_store.load({}) == {
+        "https://a.example.com/missing.png": 1042.0
+    }
 
 
 @pytest.mark.asyncio
@@ -922,7 +1028,10 @@ async def test_profile_static_asset_provider_unwraps_all_uris_failed_404(
 
     class _FakeSettings:
         asset_miss_cache_ttl_seconds = 3600
-        profile_static_asset_bases = ["https://a.example.com", "https://b.example.com"]
+        profile_static_asset_bases: ClassVar[list[str]] = [
+            "https://a.example.com",
+            "https://b.example.com",
+        ]
 
     async def fake_get_content(url: str, *, timeout: float | None = None, **_kwargs):
         calls.append(url)

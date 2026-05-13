@@ -16,19 +16,39 @@ from zhenxun.plugins.moesekai.config_migration import migrate_legacy_plugin_conf
 
 
 class _FakeConfig:
-    def __init__(self, payload: dict[str, object]):
+    def __init__(
+        self,
+        payload: dict[str, object],
+        *,
+        resource_payload: dict[str, object] | None = None,
+        explicit_resource_keys: set[str] | None = None,
+    ):
+        resource_payload = resource_payload or {}
         self._data = {
             "moesekai": SimpleNamespace(
                 configs={
-                    key: SimpleNamespace(value=value)
-                    for key, value in payload.items()
+                    key: SimpleNamespace(value=value) for key, value in payload.items()
                 }
-            )
+            ),
+            "sekai_resource": SimpleNamespace(
+                configs={
+                    key: SimpleNamespace(value=value)
+                    for key, value in resource_payload.items()
+                }
+            ),
         }
         self._simple_data = {"moesekai": dict(payload)}
+        if explicit_resource_keys:
+            self._simple_data["sekai_resource"] = {
+                key: resource_payload[key]
+                for key in explicit_resource_keys
+                if key in resource_payload
+            }
         self.saved = False
 
-    def get_config(self, module: str, key: str, default=None, *, build_model: bool = True):
+    def get_config(
+        self, module: str, key: str, default=None, *, build_model: bool = True
+    ):
         group = self._data.get(module)
         if not group:
             return default
@@ -105,11 +125,28 @@ def test_migrate_legacy_plugin_config_normalizes_defaults(
     assert fake_config.get_config("moesekai", "MOESEKAI_PROFILE_BASES") == [
         "https://sekaiprofile.exmeaning.com"
     ]
-    assert fake_config.get_config("moesekai", "MOESEKAI_PROFILE_URL_TEMPLATES", None) is None
-    assert fake_config.get_config("moesekai", "MOESEKAI_MASTER_SOURCES", None) is None
-    assert fake_config.get_config("moesekai", "MOESEKAI_MASTER_CHECK_INTERVAL_SECONDS") == 600
     assert (
-        fake_config.get_config("moesekai", "MOESEKAI_MASTER_AUTO_CHECK_INTERVAL_SECONDS", None)
+        fake_config.get_config("moesekai", "MOESEKAI_PROFILE_URL_TEMPLATES", None)
+        is None
+    )
+    assert fake_config.get_config("moesekai", "MOESEKAI_MASTER_SOURCES", None) is None
+    assert (
+        fake_config.get_config(
+            "sekai_resource",
+            "SEKAI_RESOURCE_MASTER_CHECK_INTERVAL_SECONDS",
+        )
+        == 600
+    )
+    assert (
+        fake_config.get_config(
+            "moesekai", "MOESEKAI_MASTER_CHECK_INTERVAL_SECONDS", None
+        )
+        is None
+    )
+    assert (
+        fake_config.get_config(
+            "moesekai", "MOESEKAI_MASTER_AUTO_CHECK_INTERVAL_SECONDS", None
+        )
         is None
     )
     assert fake_config.saved is True
@@ -153,13 +190,51 @@ def test_migrate_legacy_plugin_config_keeps_custom_master_sources(
     changed = migrate_legacy_plugin_config()
 
     assert changed is True
-    migrated_sources = fake_config.get_config("moesekai", "MOESEKAI_MASTER_SOURCES")
+    migrated_sources = fake_config.get_config(
+        "sekai_resource",
+        "SEKAI_RESOURCE_MASTER_SOURCES",
+    )
     assert isinstance(migrated_sources, list)
-    assert migrated_sources[0]["name"] == "custom-jp"
-    assert migrated_sources[0]["family"] == "custom"
+    custom_source = next(
+        source for source in migrated_sources if source["name"] == "custom-jp"
+    )
+    assert custom_source["family"] == "custom"
+    assert fake_config.get_config("moesekai", "MOESEKAI_MASTER_SOURCES", None) is None
 
 
-def test_migrate_legacy_plugin_config_keeps_explicit_profile_token_without_legacy_template(
+def test_migrate_legacy_plugin_config_keeps_explicit_resource_value(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fake_config = _FakeConfig(
+        {
+            "MOESEKAI_GITHUB_TOKEN": "legacy-token",
+        },
+        resource_payload={
+            "SEKAI_RESOURCE_GITHUB_TOKEN": "new-token",
+        },
+        explicit_resource_keys={"SEKAI_RESOURCE_GITHUB_TOKEN"},
+    )
+
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.config_migration.Config",
+        fake_config,
+    )
+    monkeypatch.setattr(
+        "zhenxun.plugins.moesekai.config_migration._sync_config_files",
+        lambda: fake_config.save(),
+    )
+
+    changed = migrate_legacy_plugin_config()
+
+    assert changed is True
+    assert (
+        fake_config.get_config("sekai_resource", "SEKAI_RESOURCE_GITHUB_TOKEN")
+        == "new-token"
+    )
+    assert fake_config.get_config("moesekai", "MOESEKAI_GITHUB_TOKEN", None) is None
+
+
+def test_migrate_keeps_explicit_profile_token_without_legacy_template(
     monkeypatch: pytest.MonkeyPatch,
 ):
     fake_config = _FakeConfig(

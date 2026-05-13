@@ -9,6 +9,16 @@ import nonebot
 from nonebot.adapters import Bot
 from nonebot.plugin import PluginMetadata
 
+from zhenxun.services.sekai_resource.config import (
+    REGISTER_CONFIGS as SEKAI_RESOURCE_REGISTER_CONFIGS,
+)
+from zhenxun.services.sekai_resource.config import (
+    refresh_settings as refresh_resource_settings,
+)
+from zhenxun.services.sekai_resource.config import (
+    register_configs as register_resource_configs,
+)
+
 _TEST_MODE = bool(os.environ.get("PYTEST_CURRENT_TEST")) or "pytest" in sys.modules
 
 if not _TEST_MODE:
@@ -33,6 +43,10 @@ else:
     matcher = None
 
 from .config import REGISTER_CONFIGS
+
+register_resource_configs()
+
+PLUGIN_REGISTER_CONFIGS = [*SEKAI_RESOURCE_REGISTER_CONFIGS, *REGISTER_CONFIGS]
 
 __plugin_meta__ = PluginMetadata(
     name="MoeSekai",
@@ -113,7 +127,8 @@ __plugin_meta__ = PluginMetadata(
 管理员 / 超级用户测试新卡上线提醒合并转发效果。
 
 ## 💡 说明
-- 未指定区服时，优先使用你的默认区服；若命令本身不依赖绑定且你未绑定账号，则默认使用日服。
+- 未指定区服时，优先使用你的默认区服；
+  若命令本身不依赖绑定且你未绑定账号，则默认使用日服。
 - pjsk update all 仅超级用户可用。
 """.strip(),
     extra={
@@ -122,7 +137,7 @@ __plugin_meta__ = PluginMetadata(
         "menu_type": "游戏相关",
         "configs": [
             c.model_dump() if hasattr(c, "model_dump") else c.dict()
-            for c in REGISTER_CONFIGS
+            for c in PLUGIN_REGISTER_CONFIGS
         ],
         "commands": [
             {"command": "个人档案 / 查询档案 / 档案查询 [区服可选] [游戏ID|@用户可选]"},
@@ -159,6 +174,7 @@ if not _TEST_MODE:
     async def _bootstrap_moesekai() -> None:
         if migrate_legacy_plugin_config():
             refresh_settings()
+            refresh_resource_settings()
         else:
             get_settings()
         await migrate_legacy_bindings()

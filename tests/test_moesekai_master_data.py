@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -9,18 +10,126 @@ import pytest
 
 nonebot.init()
 
-from zhenxun.plugins.moesekai.config import (
+from zhenxun.services.sekai_resource import master_data as masterdata_module
+import zhenxun.services.sekai_resource.config as resource_config
+from zhenxun.services.sekai_resource.config import (
     MASTER_DATASET_KEYS,
     MasterSourceConfig,
     _merge_master_sources_config,
 )
-from zhenxun.plugins.moesekai.master_data import (
+from zhenxun.services.sekai_resource.constants import RESOURCE_DATA_DIR
+from zhenxun.services.sekai_resource.master_data import (
     MasterDataService,
     RegionUpdateResult,
     SourceVersionInfo,
     master_data_service,
 )
-from zhenxun.plugins.moesekai.providers import masterdata as masterdata_module
+
+
+class _FakeResourceConfig:
+    def __init__(self, payload: dict[str, dict[str, object]]):
+        self.payload = payload
+        self._data = {
+            module: SimpleNamespace(
+                configs={
+                    key: SimpleNamespace(value=value) for key, value in values.items()
+                }
+            )
+            for module, values in payload.items()
+        }
+        self._simple_data = {}
+
+    def get_config(self, module: str, key: str, default=None, **_kwargs):
+        return self.payload.get(module, {}).get(key, default)
+
+
+def test_sekai_resource_uses_dedicated_data_dir():
+    assert RESOURCE_DATA_DIR.name == "sekai_resource"
+
+
+def test_resource_settings_prefers_new_namespace(monkeypatch: pytest.MonkeyPatch):
+    fake_config = _FakeResourceConfig(
+        {
+            "sekai_resource": {
+                "SEKAI_RESOURCE_ASSET_SOURCE_ORDER": ["legacy-viewer"],
+            },
+            "moesekai": {
+                "MOESEKAI_ASSET_SOURCE_ORDER": ["uni"],
+            },
+        }
+    )
+
+    monkeypatch.setattr(resource_config, "Config", fake_config)
+    resource_config.get_settings.cache_clear()
+    try:
+        assert resource_config.get_settings().asset_source_order == ["legacy-viewer"]
+    finally:
+        resource_config.get_settings.cache_clear()
+
+
+def test_resource_settings_falls_back_to_moesekai_legacy_keys(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fake_config = _FakeResourceConfig(
+        {
+            "moesekai": {
+                "MOESEKAI_AUDIO_FORMAT_PRIORITY": ["flac"],
+            },
+        }
+    )
+
+    monkeypatch.setattr(resource_config, "Config", fake_config)
+    resource_config.get_settings.cache_clear()
+    try:
+        assert resource_config.get_settings().audio_format_priority == ["flac"]
+    finally:
+        resource_config.get_settings.cache_clear()
+
+
+def test_resource_settings_falls_back_when_new_namespace_is_registered_default(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fake_config = _FakeResourceConfig(
+        {
+            "sekai_resource": {
+                "SEKAI_RESOURCE_ASSET_SOURCE_ORDER": list(
+                    resource_config.REGISTER_DEFAULTS.asset_source_order
+                ),
+            },
+            "moesekai": {
+                "MOESEKAI_ASSET_SOURCE_ORDER": ["legacy-viewer"],
+            },
+        }
+    )
+
+    monkeypatch.setattr(resource_config, "Config", fake_config)
+    resource_config.get_settings.cache_clear()
+    try:
+        assert resource_config.get_settings().asset_source_order == ["legacy-viewer"]
+    finally:
+        resource_config.get_settings.cache_clear()
+
+
+def _full_master_payload(
+    *,
+    card_ids: list[int] | None = None,
+    stamp_ids: list[int] | None = None,
+) -> dict[str, list[dict[str, int]]]:
+    payload = {dataset: [] for dataset in MASTER_DATASET_KEYS}
+    payload["cards"] = [{"id": item_id} for item_id in card_ids or []]
+    payload["stamps"] = [{"id": item_id} for item_id in stamp_ids or []]
+    return payload
+
+
+def _write_master_payloads(
+    tmp_path,
+    server: str,
+    payloads: dict[str, list[dict[str, int]]],
+) -> None:
+    for dataset, payload in payloads.items():
+        path = tmp_path / server / f"{dataset}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -425,6 +534,355 @@ async def test_get_dataset_does_not_cache_missing_payload_on_failed_update(
 
 
 @pytest.mark.asyncio
+async def test_update_region_first_landing_does_not_report_added_records(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    source = MasterSourceConfig(
+        name="8823-jp",
+        region="jp",
+        base_url="https://example.com/8823",
+        version_path="versions.json",
+        version_field="dataVersion",
+        datasets={key: f"{key}.json" for key in MASTER_DATASET_KEYS},
+    )
+    saved_state: dict[str, dict[str, object]] = {}
+    original_cache = MasterDataService._cache
+    MasterDataService._cache = {}
+
+    def fake_dataset_path(_cls: type[MasterDataService], server: str, dataset: str):
+        path = tmp_path / server / f"{dataset}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    async def fake_select_source(
+        _cls: type[MasterDataService],
+        _server: str,
+        *,
+        include_lazy: bool,
+    ):
+        assert include_lazy is False
+        return source, [
+            SourceVersionInfo(
+                source=source,
+                revision="rev-1",
+                version="1.0.0",
+                success=True,
+            )
+        ]
+
+    async def fake_fetch_selected_payloads(
+        _cls: type[MasterDataService],
+        _source: MasterSourceConfig,
+    ):
+        return _full_master_payload(card_ids=[1], stamp_ids=[10]), "1.0.0"
+
+    monkeypatch.setattr(
+        MasterDataService, "_dataset_path", classmethod(fake_dataset_path)
+    )
+    monkeypatch.setattr(
+        MasterDataService, "_select_source", classmethod(fake_select_source)
+    )
+    monkeypatch.setattr(
+        MasterDataService,
+        "_fetch_selected_payloads",
+        classmethod(fake_fetch_selected_payloads),
+    )
+    monkeypatch.setattr(MasterDataService, "_load_state", classmethod(lambda _cls: {}))
+    monkeypatch.setattr(
+        MasterDataService,
+        "_save_state",
+        classmethod(lambda _cls, payload: saved_state.update(payload)),
+    )
+    monkeypatch.setattr(
+        masterdata_module,
+        "get_settings",
+        lambda: SimpleNamespace(master_check_mode="version"),
+    )
+
+    try:
+        result = await MasterDataService.update_region("jp")
+    finally:
+        MasterDataService._cache = original_cache
+
+    assert result.updated is True
+    assert result.download_success is True
+    assert result.added_records == {}
+    assert result.changed_datasets == []
+    assert saved_state["jp"]["version"] == "1.0.0"
+
+
+@pytest.mark.asyncio
+async def test_update_region_reports_added_records_with_trusted_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    source = MasterSourceConfig(
+        name="8823-jp",
+        region="jp",
+        base_url="https://example.com/8823",
+        version_path="versions.json",
+        version_field="dataVersion",
+        datasets={key: f"{key}.json" for key in MASTER_DATASET_KEYS},
+    )
+    previous_payloads = _full_master_payload(card_ids=[1], stamp_ids=[])
+    _write_master_payloads(tmp_path, "jp", previous_payloads)
+    saved_state: dict[str, dict[str, object]] = {}
+
+    def fake_dataset_path(_cls: type[MasterDataService], server: str, dataset: str):
+        path = tmp_path / server / f"{dataset}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    async def fake_select_source(
+        _cls: type[MasterDataService],
+        _server: str,
+        *,
+        include_lazy: bool,
+    ):
+        assert include_lazy is False
+        return source, [
+            SourceVersionInfo(
+                source=source,
+                revision="rev-2",
+                version="1.0.1",
+                success=True,
+            )
+        ]
+
+    async def fake_fetch_selected_payloads(
+        _cls: type[MasterDataService],
+        _source: MasterSourceConfig,
+    ):
+        return _full_master_payload(card_ids=[1, 2], stamp_ids=[10]), "1.0.1"
+
+    monkeypatch.setattr(
+        MasterDataService, "_dataset_path", classmethod(fake_dataset_path)
+    )
+    monkeypatch.setattr(
+        MasterDataService, "_select_source", classmethod(fake_select_source)
+    )
+    monkeypatch.setattr(
+        MasterDataService,
+        "_fetch_selected_payloads",
+        classmethod(fake_fetch_selected_payloads),
+    )
+    monkeypatch.setattr(
+        MasterDataService,
+        "_load_state",
+        classmethod(
+            lambda _cls: {
+                "jp": {
+                    "source_name": "8823-jp",
+                    "revision": "rev-1",
+                    "version": "1.0.0",
+                    "datasets": list(MASTER_DATASET_KEYS),
+                }
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        MasterDataService,
+        "_save_state",
+        classmethod(lambda _cls, payload: saved_state.update(payload)),
+    )
+    monkeypatch.setattr(
+        masterdata_module,
+        "get_settings",
+        lambda: SimpleNamespace(master_check_mode="version"),
+    )
+
+    result = await MasterDataService.update_region("jp")
+
+    assert result.updated is True
+    assert result.added_records == {
+        "cards": [{"id": 2}],
+        "stamps": [{"id": 10}],
+    }
+    assert result.changed_datasets == ["cards", "stamps"]
+    assert saved_state["jp"]["version"] == "1.0.1"
+
+
+@pytest.mark.asyncio
+async def test_update_region_invalid_payload_does_not_write_partial_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    source = MasterSourceConfig(
+        name="8823-jp",
+        region="jp",
+        base_url="https://example.com/8823",
+        version_path="versions.json",
+        version_field="dataVersion",
+        datasets={key: f"{key}.json" for key in MASTER_DATASET_KEYS},
+    )
+    previous_payloads = _full_master_payload(card_ids=[1], stamp_ids=[10])
+    _write_master_payloads(tmp_path, "jp", previous_payloads)
+    saved_state: dict[str, dict[str, object]] = {}
+
+    def fake_dataset_path(_cls: type[MasterDataService], server: str, dataset: str):
+        path = tmp_path / server / f"{dataset}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    async def fake_select_source(
+        _cls: type[MasterDataService],
+        _server: str,
+        *,
+        include_lazy: bool,
+    ):
+        return source, [
+            SourceVersionInfo(
+                source=source,
+                revision="rev-2",
+                version="1.0.1",
+                success=True,
+            )
+        ]
+
+    async def fake_fetch_selected_payloads(
+        _cls: type[MasterDataService],
+        _source: MasterSourceConfig,
+    ):
+        payload = _full_master_payload(card_ids=[1, 2], stamp_ids=[10])
+        payload["cards"] = {"id": 2}  # type: ignore[assignment]
+        return payload, "1.0.1"
+
+    monkeypatch.setattr(
+        MasterDataService, "_dataset_path", classmethod(fake_dataset_path)
+    )
+    monkeypatch.setattr(
+        MasterDataService, "_select_source", classmethod(fake_select_source)
+    )
+    monkeypatch.setattr(
+        MasterDataService,
+        "_fetch_selected_payloads",
+        classmethod(fake_fetch_selected_payloads),
+    )
+    monkeypatch.setattr(
+        MasterDataService,
+        "_load_state",
+        classmethod(
+            lambda _cls: {
+                "jp": {
+                    "source_name": "8823-jp",
+                    "revision": "rev-1",
+                    "version": "1.0.0",
+                    "datasets": list(MASTER_DATASET_KEYS),
+                }
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        MasterDataService,
+        "_save_state",
+        classmethod(lambda _cls, payload: saved_state.update(payload)),
+    )
+    monkeypatch.setattr(
+        masterdata_module,
+        "get_settings",
+        lambda: SimpleNamespace(master_check_mode="version"),
+    )
+
+    result = await MasterDataService.update_region("jp")
+
+    assert result.updated is False
+    assert result.error is not None
+    assert "TypeError" in result.error
+    assert saved_state == {}
+    for dataset, expected_payload in previous_payloads.items():
+        path = fake_dataset_path(MasterDataService, "jp", dataset)
+        assert json.loads(path.read_text(encoding="utf-8")) == expected_payload
+
+
+@pytest.mark.asyncio
+async def test_update_region_rolls_back_files_when_state_save_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    source = MasterSourceConfig(
+        name="8823-jp",
+        region="jp",
+        base_url="https://example.com/8823",
+        version_path="versions.json",
+        version_field="dataVersion",
+        datasets={key: f"{key}.json" for key in MASTER_DATASET_KEYS},
+    )
+    previous_payloads = _full_master_payload(card_ids=[1], stamp_ids=[10])
+    _write_master_payloads(tmp_path, "jp", previous_payloads)
+
+    def fake_dataset_path(_cls: type[MasterDataService], server: str, dataset: str):
+        path = tmp_path / server / f"{dataset}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    async def fake_select_source(
+        _cls: type[MasterDataService],
+        _server: str,
+        *,
+        include_lazy: bool,
+    ):
+        return source, [
+            SourceVersionInfo(
+                source=source,
+                revision="rev-2",
+                version="1.0.1",
+                success=True,
+            )
+        ]
+
+    async def fake_fetch_selected_payloads(
+        _cls: type[MasterDataService],
+        _source: MasterSourceConfig,
+    ):
+        return _full_master_payload(card_ids=[1, 2], stamp_ids=[10]), "1.0.1"
+
+    def fail_save_state(_cls: type[MasterDataService], _payload):
+        raise OSError("state save failed")
+
+    monkeypatch.setattr(
+        MasterDataService, "_dataset_path", classmethod(fake_dataset_path)
+    )
+    monkeypatch.setattr(
+        MasterDataService, "_select_source", classmethod(fake_select_source)
+    )
+    monkeypatch.setattr(
+        MasterDataService,
+        "_fetch_selected_payloads",
+        classmethod(fake_fetch_selected_payloads),
+    )
+    monkeypatch.setattr(
+        MasterDataService,
+        "_load_state",
+        classmethod(
+            lambda _cls: {
+                "jp": {
+                    "source_name": "8823-jp",
+                    "revision": "rev-1",
+                    "version": "1.0.0",
+                    "datasets": list(MASTER_DATASET_KEYS),
+                }
+            }
+        ),
+    )
+    monkeypatch.setattr(MasterDataService, "_save_state", classmethod(fail_save_state))
+    monkeypatch.setattr(
+        masterdata_module,
+        "get_settings",
+        lambda: SimpleNamespace(master_check_mode="version"),
+    )
+
+    result = await MasterDataService.update_region("jp")
+
+    assert result.updated is False
+    assert result.error is not None
+    assert "OSError" in result.error
+    for dataset, expected_payload in previous_payloads.items():
+        path = fake_dataset_path(MasterDataService, "jp", dataset)
+        assert json.loads(path.read_text(encoding="utf-8")) == expected_payload
+
+
+@pytest.mark.asyncio
 async def test_update_region_skips_auto_downgrade_when_local_file_missing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -469,7 +927,9 @@ async def test_update_region_skips_auto_downgrade_when_local_file_missing(
     for dataset in MASTER_DATASET_KEYS:
         if dataset == "events":
             continue
-        fake_dataset_path(MasterDataService, "jp", dataset).write_text("[]", encoding="utf-8")
+        fake_dataset_path(MasterDataService, "jp", dataset).write_text(
+            "[]", encoding="utf-8"
+        )
 
     monkeypatch.setattr(
         MasterDataService,

@@ -8,11 +8,13 @@ from typing import Any
 
 import httpx
 
+from zhenxun.services.sekai_resource.config import get_settings as get_resource_settings
+from zhenxun.utils.exception import AllURIsFailedError
+
 from ..adapters.runtime import AsyncHttpx, logger
 from ..config import get_settings
 from ..constants import MODULE_NAME, PROFILE_STATIC_ASSET_DIR, SERVER_SET, STATE_DIR
 from ..storage import JsonStateStore, PathBinaryFileStore
-from zhenxun.utils.exception import AllURIsFailedError
 
 _PROFILE_API_PLACEHOLDER_RE = re.compile(r"(?i)%7buser_id%7d")
 _PROFILE_DIFF_ORDER = ("easy", "normal", "hard", "expert", "master", "append")
@@ -54,7 +56,8 @@ class ProfileProvider:
             raise ProfileApiError("未配置 profile API 基础地址")
 
         # Uni 的上游路由要求保留 `%7Buser_id%7D` 这段路径哨兵，
-        # 真正的用户 ID 仍需继续向后追加；如果直接替换，会拿到 `"internal server error"`。
+        # 真正的用户 ID 仍需继续向后追加；如果直接替换，
+        # 会拿到 `"internal server error"`。
         if _PROFILE_API_PLACEHOLDER_RE.search(normalized_base):
             if normalized_base.endswith("/profile"):
                 return f"{normalized_base.removesuffix('/profile')}/{user_id}/profile"
@@ -518,9 +521,7 @@ class ProfileStaticAssetProvider:
             return normalized
 
         expired = [
-            url
-            for url, expire_at in self._miss_state_cache.items()
-            if expire_at <= now
+            url for url, expire_at in self._miss_state_cache.items() if expire_at <= now
         ]
         if not expired:
             return self._miss_state_cache
@@ -531,7 +532,9 @@ class ProfileStaticAssetProvider:
 
     def _record_missing(self, url: str) -> None:
         payload = self._load_miss_state()
-        payload[url] = time.time() + get_settings().asset_miss_cache_ttl_seconds
+        payload[url] = (
+            time.time() + get_resource_settings().asset_miss_cache_ttl_seconds
+        )
         self._miss_state_cache = payload
         self._miss_store.save(payload)
 
