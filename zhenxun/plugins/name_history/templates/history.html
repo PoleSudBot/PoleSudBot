@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      :root {
+        --bg: #ffffff;
+        --text: #111827;
+        --muted: #6b7280;
+        --line: #1f2937;
+        --soft: #f3f4f6;
+        --tag: #eef2ff;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        padding: 28px;
+        background: var(--bg);
+        color: var(--text);
+        font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+      }
+
+      .panel {
+        width: 800px;
+        margin: 0 auto;
+        padding: 28px;
+        border: 3px solid var(--line);
+        border-radius: 20px;
+        background: var(--bg);
+      }
+
+      .header {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+      }
+
+      .avatar,
+      .avatar-placeholder {
+        width: 82px;
+        height: 82px;
+        border: 3px solid var(--line);
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+
+      .avatar {
+        object-fit: cover;
+      }
+
+      .avatar-placeholder {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--soft);
+        color: var(--muted);
+        font-size: 30px;
+        font-weight: 700;
+      }
+
+      .title {
+        font-size: 34px;
+        font-weight: 700;
+        line-height: 1.25;
+      }
+
+      .subtitle {
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 18px;
+        line-height: 1.4;
+      }
+
+      .section {
+        margin-top: 24px;
+        padding-top: 22px;
+        border-top: 2px solid var(--line);
+      }
+
+      .section-title {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 14px;
+      }
+
+      .section-name {
+        font-size: 25px;
+        font-weight: 700;
+      }
+
+      .section-count {
+        color: var(--muted);
+        font-size: 16px;
+      }
+
+      .timeline {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .row {
+        display: grid;
+        grid-template-columns: 118px minmax(0, 1fr) 62px;
+        align-items: center;
+        gap: 12px;
+        min-height: 54px;
+        padding: 12px 14px;
+        border: 2px solid var(--line);
+        border-radius: 14px;
+        background: var(--bg);
+      }
+
+      .time {
+        color: var(--muted);
+        font-size: 17px;
+        white-space: nowrap;
+      }
+
+      .name {
+        min-width: 0;
+        font-size: 21px;
+        font-weight: 700;
+        line-height: 1.35;
+        word-break: break-all;
+      }
+
+      .current {
+        padding: 5px 10px;
+        border: 2px solid var(--line);
+        border-radius: 999px;
+        background: var(--tag);
+        font-size: 15px;
+        font-weight: 700;
+        text-align: center;
+      }
+
+      .empty,
+      .more {
+        padding: 14px 16px;
+        border: 2px solid var(--line);
+        border-radius: 14px;
+        color: var(--muted);
+        font-size: 19px;
+        line-height: 1.5;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="panel">
+      <section class="header">
+        {% if avatar_uri %}
+        <img class="avatar" src="{{ avatar_uri }}" />
+        {% else %}
+        <div class="avatar-placeholder">QQ</div>
+        {% endif %}
+        <div>
+          <div class="title">{{ title }}</div>
+          <div class="subtitle">QQ: {{ target_user_id }}</div>
+        </div>
+      </section>
+
+      {% for section in sections %}
+      <section class="section">
+        <div class="section-title">
+          <div class="section-name">{{ section.label }}</div>
+          <div class="section-count">
+            {% if section.items %}最近 {{ section.items | length }} 条{% else %}暂无记录{% endif %}
+          </div>
+        </div>
+
+        {% if section.items %}
+        <div class="timeline">
+          {% for item in section.items %}
+          <article class="row">
+            <div class="time">{{ item.time }}</div>
+            <div class="name">{{ item.display_name }}</div>
+            {% if item.is_current %}
+            <div class="current">当前</div>
+            {% else %}
+            <div></div>
+            {% endif %}
+          </article>
+          {% endfor %}
+          {% if section.truncated %}
+          <div class="more">只显示最近 {{ limit }} 条。</div>
+          {% endif %}
+        </div>
+        {% else %}
+        <div class="empty">{{ empty_text }}</div>
+        {% endif %}
+      </section>
+      {% endfor %}
+    </main>
+  </body>
+</html>
