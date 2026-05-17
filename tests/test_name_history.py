@@ -56,6 +56,7 @@ class FakeRepository:
     def __init__(self):
         self.latest: dict[str, str] = {}
         self.created: list[dict[str, Any]] = []
+        self.next_id = 1
 
     async def get_latest_display_name(
         self,
@@ -79,11 +80,14 @@ class FakeRepository:
         user_id: str,
         name_type: str,
         display_name: str,
-    ) -> None:
+    ) -> int:
         # 写入后同步 latest，模拟数据库下一次查询看到刚创建的记录。
         self.latest[name_type] = display_name
+        record_id = self.next_id
+        self.next_id += 1
         self.created.append(
             {
+                "id": record_id,
                 "platform": platform,
                 "group_id": group_id,
                 "user_id": user_id,
@@ -91,6 +95,7 @@ class FakeRepository:
                 "display_name": display_name,
             }
         )
+        return record_id
 
 
 @dataclass(slots=True)
@@ -98,6 +103,7 @@ class Record:
     name_type: str
     display_name: str
     record_time: datetime
+    avatar_hash: str | None = None
 
 
 def test_choose_history_display_name_handles_group_card_empty_rules():
@@ -135,7 +141,7 @@ async def test_record_sender_snapshot_records_two_name_types_independently():
     repo = FakeRepository()
     snapshot = logic.SenderNameSnapshot(group_card="群名片A", qq_name="QQ名A")
 
-    created = await logic.record_sender_snapshot(
+    created_ids = await logic.record_sender_snapshot(
         repo,
         platform="qq",
         group_id="1000",
@@ -143,7 +149,7 @@ async def test_record_sender_snapshot_records_two_name_types_independently():
         snapshot=snapshot,
     )
 
-    assert created == 2
+    assert created_ids == [1, 2]
     assert [(item["name_type"], item["display_name"]) for item in repo.created] == [
         (logic.GROUP_CARD, "群名片A"),
         (logic.QQ_NAME, "QQ名A"),
@@ -157,30 +163,21 @@ async def test_record_sender_snapshot_skips_unchanged_names_and_keeps_a_b_a_chai
     second = logic.SenderNameSnapshot(group_card="B", qq_name="QQ")
     third = logic.SenderNameSnapshot(group_card="A", qq_name="QQ")
 
+    assert await logic.record_sender_snapshot(
+        repo, platform="qq", group_id="1000", user_id="2000", snapshot=first
+    ) == [1, 2]
     assert (
         await logic.record_sender_snapshot(
             repo, platform="qq", group_id="1000", user_id="2000", snapshot=first
         )
-        == 2
+        == []
     )
-    assert (
-        await logic.record_sender_snapshot(
-            repo, platform="qq", group_id="1000", user_id="2000", snapshot=first
-        )
-        == 0
-    )
-    assert (
-        await logic.record_sender_snapshot(
-            repo, platform="qq", group_id="1000", user_id="2000", snapshot=second
-        )
-        == 1
-    )
-    assert (
-        await logic.record_sender_snapshot(
-            repo, platform="qq", group_id="1000", user_id="2000", snapshot=third
-        )
-        == 1
-    )
+    assert await logic.record_sender_snapshot(
+        repo, platform="qq", group_id="1000", user_id="2000", snapshot=second
+    ) == [3]
+    assert await logic.record_sender_snapshot(
+        repo, platform="qq", group_id="1000", user_id="2000", snapshot=third
+    ) == [4]
 
     assert [(item["name_type"], item["display_name"]) for item in repo.created] == [
         (logic.GROUP_CARD, "A"),
@@ -202,28 +199,22 @@ async def test_record_sender_snapshot_records_group_card_becoming_empty():
             user_id="2000",
             snapshot=logic.SenderNameSnapshot(group_card=None, qq_name=None),
         )
-        == 0
+        == []
     )
-    assert (
-        await logic.record_sender_snapshot(
-            repo,
-            platform="qq",
-            group_id="1000",
-            user_id="2000",
-            snapshot=logic.SenderNameSnapshot(group_card="有名片", qq_name=None),
-        )
-        == 1
-    )
-    assert (
-        await logic.record_sender_snapshot(
-            repo,
-            platform="qq",
-            group_id="1000",
-            user_id="2000",
-            snapshot=logic.SenderNameSnapshot(group_card=None, qq_name=None),
-        )
-        == 1
-    )
+    assert await logic.record_sender_snapshot(
+        repo,
+        platform="qq",
+        group_id="1000",
+        user_id="2000",
+        snapshot=logic.SenderNameSnapshot(group_card="有名片", qq_name=None),
+    ) == [1]
+    assert await logic.record_sender_snapshot(
+        repo,
+        platform="qq",
+        group_id="1000",
+        user_id="2000",
+        snapshot=logic.SenderNameSnapshot(group_card=None, qq_name=None),
+    ) == [2]
 
     assert repo.created[-1]["display_name"] == logic.GROUP_CARD_EMPTY_LABEL
 
@@ -294,6 +285,35 @@ def test_build_history_display_data_profile_name_prefers_current_group_card():
     data = logic.build_history_display_data(records, target_user_id="2000")
 
     assert data.profile_name == "群名片当前名"
+
+
+def test_build_history_display_data_resolves_avatar_uris():
+    now = datetime(2026, 5, 14, 21, 3)
+    records = [Record(logic.GROUP_CARD, "群名片", now, avatar_hash="hash-a")]
+
+    data = logic.build_history_display_data(
+        records,
+        target_user_id="2000",
+        avatar_uri_map={"hash-a": "file:///avatar-a.webp"},
+        avatar_history=["file:///avatar-a.webp"],
+        fallback_avatar_uri="file:///fallback.webp",
+    )
+
+    assert data.avatar_history == ["file:///avatar-a.webp"]
+    assert data.sections[0].items[0].avatar_uri == "file:///avatar-a.webp"
+
+
+def test_build_history_display_data_uses_fallback_avatar_when_record_hash_missing():
+    now = datetime(2026, 5, 14, 21, 3)
+    records = [Record(logic.GROUP_CARD, "群名片", now)]
+
+    data = logic.build_history_display_data(
+        records,
+        target_user_id="2000",
+        fallback_avatar_uri="file:///fallback.webp",
+    )
+
+    assert data.sections[0].items[0].avatar_uri == "file:///fallback.webp"
 
 
 def test_format_history_records_empty_single_filter_keeps_compact_text():
@@ -378,6 +398,79 @@ def test_plugin_entry_declares_htmlrender_and_avatar_dependencies():
     assert "nonebot_plugin_htmlrender" in required_plugins
     assert "template_to_pic" in imported_names
     assert "avatar_service" in imported_names
+
+
+def test_plugin_entry_registers_avatar_refresh_callback_and_startup_import():
+    tree = _load_plugin_tree()
+    registered_refresh_callback = False
+    schedules_startup_import = False
+
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "register_refresh_callback"
+        ):
+            registered_refresh_callback = True
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "import_existing_avatar_cache"
+        ):
+            schedules_startup_import = True
+
+    assert registered_refresh_callback
+    assert schedules_startup_import
+
+
+def test_avatar_history_model_and_group_name_migration_are_declared():
+    root = Path(__file__).resolve().parents[1]
+    group_name_source = (
+        root / "zhenxun" / "models" / "group_name_history.py"
+    ).read_text(encoding="utf-8")
+    avatar_model_source = (
+        root / "zhenxun" / "models" / "group_name_avatar_history.py"
+    ).read_text(encoding="utf-8")
+
+    assert "avatar_hash" in group_name_source
+    assert "ADD COLUMN avatar_hash" in group_name_source
+    assert "class GroupNameAvatarHistory" in avatar_model_source
+    assert "avatar_path" not in avatar_model_source
+
+
+def test_avatar_history_template_uses_wrapping_avatar_lists():
+    root = Path(__file__).resolve().parents[1]
+    template_source = (
+        root / "zhenxun" / "plugins" / "name_history" / "templates" / "history.html"
+    ).read_text(encoding="utf-8")
+
+    assert "avatar-history" in template_source
+    assert "flex-wrap: wrap" in template_source
+    assert "row-avatar" in template_source
+
+
+def test_avatar_service_declares_refresh_callback_hook():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "zhenxun" / "services" / "avatar_service.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "register_refresh_callback" in source
+    assert "_notify_avatar_refreshed" in source
+    assert "asyncio.create_task" in source
+
+
+def test_avatar_persistence_uses_hashing_threading_and_limited_import():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "zhenxun" / "plugins" / "name_history" / "_avatar.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "sha256" in source
+    assert "asyncio.to_thread" in source
+    assert "IMPORT_CONCURRENCY = 2" in source
+    assert "IMPORT_SLEEP_SECONDS = 0.05" in source
+    assert "GroupNameHistory.filter(id__in=ids)" in source
 
 
 def test_resolve_query_target_supports_self_at_and_qq_number():

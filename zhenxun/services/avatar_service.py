@@ -4,7 +4,9 @@
 提供一个统一的、带缓存的头像获取服务，支持多平台和可配置的过期策略。
 """
 
+import asyncio
 from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 import os
 from pathlib import Path
 import time
@@ -16,6 +18,8 @@ from zhenxun.configs.path_config import DATA_PATH
 from zhenxun.services.log import logger
 from zhenxun.utils.http_utils import AsyncHttpx
 from zhenxun.utils.platform import PlatformUtils
+
+AvatarRefreshCallback = Callable[[str, str, Path], Awaitable[None] | None]
 
 Config.add_plugin_config(
     "avatar_cache",
@@ -54,6 +58,44 @@ class AvatarService:
         self.cache_path = (DATA_PATH / "cache" / "avatars").resolve()
         self.cache_path.mkdir(parents=True, exist_ok=True)
         self._memory_cache: OrderedDict[str, Path] = OrderedDict()
+        self._refresh_callbacks: list[AvatarRefreshCallback] = []
+        self._refresh_tasks: set[asyncio.Task[None]] = set()
+
+    def register_refresh_callback(self, callback: AvatarRefreshCallback) -> None:
+        """注册头像刷新后的观察者，用于外部功能跟随缓存刷新做轻量处理。"""
+        if callback not in self._refresh_callbacks:
+            self._refresh_callbacks.append(callback)
+
+    async def _run_refresh_callback(
+        self,
+        callback: AvatarRefreshCallback,
+        platform: str,
+        identifier: str,
+        avatar_path: Path,
+    ) -> None:
+        """隔离刷新回调异常，避免观察者影响头像缓存主链路。"""
+        try:
+            result = callback(platform, identifier, avatar_path)
+            if result is not None:
+                await result
+        except Exception as e:
+            logger.warning(
+                "头像刷新回调执行失败",
+                "AvatarService",
+                target=identifier,
+                e=e,
+            )
+
+    def _notify_avatar_refreshed(
+        self, platform: str, identifier: str, avatar_path: Path
+    ) -> None:
+        """在头像确实重新下载后异步通知观察者。"""
+        for callback in tuple(self._refresh_callbacks):
+            task = asyncio.create_task(
+                self._run_refresh_callback(callback, platform, identifier, avatar_path)
+            )
+            self._refresh_tasks.add(task)
+            task.add_done_callback(self._refresh_tasks.discard)
 
     def _get_cache_path(self, platform: str, identifier: str) -> Path:
         """
@@ -114,6 +156,7 @@ class AvatarService:
             self._memory_cache.move_to_end(cache_key)
             while len(self._memory_cache) > self._MEMORY_CACHE_MAX_ITEMS:
                 self._memory_cache.popitem(last=False)
+            self._notify_avatar_refreshed(platform, identifier, local_path)
             return local_path
         else:
             logger.warning(f"下载头像失败: {avatar_url}", "AvatarService")

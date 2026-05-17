@@ -10,6 +10,7 @@ from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message
 from nonebot.params import CommandArg
 from nonebot.plugin import PluginMetadata
 from nonebot.rule import is_type
+from zhenxun.utils.manager.priority_manager import PriorityLifecycle
 
 require("nonebot_plugin_htmlrender")
 
@@ -36,6 +37,13 @@ from ._logic import (
     record_sender_snapshot,
     resolve_query_target,
 )
+from ._avatar import (
+    build_avatar_uri,
+    force_refresh_and_bind_avatar,
+    get_avatar_history_items,
+    import_existing_avatar_cache,
+    persist_refreshed_avatar,
+)
 
 MODULE = "name_history"
 TEMPLATE_DIR = (Path(__file__).parent / "templates").resolve()
@@ -47,6 +55,7 @@ _QQ_NAME_ALIASES = {"历史qq名", "QQ名历史", "qq名历史"}
 _record_locks: dict[tuple[str, str, str, str], asyncio.Lock] = {}
 _latest_name_cache: dict[tuple[str, str, str, str], str | None] = {}
 _group_info_synced: set[tuple[str, str, str]] = set()
+_background_tasks: set[asyncio.Task[None]] = set()
 
 __plugin_meta__ = PluginMetadata(
     name="历史昵称",
@@ -91,6 +100,12 @@ def _trim_record_locks() -> None:
             _record_locks.pop(key, None)
 
 
+def _track_background_task(task: asyncio.Task[None]) -> None:
+    """保留后台任务引用，避免 fire-and-forget 任务异常被静默丢掉。"""
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
 class _GroupNameHistoryRepository:
     async def get_latest_display_name(
         self,
@@ -127,9 +142,9 @@ class _GroupNameHistoryRepository:
         user_id: str,
         name_type: str,
         display_name: str,
-    ) -> None:
+    ) -> int:
         """写入一次名称变化事件。"""
-        await GroupNameHistory.create(
+        record = await GroupNameHistory.create(
             platform=platform,
             group_id=group_id,
             user_id=user_id,
@@ -138,6 +153,7 @@ class _GroupNameHistoryRepository:
         )
         _latest_name_cache[(platform, group_id, user_id, name_type)] = display_name
         _trim_cache(_latest_name_cache)
+        return int(record.id)
 
 
 _repository = _GroupNameHistoryRepository()
@@ -185,13 +201,24 @@ async def _record_history_with_locks(
     _trim_record_locks()
     lock = _record_locks.setdefault(lock_key, asyncio.Lock())
     async with lock:
-        return await record_sender_snapshot(
+        created_ids = await record_sender_snapshot(
             _repository,
             platform=platform,
             group_id=group_id,
             user_id=user_id,
             snapshot=snapshot,
         )
+    if created_ids:
+        _track_background_task(
+            asyncio.create_task(
+                force_refresh_and_bind_avatar(
+                    platform=platform,
+                    user_id=user_id,
+                    record_ids=created_ids,
+                )
+            )
+        )
+    return len(created_ids)
 
 
 async def _query_history_records(
@@ -248,11 +275,26 @@ async def _build_history_picture(
     name_type: str | None,
 ) -> bytes:
     """用 htmlrender 将历史昵称分区数据渲染成图片。"""
+    avatar_history_items = await get_avatar_history_items(
+        platform="qq",
+        user_id=target_user_id,
+    )
+    avatar_uri_map = {
+        item.avatar_hash: item.avatar_uri for item in avatar_history_items
+    }
+    for record in records:
+        if record.avatar_hash and record.avatar_hash not in avatar_uri_map:
+            avatar_uri_map[record.avatar_hash] = build_avatar_uri(
+                "qq", record.avatar_hash
+            )
     display_data = build_history_display_data(
         records,
         target_user_id=target_user_id,
         name_type=name_type,
         limit=HISTORY_LIMIT,
+        avatar_uri_map=avatar_uri_map,
+        avatar_history=[item.avatar_uri for item in avatar_history_items],
+        fallback_avatar_uri=avatar_uri,
     )
     return await template_to_pic(
         template_path=TEMPLATE_DIR,
@@ -261,6 +303,7 @@ async def _build_history_picture(
             "title": display_data.profile_name,
             "target_user_id": display_data.target_user_id,
             "avatar_uri": avatar_uri,
+            "avatar_history": display_data.avatar_history,
             "sections": display_data.sections,
             "empty_text": display_data.empty_text,
             "limit": HISTORY_LIMIT,
@@ -346,6 +389,15 @@ async def _send_history(
         return
 
     await MessageUtils.build_message(picture).finish(reply_to=True)
+
+
+avatar_service.register_refresh_callback(persist_refreshed_avatar)
+
+
+@PriorityLifecycle.on_startup(priority=6)
+async def _startup_import_avatar_cache():
+    """启动后后台导入已有头像缓存，兼容历史昵称插件首次启用场景。"""
+    _track_background_task(asyncio.create_task(import_existing_avatar_cache()))
 
 
 @_history_matcher.handle()

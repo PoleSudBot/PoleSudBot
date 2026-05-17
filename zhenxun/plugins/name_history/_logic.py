@@ -39,6 +39,7 @@ class HistoryDisplayItem:
     time: str
     display_name: str
     is_current: bool
+    avatar_uri: str = ""
 
 
 @dataclass(slots=True)
@@ -55,6 +56,7 @@ class HistoryDisplayData:
     target_user_id: str
     sections: list[HistoryDisplaySection]
     profile_name: str
+    avatar_history: list[str]
     empty_text: str = "暂无记录。之后我看到名称变化时会慢慢记下来。"
 
 
@@ -62,6 +64,7 @@ class HistoryRecord(Protocol):
     name_type: str
     display_name: str
     record_time: datetime
+    avatar_hash: str | None
 
 
 class NameHistoryRepository(Protocol):
@@ -83,8 +86,8 @@ class NameHistoryRepository(Protocol):
         user_id: str,
         name_type: str,
         display_name: str,
-    ) -> None:
-        """写入一次名称变化。"""
+    ) -> int:
+        """写入一次名称变化，并返回新记录主键。"""
 
 
 def normalize_display_name(value: object) -> str | None:
@@ -135,9 +138,9 @@ async def record_sender_snapshot(
     group_id: str,
     user_id: str,
     snapshot: SenderNameSnapshot,
-) -> int:
+) -> list[int]:
     """按类型分别比较最新名称，只在真正变化时写入历史。"""
-    created_count = 0
+    created_ids: list[int] = []
     candidates = (
         (GROUP_CARD, snapshot.group_card),
         (QQ_NAME, snapshot.qq_name),
@@ -154,15 +157,15 @@ async def record_sender_snapshot(
         )
         if display_name is None:
             continue
-        await repository.create_history(
+        record_id = await repository.create_history(
             platform=platform,
             group_id=group_id,
             user_id=user_id,
             name_type=name_type,
             display_name=display_name,
         )
-        created_count += 1
-    return created_count
+        created_ids.append(record_id)
+    return created_ids
 
 
 def build_group_info_defaults(
@@ -255,9 +258,13 @@ def build_history_display_data(
     target_user_id: str,
     name_type: str | None = None,
     limit: int = HISTORY_LIMIT,
+    avatar_uri_map: dict[str, str] | None = None,
+    avatar_history: Sequence[str] | None = None,
+    fallback_avatar_uri: str = "",
 ) -> HistoryDisplayData:
     """把历史记录整理成图片模板和文本回退共用的分区展示数据。"""
     name_type = normalize_name_type_filter(name_type)
+    avatar_uri_map = avatar_uri_map or {}
     title = _build_title(target_user_id, name_type)
     sections: list[HistoryDisplaySection] = []
 
@@ -274,6 +281,9 @@ def build_history_display_data(
                 time=_format_record_time(record.record_time),
                 display_name=record.display_name,
                 is_current=index == 0,
+                avatar_uri=(
+                    avatar_uri_map.get(record.avatar_hash or "") or fallback_avatar_uri
+                ),
             )
             for index, record in enumerate(section_records[:limit])
         ]
@@ -291,6 +301,7 @@ def build_history_display_data(
         target_user_id=target_user_id,
         sections=sections,
         profile_name=_resolve_profile_name(sections, target_user_id),
+        avatar_history=list(avatar_history or []),
     )
 
 

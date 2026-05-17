@@ -16,6 +16,8 @@ class GroupNameHistory(Model):
     """名称类型，group_card 表示群名片，qq_name 表示 QQ 名称"""
     display_name = fields.CharField(255, description="展示名称")
     """记录到的名称"""
+    avatar_hash = fields.CharField(64, null=True, description="关联历史头像hash")
+    """记录名称变化时关联到的头像hash"""
     record_time = fields.DatetimeField(auto_now_add=True, description="记录时间")
     """记录时间"""
 
@@ -25,4 +27,11 @@ class GroupNameHistory(Model):
         indexes = [  # noqa: RUF012
             ("platform", "group_id", "user_id", "name_type", "record_time"),
             ("group_id", "user_id"),
+        ]
+
+    @classmethod
+    async def _run_script(cls):
+        return [
+            "ALTER TABLE group_name_history "
+            "ADD COLUMN avatar_hash character varying(64);",
         ]
