@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      width: 860px;
+      margin: 0;
+      padding: 28px;
+      background: #edf1f5;
+      color: #1c2633;
+      font-family: "Inter", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+
+    .page {
+      width: 804px;
+      overflow: hidden;
+      border: 1px solid #d6dee8;
+      border-radius: 8px;
+      background: #fbfcfe;
+    }
+
+    .header {
+      padding: 22px 26px 18px;
+      border-bottom: 1px solid #d6dee8;
+      background: #ffffff;
+    }
+
+    .title {
+      margin: 0;
+      font-size: 28px;
+      line-height: 1.25;
+      font-weight: 700;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 3px 9px;
+      border-radius: 6px;
+      background: #e8f2ff;
+      color: #1e5d9e;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .badge-muted {
+      background: #eef1f4;
+      color: #586575;
+    }
+
+    .content {
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      padding: 22px 26px 26px;
+    }
+
+    .preview-panel {
+      border: 1px solid #d6dee8;
+      border-radius: 8px;
+      background: #ffffff;
+      overflow: hidden;
+    }
+
+    .preview-frame {
+      width: 100%;
+      min-height: 180px;
+      max-height: 460px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 12px;
+      background: #ffffff;
+    }
+
+    .preview-frame img {
+      display: block;
+      max-width: 100%;
+      max-height: 436px;
+      object-fit: contain;
+      background: #ffffff;
+    }
+
+    .preview-caption {
+      padding: 10px 12px;
+      border-top: 1px solid #d6dee8;
+      color: #687586;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    .result-body {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .section-title {
+      margin: 0 0 8px;
+      color: #415066;
+      font-size: 14px;
+      line-height: 1.35;
+      font-weight: 700;
+    }
+
+    .rating-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .rating {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+      padding: 5px 9px;
+      border-radius: 6px;
+      background: #eef1f4;
+      color: #455366;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .tag-list {
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+      min-width: 0;
+    }
+
+    .tag-row {
+      display: grid;
+      grid-template-columns: 1fr 58px;
+      gap: 10px;
+      align-items: center;
+      padding: 9px 10px;
+      border: 1px solid #dbe3ed;
+      border-radius: 8px;
+      background: #ffffff;
+    }
+
+    .tag-name {
+      min-width: 0;
+      color: #233044;
+      font-size: 16px;
+      line-height: 1.35;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .tag-score {
+      color: #536174;
+      font-size: 14px;
+      line-height: 1.35;
+      font-weight: 700;
+      text-align: right;
+    }
+
+    .bar {
+      grid-column: 1 / -1;
+      height: 8px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #e7ecf2;
+    }
+
+    .bar-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: #3380c4;
+    }
+
+    .footer {
+      padding: 14px 26px 18px;
+      border-top: 1px solid #d6dee8;
+      background: #f6f8fb;
+      color: #708094;
+      font-size: 13px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="header">
+      <h1 class="title">图片Tag识别结果</h1>
+      <div class="meta">
+        <span class="badge">模型 {{ result.model }}</span>
+        <span class="badge">阈值 {{ "%.0f"|format(result.threshold * 100) }}%</span>
+        <span class="badge badge-muted">展示 {{ result.tags|length }} / {{ result.total_count }}</span>
+      </div>
+    </section>
+    <section class="content">
+      <section class="preview-panel">
+        <div class="preview-frame">
+          <img src="{{ image_data_uri }}" alt="source image" />
+        </div>
+        <div class="preview-caption">输入图片预览</div>
+      </section>
+      <section class="result-body">
+        {% if result.ratings %}
+        <div>
+          <h2 class="section-title">Rating</h2>
+          <div class="rating-list">
+            {% for rating in result.ratings %}
+            <span class="rating">{{ rating.name }} {{ "%.1f"|format(rating.score_percent) }}%</span>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+        <div>
+          <h2 class="section-title">Tags</h2>
+          <section class="tag-list">
+            {% for tag in result.tags %}
+            <div class="tag-row">
+              <div class="tag-name">{{ tag.name }}</div>
+              <div class="tag-score">{{ "%.1f"|format(tag.score_percent) }}%</div>
+              <div class="bar">
+                <div class="bar-fill" style="width: {{ "%.1f"|format(tag.score_ratio * 100) }}%"></div>
+              </div>
+            </div>
+            {% endfor %}
+          </section>
+        </div>
+      </section>
+    </section>
+    <section class="footer">
+      tags: {{ result.tags | map(attribute="name") | join(",") }}
+    </section>
+  </main>
+</body>
+</html>

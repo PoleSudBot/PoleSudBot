@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from zhenxun.configs.utils.models import RegisterConfig
 
 MODULE_NAME = "pictrace"
 LEGACY_MODULE_NAMES = ("pictracer", "pic_search")
+DEFAULT_TAGGER_API_URL = "https://deepghs-wd14-tagging-online.hf.space/api/predict"
+DEFAULT_TAGGER_MODEL = "wd14-vit"
+SUPPORTED_TAGGER_MODELS = {"wd14-vit", "wd14-convnext"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +34,13 @@ class PicSearchSettings:
     max_image_size_mb: int = 15
     wait_image_timeout: int = 180
     forward_search_result: bool = True
+    tagger_api_url: str = DEFAULT_TAGGER_API_URL
+    tagger_model: str = DEFAULT_TAGGER_MODEL
+    tagger_confidence_threshold: float = 0.5
+    tagger_result_limit: int = 30
+    tagger_request_timeout: int = 120
+    tagger_hf_token: str = ""
+    forward_tagger_result: bool = True
 
 
 REGISTER_CONFIGS = [
@@ -175,6 +186,62 @@ REGISTER_CONFIGS = [
         help="是否优先使用合并转发发送结果",
         type=bool,
     ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="TAGGER_API_URL",
+        value=DEFAULT_TAGGER_API_URL,
+        default_value=DEFAULT_TAGGER_API_URL,
+        help="图片 tag 识别 API 地址，默认使用 Hugging Face 公共 WD14 Space",
+        type=str,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="TAGGER_MODEL",
+        value=DEFAULT_TAGGER_MODEL,
+        default_value=DEFAULT_TAGGER_MODEL,
+        help="图片 tag 识别模型，可选 wd14-vit / wd14-convnext",
+        type=str,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="TAGGER_CONFIDENCE_THRESHOLD",
+        value=0.5,
+        default_value=0.5,
+        help="图片 tag 识别置信度阈值",
+        type=float,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="TAGGER_RESULT_LIMIT",
+        value=30,
+        default_value=30,
+        help="图片 tag 识别最多展示的 tag 数量",
+        type=int,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="TAGGER_REQUEST_TIMEOUT",
+        value=120,
+        default_value=120,
+        help="请求图片 tag 识别 API 的超时时间秒数",
+        type=int,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="TAGGER_HF_TOKEN",
+        value="",
+        default_value="",
+        help="可选 Hugging Face Token，用于提升公共 Space 调用限额稳定性",
+        type=str,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="FORWARD_TAGGER_RESULT",
+        value=True,
+        default_value=True,
+        help="是否优先使用合并转发发送图片 tag 识别结果",
+        type=bool,
+    ),
 ]
 
 
@@ -192,6 +259,35 @@ def _parse_bool(value) -> bool:
         if normalized in {"0", "false", "no", "n", "off", "disable", "disabled"}:
             return False
     return bool(value)
+
+
+def _clamp_float(
+    value: Any, default: float, min_value: float, max_value: float
+) -> float:
+    """把外部配置收敛到接口接受的数值范围。"""
+
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(min_value, min(parsed, max_value))
+
+
+def _positive_int(value: Any, default: int) -> int:
+    """读取正整数配置，并在配置异常时回退默认值。"""
+
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, parsed)
+
+
+def _normalize_tagger_model(value: Any) -> str:
+    """把图片 tag 模型配置限制在公共 Space 当前支持的候选值内。"""
+
+    model = str(value or DEFAULT_TAGGER_MODEL).strip()
+    return model if model in SUPPORTED_TAGGER_MODELS else DEFAULT_TAGGER_MODEL
 
 
 def load_settings() -> PicSearchSettings:
@@ -221,6 +317,11 @@ def load_settings() -> PicSearchSettings:
     if confident_threshold < low_threshold:
         low_threshold, confident_threshold = confident_threshold, low_threshold
 
+    tagger_api_url = (
+        str(get_config("TAGGER_API_URL", DEFAULT_TAGGER_API_URL)).strip()
+        or DEFAULT_TAGGER_API_URL
+    )
+
     return PicSearchSettings(
         saucenao_api_key=str(get_config("SAUCENAO_API_KEY", "")),
         serp_api_key=str(get_config("SERP_API_KEY", "")),
@@ -246,4 +347,17 @@ def load_settings() -> PicSearchSettings:
         max_image_size_mb=int(get_config("MAX_IMAGE_SIZE_MB", 15)),
         wait_image_timeout=int(get_config("WAIT_IMAGE_TIMEOUT", 180)),
         forward_search_result=_parse_bool(get_config("FORWARD_SEARCH_RESULT", True)),
+        tagger_api_url=tagger_api_url,
+        tagger_model=_normalize_tagger_model(
+            get_config("TAGGER_MODEL", DEFAULT_TAGGER_MODEL)
+        ),
+        tagger_confidence_threshold=_clamp_float(
+            get_config("TAGGER_CONFIDENCE_THRESHOLD", 0.5), 0.5, 0.0, 1.0
+        ),
+        tagger_result_limit=_positive_int(get_config("TAGGER_RESULT_LIMIT", 30), 30),
+        tagger_request_timeout=_positive_int(
+            get_config("TAGGER_REQUEST_TIMEOUT", 120), 120
+        ),
+        tagger_hf_token=str(get_config("TAGGER_HF_TOKEN", "")).strip(),
+        forward_tagger_result=_parse_bool(get_config("FORWARD_TAGGER_RESULT", True)),
     )

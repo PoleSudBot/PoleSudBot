@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 
@@ -95,3 +95,62 @@ class AniListInfo:
     cover_image: str = ""
     site_url: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ImageTag:
+    """图片 tag 和模型给出的置信度。"""
+
+    name: str
+    score: float
+
+    @property
+    def score_percent(self) -> float:
+        """把 0-1 或 0-100 两类常见分数统一成百分比展示值。"""
+
+        return self.score * 100 if self.score <= 1 else self.score
+
+    @property
+    def score_ratio(self) -> float:
+        """把分数压到 0-1 区间，供结果图进度条使用。"""
+
+        if self.score <= 1:
+            return max(0, min(self.score, 1))
+        return max(0, min(self.score / 100, 1))
+
+
+@dataclass(frozen=True, slots=True)
+class ImageTagResult:
+    """一次图片 tag 识别的展示结果。"""
+
+    tags: list[ImageTag]
+    ratings: list[ImageTag]
+    threshold: float
+    model: str
+    total_count: int
+
+    def limited(self, limit: int) -> "ImageTagResult":
+        """按配置限制展示 tag 数量，同时保留接口原始命中总数。"""
+
+        return replace(self, tags=self.tags[: max(1, limit)])
+
+    def build_copy_text(self) -> str:
+        """生成方便用户复制到提示词或搜索框的 tag 文本。"""
+
+        if not self.tags:
+            return "tags: "
+        return "tags: " + ",".join(tag.name for tag in self.tags)
+
+    def build_score_text(self) -> str:
+        """生成带置信度的文本兜底结果。"""
+
+        if not self.tags:
+            return "未识别到可用 tag。"
+        lines = [
+            f"{index}. {tag.name} {tag.score_percent:.1f}%"
+            for index, tag in enumerate(self.tags, start=1)
+        ]
+        omitted = self.total_count - len(self.tags)
+        if omitted > 0:
+            lines.append(f"...另有 {omitted} 个 tag 已按配置省略")
+        return "\n".join(lines)

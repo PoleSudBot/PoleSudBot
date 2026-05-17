@@ -52,6 +52,10 @@ class _FakeAsyncHttpx:
     async def get_content(*_args, **_kwargs):
         raise AssertionError("AsyncHttpx.get_content should be monkeypatched")
 
+    @staticmethod
+    async def post_json(*_args, **_kwargs):
+        raise AssertionError("AsyncHttpx.post_json should be monkeypatched")
+
 
 async def _fake_render_template(*_args, **_kwargs):
     return b"rendered"
