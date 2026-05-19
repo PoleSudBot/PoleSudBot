@@ -49,6 +49,7 @@ from .auth.exception import (
     PermissionExemption,
     SkipPluginException,
 )
+from .auth.utils import is_poke
 
 AUTH_HOOKS_CONCURRENCY_LIMIT = 5
 AUTH_DB_CONCURRENCY_LIMIT = 6
@@ -1561,7 +1562,14 @@ async def auth(
         else:
             hook_tasks.append(
                 time_hook(
-                    auth_group(plugin, group, text, entity.group_id),
+                    auth_group(
+                        plugin,
+                        group,
+                        text,
+                        entity.group_id,
+                        session,
+                        is_poke(event),
+                    ),
                     "auth_group",
                     hook_recorder,
                 )

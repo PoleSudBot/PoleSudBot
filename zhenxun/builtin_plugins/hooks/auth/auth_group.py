@@ -1,6 +1,8 @@
 import re
 import time
 
+from nonebot_plugin_uninfo import Uninfo
+
 from zhenxun.models.group_console import GroupConsole
 from zhenxun.models.plugin_info import PluginInfo
 from zhenxun.services.cache.runtime_cache import GroupSnapshot
@@ -8,6 +10,7 @@ from zhenxun.services.log import logger
 
 from .config import LOGGER_COMMAND, WARNING_THRESHOLD, SwitchEnum
 from .exception import SkipPluginException
+from .utils import freq, send_message
 
 _GROUP_WAKE_PATTERN = re.compile(r"^醒来$", re.IGNORECASE)
 _GROUP_WAKE_CANONICAL_PATTERN = re.compile(r"^group-status\s+wake$", re.IGNORECASE)
@@ -34,13 +37,18 @@ async def auth_group(
     group: GroupConsole | GroupSnapshot | None,
     text: str | None,
     group_id: str | None,
+    session: Uninfo | None = None,
+    is_poke: bool = False,
 ):
     """群黑名单检测 群总开关检测
 
     参数:
         plugin: PluginInfo
         group: GroupConsole
-        message: UniMsg
+        text: 消息文本
+        group_id: 群组ID
+        session: 会话信息
+        is_poke: 是否是戳一戳
     """
     if not group_id:
         return
@@ -57,6 +65,18 @@ async def auth_group(
         if not _is_group_wake_command(plugin, text) and not group.status:
             raise SkipPluginException("群组休眠状态...")
         if plugin.level > group.level:
+            # 群权限等级不足时单独提醒，避免受“功能未开启”提示开关影响。
+            if session and freq.is_send_group_level_message(plugin, group_id, is_poke):
+                await send_message(
+                    session,
+                    (
+                        "当前群权限等级不足喔，"
+                        f"该功能需要群权限等级: {plugin.level}，"
+                        f"当前群的群权限等级: {group.level}"
+                    ),
+                    group_id,
+                    background=True,
+                )
             raise SkipPluginException(
                 f"{plugin.name}({plugin.module}) 群等级限制，"
                 f"该功能需要的群等级: {plugin.level}..."

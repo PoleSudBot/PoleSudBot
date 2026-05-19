@@ -32,7 +32,11 @@ async def auth_cost(
         user_gold = user.gold if user else DEFAULT_GOLD
         if user_gold < plugin.cost_gold:
             """插件消耗金币不足"""
-            await send_message(session, f"金币不足..该功能需要{plugin.cost_gold}金币..")
+            await send_message(
+                session,
+                f"金币不足..该功能需要{plugin.cost_gold}金币"
+                "（也许..可以试试签到？）",
+            )
             raise SkipPluginException(f"{plugin.name}({plugin.module}) 金币限制...")
         return plugin.cost_gold
     finally:

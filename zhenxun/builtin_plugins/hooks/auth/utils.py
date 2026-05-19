@@ -80,26 +80,41 @@ class FreqUtils:
         self._flmt_s = FreqLimiter(check_notice_info_cd)
         self._flmt_c = FreqLimiter(check_notice_info_cd)
 
-    def is_send_limit_message(
-        self, plugin: PluginInfo, sid: str, is_poke: bool
+    def _is_send_limit_message(
+        self, plugin: PluginInfo, sid: str, is_poke: bool, config_key: str
     ) -> bool:
-        """是否发送提示消息
+        """按配置与插件属性判断当前阻断提示是否允许发送。
 
         参数:
             plugin: PluginInfo
             sid: 检测键
             is_poke: 是否是戳一戳
+            config_key: 提示开关配置项
 
         返回:
             bool: 是否发送提示消息
         """
         if is_poke:
             return False
-        if not base_config.get("IS_SEND_TIP_MESSAGE"):
+        if not base_config.get(config_key):
             return False
         if plugin.plugin_type == PluginType.DEPENDANT:
             return False
         return False if plugin.ignore_prompt else self._flmt_s.check(sid)
+
+    def is_send_limit_message(
+        self, plugin: PluginInfo, sid: str, is_poke: bool
+    ) -> bool:
+        """是否发送通用阻断提示消息。"""
+        return self._is_send_limit_message(plugin, sid, is_poke, "IS_SEND_TIP_MESSAGE")
+
+    def is_send_group_level_message(
+        self, plugin: PluginInfo, sid: str, is_poke: bool
+    ) -> bool:
+        """是否发送群权限等级不足提示消息。"""
+        return self._is_send_limit_message(
+            plugin, sid, is_poke, "IS_SEND_GROUP_LEVEL_TIP_MESSAGE"
+        )
 
 
 freq = FreqUtils()

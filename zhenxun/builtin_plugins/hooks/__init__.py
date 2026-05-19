@@ -51,6 +51,15 @@ Config.add_plugin_config(
 
 Config.add_plugin_config(
     "hook",
+    "IS_SEND_GROUP_LEVEL_TIP_MESSAGE",
+    True,
+    help="是否发送群权限等级不足提示消息",
+    default_value=True,
+    type=bool,
+)
+
+Config.add_plugin_config(
+    "hook",
     "RECORD_BOT_SENT_MESSAGES",
     True,
     help="记录bot消息发送",
