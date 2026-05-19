@@ -173,6 +173,14 @@ class _FakeBot:
         return {"messages": list(self.messages)}
 
 
+class _FakeStatistics:
+    records: ClassVar[list[dict]] = []
+
+    @classmethod
+    async def create(cls, **kwargs):
+        cls.records.append(kwargs)
+
+
 def _register_package(monkeypatch: pytest.MonkeyPatch, name: str, path: Path) -> None:
     package = types.ModuleType(name)
     package.__path__ = [str(path)]
@@ -199,6 +207,15 @@ def summary_modules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     _register_package(monkeypatch, package_name, PLUGIN_ROOT)
     _register_package(monkeypatch, utils_name, PLUGIN_ROOT / "utils")
     sys.modules[package_name].base_config = base_config
+
+    def validate_msg_count_range(count: int) -> int:
+        min_len = int(base_config.get("SUMMARY_MIN_LENGTH"))
+        max_len = int(base_config.get("SUMMARY_MAX_LENGTH"))
+        if not (min_len <= count <= max_len):
+            raise ValueError(f"总结消息数量应在 {min_len} 到 {max_len} 之间")
+        return count
+
+    sys.modules[package_name].validate_msg_count_range = validate_msg_count_range
 
     config_module = types.ModuleType(f"{package_name}.config")
     config_module.summary_config = summary_config
@@ -241,11 +258,19 @@ def summary_modules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     chat_history_module = types.ModuleType("zhenxun.models.chat_history")
     chat_history_module.ChatHistory = _FakeChatHistory
     models_module = types.ModuleType("zhenxun.models")
+    models_module.__path__ = []
+    statistics_module = types.ModuleType("zhenxun.models.statistics")
+    statistics_module.Statistics = _FakeStatistics
     monkeypatch.setitem(sys.modules, "zhenxun.models", models_module)
     monkeypatch.setitem(
         sys.modules,
         "zhenxun.models.chat_history",
         chat_history_module,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "zhenxun.models.statistics",
+        statistics_module,
     )
 
     core = _load_module(
@@ -284,6 +309,7 @@ def summary_modules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         base_config=base_config,
         core=core,
         message_processing=message_processing,
+        package_name=package_name,
         scope=scope,
     )
 
@@ -328,6 +354,189 @@ def _scope(module, start_ts: int = 100, end_ts: int = 220):
         start_ts=start_ts,
         end_ts=end_ts,
     )
+
+
+def _load_summary_handler(monkeypatch: pytest.MonkeyPatch, summary_modules):
+    services_module_name = f"{summary_modules.package_name}.services"
+    services_module = types.ModuleType(services_module_name)
+
+    class FakeSummaryParameters:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class FakeExportParameters:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class FakeSummaryService:
+        params: ClassVar[list[FakeSummaryParameters]] = []
+
+        def __init__(self, params: FakeSummaryParameters):
+            self.params = params
+            self.__class__.params.append(params)
+
+        async def execute(self):
+            return True
+
+    class FakeExportService:
+        def __init__(self, params: FakeExportParameters):
+            self.params = params
+
+        async def execute(self):
+            return True
+
+    services_module.SummaryParameters = FakeSummaryParameters
+    services_module.SummaryService = FakeSummaryService
+    services_module.ExportParameters = FakeExportParameters
+    services_module.ExportService = FakeExportService
+    monkeypatch.setitem(sys.modules, services_module_name, services_module)
+
+    handlers_name = f"{summary_modules.package_name}.handlers"
+    _register_package(monkeypatch, handlers_name, PLUGIN_ROOT / "handlers")
+    handler = _load_module(
+        monkeypatch,
+        f"{handlers_name}.summary",
+        PLUGIN_ROOT / "handlers" / "summary.py",
+    )
+    return handler, FakeSummaryService
+
+
+class _FakeArparma:
+    def __init__(self, message: str):
+        self.context = {"__styles__": {"msg": message}}
+        self.main_args: dict = {}
+
+    def query(self, _path: str):
+        return None
+
+
+class _FakeCommandResult:
+    def __init__(self, message: str):
+        self.result = _FakeArparma(message)
+
+
+class _FakeEvent:
+    group_id = 123
+    message_id = 456
+
+    def __init__(self, text: str):
+        self._text = text
+
+    def get_user_id(self):
+        return "42"
+
+    def get_plaintext(self):
+        return self._text
+
+
+class _FakeMatch:
+    def __init__(self, result=None, available: bool = False):
+        self.result = result
+        self.available = available
+
+
+async def _fixed_target_group_id(*_args):
+    return 123
+
+
+@pytest.mark.asyncio
+async def test_summary_compact_invalid_scope_is_silent(summary_modules, monkeypatch):
+    handler, _service = _load_summary_handler(monkeypatch, summary_modules)
+    sent_messages: list[str] = []
+
+    class FakeUniMessage:
+        def __init__(self, text: str):
+            self.text = text
+
+        @classmethod
+        def text(cls, text: str):
+            return cls(text)
+
+        async def send(self, *_args, **_kwargs):
+            sent_messages.append(self.text)
+
+    monkeypatch.setattr(handler, "UniMessage", FakeUniMessage)
+    monkeypatch.setattr(handler, "_resolve_target_group_id", _fixed_target_group_id)
+
+    await handler.handle_summary(
+        _FakeBot([]),
+        _FakeEvent("总结测试"),
+        _FakeCommandResult("总结测试"),
+        "测试",
+        _FakeMatch(),
+        _FakeMatch([], available=True),
+        object(),
+    )
+
+    assert sent_messages == []
+
+
+@pytest.mark.asyncio
+async def test_summary_spaced_invalid_scope_still_prompts(summary_modules, monkeypatch):
+    handler, _service = _load_summary_handler(monkeypatch, summary_modules)
+    sent_messages: list[str] = []
+
+    class FakeUniMessage:
+        def __init__(self, text: str):
+            self.text = text
+
+        @classmethod
+        def text(cls, text: str):
+            return cls(text)
+
+        async def send(self, *_args, **_kwargs):
+            sent_messages.append(self.text)
+
+    monkeypatch.setattr(handler, "UniMessage", FakeUniMessage)
+    monkeypatch.setattr(handler, "_resolve_target_group_id", _fixed_target_group_id)
+
+    await handler.handle_summary(
+        _FakeBot([]),
+        _FakeEvent("总结 测试"),
+        _FakeCommandResult("总结 测试"),
+        "测试",
+        _FakeMatch(),
+        _FakeMatch([], available=True),
+        object(),
+    )
+
+    assert sent_messages == [
+        "无法识别的范围，请使用数量、今日/昨日、2h、1h30m、2d 或 7:00~8:00 这类格式"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_summary_compact_valid_scope_still_executes(summary_modules, monkeypatch):
+    handler, service = _load_summary_handler(monkeypatch, summary_modules)
+    sent_messages: list[str] = []
+
+    class FakeUniMessage:
+        def __init__(self, text: str):
+            self.text = text
+
+        @classmethod
+        def text(cls, text: str):
+            return cls(text)
+
+        async def send(self, *_args, **_kwargs):
+            sent_messages.append(self.text)
+
+    monkeypatch.setattr(handler, "UniMessage", FakeUniMessage)
+    monkeypatch.setattr(handler, "_resolve_target_group_id", _fixed_target_group_id)
+    summary_modules.base_config.values["SUMMARY_MAX_LENGTH"] = 1000
+
+    await handler.handle_summary(
+        _FakeBot([]),
+        _FakeEvent("总结100"),
+        _FakeCommandResult("总结100"),
+        "100",
+        _FakeMatch(),
+        _FakeMatch([], available=True),
+        object(),
+    )
+
+    assert sent_messages == ["正在生成群聊 123 的总结，请稍候..."]
+    assert service.params[-1].scope.count == 100
 
 
 @pytest.mark.asyncio

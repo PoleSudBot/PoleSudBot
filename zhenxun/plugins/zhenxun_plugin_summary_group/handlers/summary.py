@@ -65,6 +65,34 @@ def _extract_reply_message_id(
     return str(message_id) if message_id else None
 
 
+def _get_summary_command_text(
+    event: GroupMessageEvent | PrivateMessageEvent,
+    result: CommandResult,
+) -> str:
+    # 优先使用 Alconna 解析的原始文本，避免事件消息段被平台适配层改写后误判。
+    arp = result.result
+    context = getattr(arp, "context", {}) if arp else {}
+    styles = context.get("__styles__") if isinstance(context, dict) else None
+    raw_text = styles.get("msg") if isinstance(styles, dict) else None
+    if isinstance(raw_text, str):
+        return raw_text.strip()
+    return (event.get_plaintext() or "").strip()
+
+
+def _is_compact_summary_invocation(
+    event: GroupMessageEvent | PrivateMessageEvent,
+    result: CommandResult,
+) -> bool:
+    # 总结和参数紧贴时视为紧凑调用，合法参数继续生效，非法参数后续静默。
+    command_text = _get_summary_command_text(event, result)
+    command_prefix = "总结"
+    if not command_text.startswith(command_prefix):
+        return False
+    if len(command_text) <= len(command_prefix):
+        return False
+    return not command_text[len(command_prefix)].isspace()
+
+
 async def _resolve_target_group_id(
     bot: Bot,
     event: GroupMessageEvent | PrivateMessageEvent,
@@ -134,6 +162,9 @@ async def handle_summary(
     try:
         parsed_scope = parse_summary_scope(scope_input, text_parts)
     except ValueError as e:
+        # 紧凑写法里的非法参数更像普通聊天误触发，只对带空格的显式命令提示错误。
+        if _is_compact_summary_invocation(event, result):
+            return
         await UniMessage.text(str(e)).send(target)
         return
 
