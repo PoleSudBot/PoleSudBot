@@ -50,7 +50,7 @@ async def _(
         result = await get_user_info(
             session, user_id, session.group.id if session.group else None, nickname
         )
-        await MessageUtils.build_message(result).send(at_sender=True)
+        await MessageUtils.build_message(result).send(reply_to=True)
         logger.info("获取用户信息", arparma.header_result, session=session)
     except TimeoutError as e:
         logger.error("获取用户信息超时", arparma.header_result, session=session, e=e)
