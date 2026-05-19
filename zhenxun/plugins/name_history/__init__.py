@@ -38,6 +38,7 @@ from ._logic import (
     resolve_query_target,
 )
 from ._avatar import (
+    AVATAR_HISTORY_LIMIT,
     build_avatar_uri,
     force_refresh_and_bind_avatar,
     get_avatar_history_items,
@@ -278,6 +279,7 @@ async def _build_history_picture(
     avatar_history_items = await get_avatar_history_items(
         platform="qq",
         user_id=target_user_id,
+        limit=None,
     )
     avatar_uri_map = {
         item.avatar_hash: item.avatar_uri for item in avatar_history_items
@@ -293,8 +295,10 @@ async def _build_history_picture(
         name_type=name_type,
         limit=HISTORY_LIMIT,
         avatar_uri_map=avatar_uri_map,
-        avatar_history=[item.avatar_uri for item in avatar_history_items],
-        fallback_avatar_uri=avatar_uri,
+        avatar_history=[
+            item.avatar_uri for item in avatar_history_items[:AVATAR_HISTORY_LIMIT]
+        ],
+        avatar_records=avatar_history_items,
     )
     return await template_to_pic(
         template_path=TEMPLATE_DIR,

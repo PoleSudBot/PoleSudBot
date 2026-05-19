@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
@@ -29,6 +30,7 @@ _persist_locks: dict[tuple[str, str], asyncio.Lock] = {}
 class AvatarHistoryItem:
     avatar_hash: str
     avatar_uri: str
+    record_time: datetime
 
 
 @dataclass(slots=True)
@@ -239,14 +241,15 @@ async def get_avatar_history_items(
     *,
     platform: str,
     user_id: str,
-    limit: int = AVATAR_HISTORY_LIMIT,
+    limit: int | None = AVATAR_HISTORY_LIMIT,
 ) -> list[AvatarHistoryItem]:
     """读取最近一段历史头像，并转换成模板可用的 URI。"""
-    records = (
-        await GroupNameAvatarHistory.filter(platform=platform, user_id=user_id)
-        .order_by("-record_time", "-id")
-        .limit(limit)
+    query = GroupNameAvatarHistory.filter(platform=platform, user_id=user_id).order_by(
+        "-record_time", "-id"
     )
+    if limit is not None:
+        query = query.limit(limit)
+    records = await query
     items: list[AvatarHistoryItem] = []
     for record in records:
         avatar_uri = build_avatar_uri(platform, record.avatar_hash)
@@ -255,6 +258,7 @@ async def get_avatar_history_items(
                 AvatarHistoryItem(
                     avatar_hash=record.avatar_hash,
                     avatar_uri=avatar_uri,
+                    record_time=record.record_time,
                 )
             )
     return items

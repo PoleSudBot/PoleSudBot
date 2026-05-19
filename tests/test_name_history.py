@@ -106,6 +106,13 @@ class Record:
     avatar_hash: str | None = None
 
 
+@dataclass(slots=True)
+class AvatarRecord:
+    avatar_hash: str
+    avatar_uri: str
+    record_time: datetime
+
+
 def test_choose_history_display_name_handles_group_card_empty_rules():
     assert logic.choose_history_display_name(logic.GROUP_CARD, None, None) is None
     assert logic.choose_history_display_name(logic.GROUP_CARD, "小明", None) == "小明"
@@ -296,24 +303,82 @@ def test_build_history_display_data_resolves_avatar_uris():
         target_user_id="2000",
         avatar_uri_map={"hash-a": "file:///avatar-a.webp"},
         avatar_history=["file:///avatar-a.webp"],
-        fallback_avatar_uri="file:///fallback.webp",
+        avatar_records=[
+            AvatarRecord("hash-a", "file:///avatar-a.webp", now),
+        ],
     )
 
     assert data.avatar_history == ["file:///avatar-a.webp"]
     assert data.sections[0].items[0].avatar_uri == "file:///avatar-a.webp"
 
 
-def test_build_history_display_data_uses_fallback_avatar_when_record_hash_missing():
+def test_build_history_display_data_does_not_use_current_avatar_for_old_records():
     now = datetime(2026, 5, 14, 21, 3)
     records = [Record(logic.GROUP_CARD, "群名片", now)]
+
+    data = logic.build_history_display_data(records, target_user_id="2000")
+
+    assert data.sections[0].items[0].avatar_uri == ""
+
+
+def test_build_history_display_data_uses_nearest_avatar_for_unbound_old_record():
+    now = datetime(2026, 5, 14, 21, 3)
+    records = [Record(logic.GROUP_CARD, "旧群名片", now)]
 
     data = logic.build_history_display_data(
         records,
         target_user_id="2000",
-        fallback_avatar_uri="file:///fallback.webp",
+        avatar_uri_map={
+            "hash-a": "file:///avatar-a.webp",
+            "hash-b": "file:///avatar-b.webp",
+        },
+        avatar_records=[
+            AvatarRecord("hash-a", "file:///avatar-a.webp", now - timedelta(days=2)),
+            AvatarRecord("hash-b", "file:///avatar-b.webp", now + timedelta(hours=2)),
+        ],
     )
 
-    assert data.sections[0].items[0].avatar_uri == "file:///fallback.webp"
+    assert data.sections[0].items[0].avatar_uri == "file:///avatar-b.webp"
+
+
+def test_build_history_display_data_prefers_exact_avatar_hash_over_nearest_avatar():
+    now = datetime(2026, 5, 14, 21, 3)
+    records = [Record(logic.GROUP_CARD, "群名片", now, avatar_hash="hash-a")]
+
+    data = logic.build_history_display_data(
+        records,
+        target_user_id="2000",
+        avatar_uri_map={
+            "hash-a": "file:///avatar-a.webp",
+            "hash-b": "file:///avatar-b.webp",
+        },
+        avatar_records=[
+            AvatarRecord("hash-a", "file:///avatar-a.webp", now - timedelta(days=3)),
+            AvatarRecord("hash-b", "file:///avatar-b.webp", now + timedelta(minutes=1)),
+        ],
+    )
+
+    assert data.sections[0].items[0].avatar_uri == "file:///avatar-a.webp"
+
+
+def test_build_history_display_data_prefers_earlier_avatar_when_distance_ties():
+    now = datetime(2026, 5, 14, 21, 3)
+    records = [Record(logic.GROUP_CARD, "旧群名片", now)]
+
+    data = logic.build_history_display_data(
+        records,
+        target_user_id="2000",
+        avatar_uri_map={
+            "hash-a": "file:///avatar-a.webp",
+            "hash-b": "file:///avatar-b.webp",
+        },
+        avatar_records=[
+            AvatarRecord("hash-b", "file:///avatar-b.webp", now + timedelta(hours=1)),
+            AvatarRecord("hash-a", "file:///avatar-a.webp", now - timedelta(hours=1)),
+        ],
+    )
+
+    assert data.sections[0].items[0].avatar_uri == "file:///avatar-a.webp"
 
 
 def test_format_history_records_empty_single_filter_keeps_compact_text():

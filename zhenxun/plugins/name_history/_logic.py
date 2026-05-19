@@ -67,6 +67,12 @@ class HistoryRecord(Protocol):
     avatar_hash: str | None
 
 
+class AvatarHistoryRecord(Protocol):
+    avatar_hash: str
+    avatar_uri: str
+    record_time: datetime
+
+
 class NameHistoryRepository(Protocol):
     async def get_latest_display_name(
         self,
@@ -252,6 +258,28 @@ def _resolve_profile_name(
     return fallback_name or target_user_id
 
 
+def _resolve_record_avatar_uri(
+    record: HistoryRecord,
+    avatar_uri_map: dict[str, str],
+    avatar_records: Sequence[AvatarHistoryRecord],
+) -> str:
+    """优先用精确绑定头像，旧记录则按采样时间找最接近的历史头像。"""
+    if record.avatar_hash:
+        avatar_uri = avatar_uri_map.get(record.avatar_hash)
+        if avatar_uri:
+            return avatar_uri
+    if not avatar_records:
+        return ""
+
+    def _distance_key(avatar_record: AvatarHistoryRecord):
+        # 同距时优先更早的头像，避免把“未来才出现的头像”贴回旧昵称。
+        diff = avatar_record.record_time - record.record_time
+        is_future = diff.total_seconds() > 0
+        return (abs(diff), is_future)
+
+    return min(avatar_records, key=_distance_key).avatar_uri
+
+
 def build_history_display_data(
     records: Sequence[HistoryRecord],
     *,
@@ -260,11 +288,12 @@ def build_history_display_data(
     limit: int = HISTORY_LIMIT,
     avatar_uri_map: dict[str, str] | None = None,
     avatar_history: Sequence[str] | None = None,
-    fallback_avatar_uri: str = "",
+    avatar_records: Sequence[AvatarHistoryRecord] | None = None,
 ) -> HistoryDisplayData:
     """把历史记录整理成图片模板和文本回退共用的分区展示数据。"""
     name_type = normalize_name_type_filter(name_type)
     avatar_uri_map = avatar_uri_map or {}
+    avatar_records = avatar_records or []
     title = _build_title(target_user_id, name_type)
     sections: list[HistoryDisplaySection] = []
 
@@ -281,8 +310,8 @@ def build_history_display_data(
                 time=_format_record_time(record.record_time),
                 display_name=record.display_name,
                 is_current=index == 0,
-                avatar_uri=(
-                    avatar_uri_map.get(record.avatar_hash or "") or fallback_avatar_uri
+                avatar_uri=_resolve_record_avatar_uri(
+                    record, avatar_uri_map, avatar_records
                 ),
             )
             for index, record in enumerate(section_records[:limit])
