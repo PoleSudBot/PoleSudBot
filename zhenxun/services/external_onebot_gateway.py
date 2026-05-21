@@ -40,6 +40,7 @@ from zhenxun.services.external_onebot_gateway_config import (
     IdFilterSettings,
 )
 from zhenxun.services.log import logger, logger_
+from zhenxun.utils.auto_withdraw import record_triggered_bot_message
 from zhenxun.utils.enum import BlockType
 
 LOG_COMMAND = "ExternalOneBotGateway"
@@ -1593,10 +1594,19 @@ class ExternalOneBotSession:
             record_timing("call_api_error", force_log=True)
             raise
         stages["call_api"] = _elapsed_ms(call_api_started_at)
-        if isinstance(result, dict) and result.get("message_id") is not None:
-            fields["result_message_id"] = result.get("message_id")
+        result_message_id = (
+            result.get("message_id") if isinstance(result, dict) else None
+        )
+        if result_message_id is not None:
+            fields["result_message_id"] = result_message_id
         fuse_trigger = None
         if action.startswith("send") and attribution is not None:
+            if result_message_id is not None:
+                auto_withdraw_started_at = time.monotonic()
+                await record_triggered_bot_message(
+                    bot, attribution.message_id, result_message_id
+                )
+                stages["auto_withdraw"] = _elapsed_ms(auto_withdraw_started_at)
             statistics_started_at = time.monotonic()
             try:
                 await self._record_statistics(attribution, bot.self_id)

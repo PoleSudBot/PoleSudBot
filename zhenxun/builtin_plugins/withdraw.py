@@ -1,4 +1,6 @@
+from nonebot import on_notice
 from nonebot.adapters import Bot, Event
+from nonebot.adapters.onebot.v11 import FriendRecallNoticeEvent, GroupRecallNoticeEvent
 from nonebot.plugin import PluginMetadata
 from nonebot.rule import Rule
 from nonebot_plugin_alconna import Alconna, Arparma, on_alconna
@@ -7,6 +9,7 @@ from nonebot_plugin_uninfo import Uninfo
 
 from zhenxun.configs.utils import Command, PluginExtraData
 from zhenxun.services.log import logger
+from zhenxun.utils.auto_withdraw import auto_withdraw_triggered_messages
 from zhenxun.utils.manager.message_manager import MessageManager
 from zhenxun.utils.message import MessageUtils
 from zhenxun.utils.platform import PlatformUtils
@@ -46,6 +49,18 @@ def reply_check() -> Rule:
 
 
 _matcher = on_alconna(Alconna("撤回"), priority=5, block=True, rule=reply_check())
+_auto_withdraw_matcher = on_notice(priority=5, block=False)
+
+
+@_auto_withdraw_matcher.handle()
+async def _(bot: Bot, event: GroupRecallNoticeEvent | FriendRecallNoticeEvent):
+    if not isinstance(event, GroupRecallNoticeEvent | FriendRecallNoticeEvent):
+        return
+    if str(event.user_id) == str(bot.self_id):
+        # bot 自己的回复被撤回时只清账本，避免之后用户撤回源消息时重复删除。
+        MessageManager.remove_triggered_reply(bot.self_id, event.message_id)
+        return
+    await auto_withdraw_triggered_messages(bot, event.message_id)
 
 
 @_matcher.handle()

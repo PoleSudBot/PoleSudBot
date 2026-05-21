@@ -37,6 +37,7 @@ from zhenxun.services.external_onebot_gateway_config import (
     ExternalOneBotAppSettings,
     IdFilterSettings,
 )
+from zhenxun.utils.manager.message_manager import MessageManager
 
 
 def _settings(
@@ -86,6 +87,14 @@ def _session(settings: ExternalOneBotAppSettings) -> ExternalOneBotSession:
             settings_factory=lambda: settings,
         )
     )
+
+
+def _clear_auto_withdraw_state() -> None:
+    MessageManager.triggered_data.clear()
+    MessageManager.triggered_reply_index.clear()
+    MessageManager.triggered_order.clear()
+    MessageManager.recalled_trigger_sources.clear()
+    MessageManager.recalled_trigger_order.clear()
 
 
 def _spec(settings: ExternalOneBotAppSettings) -> ExternalOneBotAppSpec:
@@ -1221,6 +1230,205 @@ async def test_handle_action_uses_bound_bot_for_attribution_lookup(monkeypatch):
     assert captured
     assert captured[0].user_id == "user-a"
     assert sent[0]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_handle_action_records_auto_withdraw_for_attributed_reply(monkeypatch):
+    _clear_auto_withdraw_state()
+    sent: list[dict] = []
+    settings = _settings(action_allowlist={"send_group_msg"})
+    session = ExternalOneBotSession(_spec(settings), bound_bot_self_id="111")
+    session._attribution.put(
+        "1001",
+        user_id="user-a",
+        group_id="444",
+        source_bot_self_id="111",
+        plugin_module="pjsk",
+        app_name="pjsk",
+    )
+
+    class FakeBot:
+        self_id = "111"
+
+        async def call_api(self, action: str, **params):
+            return {"message_id": 2001}
+
+    async def fake_send(payload: dict):
+        sent.append(payload)
+
+    async def fake_can_send(bot, action, params, **kwargs):
+        return True
+
+    async def fake_record_statistics(attr, bot_id):
+        return None
+
+    monkeypatch.setattr(
+        session,
+        "_resolve_action_bot",
+        lambda settings, attr, **kwargs: FakeBot(),
+    )
+    monkeypatch.setattr(session, "_can_send_action", fake_can_send)
+    monkeypatch.setattr(session, "_record_statistics", fake_record_statistics)
+    monkeypatch.setattr(session, "_send_action_response", fake_send)
+
+    await session._handle_action(
+        {
+            "action": "send_group_msg",
+            "params": {
+                "group_id": 444,
+                "message": [
+                    {"type": "reply", "data": {"id": "1001"}},
+                    {"type": "text", "data": {"text": "ok"}},
+                ],
+            },
+            "echo": "e-auto-withdraw",
+        }
+    )
+
+    assert sent[0]["status"] == "ok"
+    assert MessageManager.pop_triggered("111", "1001") == ["2001"]
+
+
+@pytest.mark.asyncio
+async def test_handle_action_deletes_late_reply_when_source_already_recalled(
+    monkeypatch,
+):
+    _clear_auto_withdraw_state()
+    sent: list[dict] = []
+    settings = _settings(action_allowlist={"send_group_msg"})
+    session = ExternalOneBotSession(_spec(settings), bound_bot_self_id="111")
+    session._attribution.put(
+        "1001",
+        user_id="user-a",
+        group_id="444",
+        source_bot_self_id="111",
+        plugin_module="pjsk",
+        app_name="pjsk",
+    )
+    MessageManager.mark_trigger_source_recalled("111", "1001")
+
+    class FakeBot:
+        self_id = "111"
+
+        def __init__(self):
+            self.deleted: list[int] = []
+
+        async def call_api(self, action: str, **params):
+            return {"message_id": 2001}
+
+        async def delete_msg(self, *, message_id: int):
+            self.deleted.append(message_id)
+
+    bot = FakeBot()
+
+    async def fake_send(payload: dict):
+        sent.append(payload)
+
+    async def fake_can_send(bot, action, params, **kwargs):
+        return True
+
+    async def fake_record_statistics(attr, bot_id):
+        return None
+
+    monkeypatch.setattr(
+        session,
+        "_resolve_action_bot",
+        lambda settings, attr, **kwargs: bot,
+    )
+    monkeypatch.setattr(session, "_can_send_action", fake_can_send)
+    monkeypatch.setattr(session, "_record_statistics", fake_record_statistics)
+    monkeypatch.setattr(session, "_send_action_response", fake_send)
+
+    await session._handle_action(
+        {
+            "action": "send_group_msg",
+            "params": {
+                "group_id": 444,
+                "message": [
+                    {"type": "reply", "data": {"id": "1001"}},
+                    {"type": "text", "data": {"text": "ok"}},
+                ],
+            },
+            "echo": "e-late-auto-withdraw",
+        }
+    )
+
+    assert sent[0]["status"] == "ok"
+    assert bot.deleted == [2001]
+    assert MessageManager.pop_triggered("111", "1001") == []
+
+
+@pytest.mark.asyncio
+async def test_handle_action_does_not_record_auto_withdraw_without_attribution_or_id(
+    monkeypatch,
+):
+    _clear_auto_withdraw_state()
+    sent: list[dict] = []
+    settings = _settings(action_allowlist={"send_group_msg"})
+    session = ExternalOneBotSession(_spec(settings), bound_bot_self_id="111")
+
+    class FakeBot:
+        self_id = "111"
+
+        def __init__(self, result: dict):
+            self.result = result
+
+        async def call_api(self, action: str, **params):
+            return self.result
+
+    async def fake_send(payload: dict):
+        sent.append(payload)
+
+    async def fake_can_send(bot, action, params, **kwargs):
+        return True
+
+    async def fake_record_statistics(attr, bot_id):
+        return None
+
+    monkeypatch.setattr(session, "_can_send_action", fake_can_send)
+    monkeypatch.setattr(session, "_record_statistics", fake_record_statistics)
+    monkeypatch.setattr(session, "_send_action_response", fake_send)
+    monkeypatch.setattr(
+        session,
+        "_resolve_action_bot",
+        lambda settings, attr, **kwargs: FakeBot({"message_id": 2001}),
+    )
+
+    await session._handle_action(
+        {
+            "action": "send_group_msg",
+            "params": {"group_id": 444, "message": "ok"},
+            "echo": "e-no-attribution",
+        }
+    )
+
+    session._attribution.put(
+        "1001",
+        user_id="user-a",
+        group_id="444",
+        source_bot_self_id="111",
+        plugin_module="pjsk",
+        app_name="pjsk",
+    )
+    monkeypatch.setattr(
+        session,
+        "_resolve_action_bot",
+        lambda settings, attr, **kwargs: FakeBot({}),
+    )
+
+    await session._handle_action(
+        {
+            "action": "send_group_msg",
+            "params": {
+                "group_id": 444,
+                "message": [{"type": "reply", "data": {"id": "1001"}}],
+            },
+            "echo": "e-no-result-id",
+        }
+    )
+
+    assert [payload["status"] for payload in sent] == ["ok", "ok"]
+    assert MessageManager.triggered_data == {}
 
 
 @pytest.mark.asyncio
