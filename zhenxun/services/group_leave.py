@@ -176,7 +176,7 @@ async def build_group_leave_notice_context(
         user_id=operator_id_text,
         group_id=group_id_text,
     ):
-        operator_name = user.nickname or user.user_name or ""
+        operator_name = user.user_name or ""
 
     group = await GroupConsole.get_group_db(group_id_text)
     return GroupLeaveNoticeContext(

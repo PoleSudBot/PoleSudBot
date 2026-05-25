@@ -22,11 +22,11 @@ status：此限制的开关状态
 check_type：'PRIVATE'/'GROUP'/'ALL'，限制私聊/群聊/全部
 watch_type：监听对象，以user_id或group_id作为键来限制，'USER'：用户id，'GROUP'：群id
                                  示例：'USER':用户N秒内触发1次，'GROUP':群N秒内触发1次
-result：回复的话,可以添加[at],[uname],[nickname]来对应艾特，用户群名称，昵称系统昵称
+result：回复的话,可以添加[at],[uname]来对应艾特和用户群名称
 result 为 "" 或 None 时则不回复
-result示例："[uname]你冲的太快了，[nickname]先生，请稍后再冲[at]"
-result回复："老色批你冲的太快了，欧尼酱先生，请稍后再冲@老色批"
-     用户昵称↑     昵称系统的昵称↑          艾特用户↑"""
+result示例："[uname]你冲的太快了，请稍后再冲[at]"
+result回复："老色批你冲的太快了，请稍后再冲@老色批"
+     用户昵称↑                    艾特用户↑"""
 
 
 BLOCK_TEST = """用户调用阻塞
@@ -37,11 +37,11 @@ status：此限制的开关状态
 check_type：'PRIVATE'/'GROUP'/'ALL'，限制私聊/群聊/全部
 watch_type：监听对象，以user_id或group_id作为键来限制，'USER'：用户id，'GROUP'：群id
                                     示例：'USER'：阻塞用户，'group'：阻塞群聊
-result：回复的话，可以添加[at]，[uname]，[nickname]来对应艾特，用户群名称，昵称系统昵称
+result：回复的话，可以添加[at]，[uname]来对应艾特和用户群名称
 result 为 "" 或 None 时则不回复
-result示例："[uname]你冲的太快了，[nickname]先生，请稍后再冲[at]"
-result回复："老色批你冲的太快了，欧尼酱先生，请稍后再冲@老色批"
-     用户昵称↑     昵称系统的昵称↑          艾特用户↑"""
+result示例："[uname]你冲的太快了，请稍后再冲[at]"
+result回复："老色批你冲的太快了，请稍后再冲@老色批"
+     用户昵称↑                    艾特用户↑"""
 
 COUNT_TEST = """命令每日次数限制
 即 用户/群聊 每日可调用命令的次数
@@ -61,7 +61,7 @@ watch_type：监听对象
     'USER'：全局统计个人（跨群共享额度）
     'GROUP'：全群统计总量（不分个人）
     'UIG'：每人每群独立计数（推荐搭配 group_max_count 使用）
-result：回复的话，可以添加[at]，[uname]，[nickname]来对应艾特，用户群名称，昵称系统昵称
+result：回复的话，可以添加[at]，[uname]来对应艾特和用户群名称
 result 为 '' 或 None 时则不回复"""
 
 

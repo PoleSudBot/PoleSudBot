@@ -437,7 +437,7 @@ async def test_execute_group_leave_calls_api_and_deletes_console(
 
     async def _get_user(**kwargs):
         calls.append(("get_user", kwargs))
-        return SimpleNamespace(nickname="操作者", user_name="备用名")
+        return SimpleNamespace(user_name="操作者")
 
     async def _send_superuser(_bot, message):
         reports.append(message)
