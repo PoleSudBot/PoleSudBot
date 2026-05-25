@@ -20,6 +20,15 @@
 - **新功能路由**：若开发 `zhenxun/plugins/` 下的插件，必须先阅读 `docs/agent/plugin-development.md`，确定结构与权限后再动手。
 - **抽象复用**：禁止绕开现有项目层直接写底层实现，禁止引入与当前架构冲突的新框架。
 
+## Reusable Infrastructure Quick Reference
+开发或调整一方插件前，优先查阅并复用以下已有入口，不要在插件内重复实现同类能力：
+- **配置与插件元数据**：`zhenxun/configs/config.py`、`zhenxun/configs/utils/`；用于 `Config`、`PluginExtraData`、`RegisterConfig`、命令/任务元数据。
+- **帮助展示**：`zhenxun/builtin_plugins/help/`、`zhenxun/services/help_service.py`；`PluginMetadata.usage` 会作为面向用户的 Markdown 使用帮助进入帮助页渲染。
+- **消息与平台能力**：`zhenxun/utils/message.py`、`zhenxun/utils/platform.py`；优先使用 `MessageUtils`、`PlatformUtils` 与统一消息类型。
+- **网络、数据库与日志**：`zhenxun/utils/http_utils.py`、`zhenxun/services/db_context/`、`zhenxun/services/log.py`；分别负责 HTTP、模型/数据库上下文和统一日志。
+- **富内容渲染**：`zhenxun/ui/`、`zhenxun/services/renderer/`；插件 HTML/Jinja2/Markdown 转图片优先通过 `ui.render*` 与主题化渲染服务完成，具体 UI 设计约束见 `docs/agent/plugin-development.md`。
+- **共享业务服务**：`zhenxun/services/scheduler/`、`zhenxun/services/llm/`；定时任务与大模型调用应接入项目统一服务层。
+
 ## Commands Workflow
 - **默认开发启动**：`uv run nb run`
 - **同步插件源码并重写本地依赖**：`uv run python nbm.py init --install`
