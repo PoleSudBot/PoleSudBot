@@ -7,71 +7,217 @@
       box-sizing: border-box;
     }
 
+    :root {
+      --color-primary: #FF6699;
+      --color-primary-dark: #D14775;
+      --color-primary-soft: #fff5f8;
+      --color-primary-pale: #fff9fb;
+      --color-bg-main: #ffffff;
+      --color-bg-card: #fff5f8;
+      --color-bg-page: #fff0f5;
+      --color-border: #ffe0ea;
+      --color-border-strong: #ffcada;
+      --color-text-dark: #4a2c36;
+      --color-text-muted: #9b7582;
+      --color-call: #E7799A;
+      --color-warn-bg: #fff7e8;
+      --color-warn-text: #a66000;
+      --color-error-bg: #fff3f5;
+      --color-error-text: #b64f63;
+      --shadow-soft: 0 10px 24px rgba(209, 71, 117, 0.08);
+    }
+
+    @font-face {
+      font-family: "HarmonyOS Sans SC";
+      src: url("../../../../resources/font/HarmonyOS_Sans_SC_Regular.ttf") format("truetype");
+      font-weight: 400;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    @font-face {
+      font-family: "HarmonyOS Sans SC";
+      src: url("../../../../resources/font/HarmonyOS_Sans_SC_Medium.ttf") format("truetype");
+      font-weight: 500;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    @font-face {
+      font-family: "HarmonyOS Sans SC";
+      src: url("../../../../resources/font/HarmonyOS_Sans_SC_Bold.ttf") format("truetype");
+      font-weight: 600 900;
+      font-style: normal;
+      font-display: swap;
+    }
+
     body {
       width: 900px;
       margin: 0;
-      padding: 28px;
-      background: #eef2f6;
-      color: #18212f;
-      font-family: "Inter", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+      padding: 0;
+      background-color: transparent;
+      font-family: "HarmonyOS Sans SC", sans-serif;
     }
 
     .page {
-      width: 844px;
-      background: #fdfefe;
-      border: 1px solid #d8e0ea;
-      border-radius: 8px;
+      width: 900px;
+      margin: 0;
+      padding: 30px 30px 22px;
+      color: var(--color-text-dark);
+      background: var(--color-bg-page);
       overflow: hidden;
     }
 
-    .header {
-      padding: 24px 28px 18px;
-      border-bottom: 1px solid #d8e0ea;
-      background: #ffffff;
+    .dashboard {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .card,
+    .stat-box {
+      background: var(--color-bg-main);
+      border: 1px solid var(--color-border);
+      border-radius: 14px;
+      box-shadow: var(--shadow-soft);
+    }
+
+    .card {
+      padding: 18px;
+    }
+
+    .hero-card {
+      padding: 20px;
+    }
+
+    .hero-main {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      min-width: 0;
+    }
+
+    .hero-copy {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .hero-text {
+      min-width: 0;
     }
 
     .title {
-      margin: 0;
+      margin: 0 0 7px;
+      color: var(--color-primary-dark);
+      font-family: "HarmonyOS Sans SC", sans-serif;
       font-size: 28px;
-      line-height: 1.25;
+      line-height: 1.15;
+      font-weight: 800;
+      letter-spacing: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .hero-subtitle {
+      margin: 0;
+      color: var(--color-text-muted);
+      font-size: 12px;
+      line-height: 1.35;
       font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .hero-stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(82px, 1fr));
+      gap: 10px;
+      flex: 0 0 200px;
+    }
+
+    .hero-stat {
+      min-height: 58px;
+      padding: 11px 12px;
+    }
+
+    .stat-label {
+      color: var(--color-text-muted);
+      font-size: 12px;
+      line-height: 1;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .stat-value {
+      margin-top: 8px;
+      color: var(--color-primary-dark);
+      font-size: 20px;
+      line-height: 1;
+      font-weight: 900;
+      letter-spacing: 0;
+      word-break: break-all;
     }
 
     .notice-list {
-      margin-top: 14px;
       display: flex;
       flex-direction: column;
-      gap: 6px;
+      gap: 8px;
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid var(--color-border);
     }
 
-    .notice {
-      color: #5c697a;
-      font-size: 15px;
+    .notice,
+    .section-notice {
+      padding: 9px 11px;
+      color: var(--color-text-muted);
+      background: var(--color-primary-soft);
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+      font-size: 13px;
       line-height: 1.45;
+      font-weight: 700;
+      overflow-wrap: anywhere;
     }
 
-    .section {
-      padding: 22px 28px;
-      border-bottom: 1px solid #d8e0ea;
+    .icon-tile {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      flex: 0 0 34px;
+      overflow: hidden;
+      background: var(--color-primary-soft);
+      border-radius: 13px;
     }
 
-    .section:last-child {
-      border-bottom: 0;
+    .icon-svg {
+      width: 19px;
+      height: 19px;
+      color: var(--color-primary-dark);
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 2.2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
     }
 
-    .section-head {
+    .card-head {
       display: flex;
+      align-items: center;
       justify-content: space-between;
-      gap: 18px;
-      align-items: baseline;
+      gap: 12px;
       margin-bottom: 14px;
     }
 
-    .section-title {
-      margin: 0;
-      font-size: 22px;
-      line-height: 1.25;
-      font-weight: 700;
+    .card-title-wrap {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
     }
 
     .section-title-wrap {
@@ -79,30 +225,68 @@
       flex-wrap: wrap;
       gap: 8px;
       align-items: center;
+      min-width: 0;
+    }
+
+    .section-title {
+      margin: 0;
+      color: var(--color-text-dark);
+      font-size: 18px;
+      line-height: 1.25;
+      font-weight: 800;
+      letter-spacing: 0;
+      overflow-wrap: anywhere;
     }
 
     .section-subtitle {
-      color: #6b7788;
-      font-size: 14px;
+      flex: 0 0 auto;
+      color: var(--color-text-muted);
+      font-size: 12px;
+      line-height: 1.25;
+      font-weight: 700;
       white-space: nowrap;
     }
 
-    .error {
-      padding: 14px 16px;
-      border: 1px solid #e7c5c2;
-      border-radius: 8px;
-      background: #fff5f3;
-      color: #9a3c34;
-      font-size: 15px;
-      line-height: 1.5;
+    .badge,
+    .level-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      padding: 4px 8px;
+      color: var(--color-primary-dark);
+      background: var(--color-primary-soft);
+      border: 1px solid var(--color-border);
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 800;
+      line-height: 1;
+      white-space: nowrap;
     }
 
-    .section-notice {
-      margin-bottom: 12px;
-      color: #6b7788;
+    .badge-muted {
+      color: var(--color-text-muted);
+      background: var(--color-primary-pale);
+    }
+
+    .badge-warn {
+      color: var(--color-warn-text);
+      background: var(--color-warn-bg);
+      border-color: #ffe0ad;
+    }
+
+    .error {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      padding: 13px 15px;
+      color: var(--color-error-text);
+      background: var(--color-error-bg);
+      border: 1px solid #ffc8d1;
+      border-radius: 12px;
       font-size: 14px;
-      line-height: 1.45;
-      word-break: break-all;
+      line-height: 1.5;
+      font-weight: 700;
+      overflow-wrap: anywhere;
     }
 
     .result-list {
@@ -113,301 +297,379 @@
 
     .item {
       display: grid;
-      grid-template-columns: 104px 1fr;
-      gap: 14px;
-      min-height: 104px;
-      padding: 12px;
-      border: 1px solid #dbe3ed;
-      border-radius: 8px;
-      background: #ffffff;
+      grid-template-columns: 118px 1fr;
+      gap: 15px;
+      min-height: 118px;
+      padding: 13px 15px;
+      background: var(--color-primary-pale);
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+    }
+
+    .thumb-column {
+      width: 118px;
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    .thumb,
+    .thumb-placeholder {
+      width: 118px;
+      height: 118px;
+      border-radius: 12px;
+      border: 1px solid var(--color-border);
+      background: var(--color-bg-main);
     }
 
     .thumb {
-      width: 104px;
-      height: 104px;
       display: block;
-      border-radius: 6px;
       object-fit: contain;
-      background: #ffffff;
       border: 0;
     }
 
     .thumb-placeholder {
-      width: 104px;
-      height: 104px;
       display: flex;
       align-items: center;
       justify-content: center;
-      text-align: center;
-      padding: 8px;
-      border-radius: 6px;
-      border: 1px solid #d8e0ea;
-      background: #f3f6f9;
-      color: #7a8797;
-      font-size: 13px;
+      padding: 10px;
+      color: var(--color-text-muted);
+      font-size: 12px;
       line-height: 1.35;
-    }
-
-    .thumb-column {
-      width: 104px;
-      display: flex;
-      flex-direction: column;
-      align-items: stretch;
+      font-weight: 700;
+      text-align: center;
+      overflow-wrap: anywhere;
     }
 
     .item-body {
       min-width: 0;
       display: flex;
       flex-direction: column;
-      gap: 8px;
+      gap: 10px;
     }
 
     .meta-row {
       display: flex;
       flex-wrap: wrap;
-      gap: 8px;
+      gap: 7px;
       align-items: center;
-    }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      min-height: 24px;
-      padding: 3px 8px;
-      border-radius: 6px;
-      background: #e9f2ff;
-      color: #1e5d9e;
-      font-size: 13px;
-      font-weight: 600;
-    }
-
-    .badge-muted {
-      background: #eef1f4;
-      color: #586575;
-    }
-
-    .badge-warn {
-      background: #fff0d6;
-      color: #9a5c00;
     }
 
     .item-title {
       margin: 0;
+      color: var(--color-text-dark);
       font-size: 18px;
-      line-height: 1.35;
-      font-weight: 700;
+      line-height: 1.32;
+      font-weight: 900;
+      letter-spacing: 0;
       overflow-wrap: anywhere;
     }
 
     .item-url {
-      color: #4f6072;
+      color: var(--color-text-muted);
       font-size: 13px;
       line-height: 1.4;
       overflow-wrap: anywhere;
     }
 
     .details {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px 12px;
-      color: #5c697a;
-      font-size: 14px;
-      line-height: 1.45;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      color: var(--color-text-muted);
+      font-size: 12px;
+      line-height: 1.35;
+      font-weight: 700;
+    }
+
+    .details span,
+    .details {
+      overflow-wrap: anywhere;
+    }
+
+    .details span {
+      min-width: 0;
+      padding: 8px 10px;
+      background: var(--color-bg-main);
+      border: 1px solid var(--color-border);
+      border-radius: 10px;
     }
 
     .candidate-list {
       display: grid;
-      gap: 6px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
       margin-top: 2px;
     }
 
     .candidate {
       display: grid;
-      grid-template-columns: 22px 1fr;
-      gap: 8px;
-      padding: 7px 9px;
-      border-radius: 6px;
-      background: #f8fafc;
-      color: #344255;
-      font-size: 14px;
-      line-height: 1.4;
+      grid-template-columns: 34px 1fr;
+      gap: 10px;
+      align-items: center;
+      min-width: 0;
+      padding: 12px;
+      color: var(--color-text-dark);
+      background: var(--color-bg-main);
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
     }
 
     .candidate-primary {
-      grid-template-columns: 26px 1fr;
-      padding: 11px 12px;
-      background: #f8fafc;
+      grid-column: 1 / -1;
+      background: var(--color-primary-soft);
+      border-color: var(--color-border-strong);
     }
 
     .candidate-index {
-      color: #6b7788;
-      font-weight: 700;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      color: var(--color-primary-dark);
+      background: var(--color-primary-soft);
+      border-radius: 13px;
+      font-size: 15px;
+      line-height: 1;
+      font-weight: 900;
     }
 
     .candidate-primary .candidate-index {
-      color: #6b7788;
+      background: var(--color-bg-main);
       font-size: 18px;
-      line-height: 1.35;
     }
 
     .candidate-title {
-      font-weight: 700;
+      color: var(--color-text-dark);
+      font-size: 15px;
+      line-height: 1.3;
+      font-weight: 900;
       overflow-wrap: anywhere;
     }
 
     .candidate-primary .candidate-title {
-      color: #1e5d9e;
-      font-size: 21px;
-      line-height: 1.35;
+      color: var(--color-primary-dark);
+      font-size: 20px;
     }
 
     .candidate-subtitle {
-      margin-top: 2px;
-      color: #617084;
+      margin-top: 4px;
+      color: var(--color-text-muted);
+      font-size: 12px;
+      line-height: 1.35;
+      font-weight: 700;
       overflow-wrap: anywhere;
     }
 
     .empty {
-      color: #6b7788;
-      font-size: 15px;
+      padding: 14px 15px;
+      color: var(--color-text-muted);
+      background: var(--color-primary-soft);
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+      font-size: 14px;
       line-height: 1.5;
+      font-weight: 700;
     }
 
     .footer {
-      padding: 14px 28px 18px;
-      border-top: 1px solid #d8e0ea;
-      background: #f8fafc;
-      color: #7a8797;
+      padding: 4px 2px 0;
+      color: var(--color-text-muted);
       font-size: 12px;
       line-height: 1.45;
+      font-weight: 700;
+      text-align: center;
     }
   </style>
 </head>
 <body>
   <main class="page">
-    <header class="header">
-      <h1 class="title">{{ result.title }}</h1>
-      {% if result.notices %}
-        <div class="notice-list">
-          {% for notice in result.notices %}
-            <div class="notice">{{ notice }}</div>
-          {% endfor %}
-        </div>
-      {% endif %}
-    </header>
-
-    {% for section in result.sections %}
-      <section class="section">
-        <div class="section-head">
-          <div class="section-title-wrap">
-            <h2 class="section-title">{{ section.title }}</h2>
-            {% if section.title == "AnimeTrace" and section.items and section.items[0].source %}
-              <span class="badge badge-muted">{{ section.items[0].source }}</span>
-            {% endif %}
+    <div class="dashboard">
+      <header class="card hero-card">
+        <div class="hero-main">
+          <div class="hero-copy">
+            <span class="icon-tile" aria-hidden="true">
+              <svg class="icon-svg" viewBox="0 0 24 24">
+                <circle cx="11" cy="11" r="8"></circle>
+                <path d="m21 21-4.3-4.3"></path>
+                <path d="M8 11h6"></path>
+              </svg>
+            </span>
+            <div class="hero-text">
+              <h1 class="title">{{ result.title }}</h1>
+              <p class="hero-subtitle">PoleSudBot Image Trace</p>
+            </div>
           </div>
-          {% if section.subtitle %}
-            <div class="section-subtitle">{{ section.subtitle }}</div>
-          {% endif %}
+          <div class="hero-stats">
+            <div class="stat-box hero-stat">
+              <div class="stat-label">来源</div>
+              <div class="stat-value">{{ result.sections|length }}</div>
+            </div>
+            <div class="stat-box hero-stat">
+              <div class="stat-label">提示</div>
+              <div class="stat-value">{{ result.notices|length }}</div>
+            </div>
+          </div>
         </div>
-
-        {% if section.notices %}
-          {% for notice in section.notices %}
-            <div class="section-notice">{{ notice }}</div>
-          {% endfor %}
-        {% endif %}
-
-        {% if section.error %}
-          <div class="error">{{ section.error }}</div>
-        {% elif section.items %}
-          <div class="result-list">
-            {% for item in section.items %}
-              <article class="item">
-                <div class="thumb-column">
-                  {% if item.thumbnail_visible and item.thumbnail_data_uri %}
-                    <img class="thumb" src="{{ item.thumbnail_data_uri }}" alt="" />
-                  {% else %}
-                    <div class="thumb-placeholder">
-                      {% if item.hidden %}
-                        预览已隐藏
-                      {% elif item.metadata.get("预览") %}
-                        {{ item.metadata.get("预览") }}
-                      {% else %}
-                        无预览图
-                      {% endif %}
-                    </div>
-                  {% endif %}
-                </div>
-
-                <div class="item-body">
-                  {% if not item.candidates %}
-                    <div class="meta-row">
-                      <span class="badge badge-muted">#{{ item.display_index or loop.index }}</span>
-                      {% if item.similarity is not none %}
-                        <span class="badge">{{ "%.2f"|format(item.similarity) }}%</span>
-                      {% endif %}
-                      {% if item.hidden %}
-                        <span class="badge badge-warn">媒体已隐藏</span>
-                      {% endif %}
-                      {% if item.source %}
-                        <span class="badge badge-muted">{{ item.source }}</span>
-                      {% endif %}
-                    </div>
-                  {% endif %}
-
-                  {% if item.candidates %}
-                    {% if item.metadata %}
-                      <div class="details">
-                        {% for key, value in item.metadata.items() %}
-                          {% if value %}
-                            <span>{{ key }}：{{ value }}</span>
-                          {% endif %}
-                        {% endfor %}
-                      </div>
-                    {% endif %}
-
-                    <div class="candidate-list">
-                      {% for candidate in item.candidates %}
-                        <div class="candidate{% if loop.first %} candidate-primary{% endif %}">
-                          <div class="candidate-index">{{ loop.index }}</div>
-                          <div>
-                            <div class="candidate-title">{{ candidate.title }}</div>
-                            {% if candidate.subtitle %}
-                              <div class="candidate-subtitle">{{ candidate.subtitle }}</div>
-                            {% endif %}
-                          </div>
-                        </div>
-                      {% endfor %}
-                    </div>
-                  {% else %}
-                    <h3 class="item-title">{{ item.title }}</h3>
-
-                    {% if item.author %}
-                      <div class="details">作者：{{ item.author }}</div>
-                    {% endif %}
-
-                    {% if item.metadata %}
-                      <div class="details">
-                        {% for key, value in item.metadata.items() %}
-                          {% if value %}
-                            <span>{{ key }}：{{ value }}</span>
-                          {% endif %}
-                        {% endfor %}
-                      </div>
-                    {% endif %}
-                  {% endif %}
-                </div>
-              </article>
+        {% if result.notices %}
+          <div class="notice-list">
+            {% for notice in result.notices %}
+              <div class="notice">{{ notice }}</div>
             {% endfor %}
           </div>
-        {% else %}
-          <div class="empty">没有可展示的结果。</div>
         {% endif %}
-      </section>
-    {% endfor %}
+      </header>
 
-    <footer class="footer">
-      Results Generated by PoleSudBot. Images belong to their respective owners.
-    </footer>
+      {% for section in result.sections %}
+        <section class="card section-card">
+          <div class="card-head">
+            <div class="card-title-wrap">
+              <span class="icon-tile" aria-hidden="true">
+                <svg class="icon-svg" viewBox="0 0 24 24">
+                  {% if section.title == "TraceMoe" %}
+                    <rect width="18" height="18" x="3" y="3" rx="2"></rect>
+                    <path d="M7 3v18"></path>
+                    <path d="M3 8h18"></path>
+                    <path d="M3 16h18"></path>
+                  {% elif section.title == "AnimeTrace" %}
+                    <path d="M12 3 3 8l9 5 9-5-9-5Z"></path>
+                    <path d="m3 16 9 5 9-5"></path>
+                    <path d="m3 12 9 5 9-5"></path>
+                  {% elif section.title == "Google Lens" %}
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <path d="m21 21-4.3-4.3"></path>
+                  {% else %}
+                    <rect width="18" height="18" x="3" y="3" rx="2"></rect>
+                    <circle cx="9" cy="9" r="2"></circle>
+                    <path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"></path>
+                  {% endif %}
+                </svg>
+              </span>
+              <div class="section-title-wrap">
+                <h2 class="section-title">{{ section.title }}</h2>
+                {% if section.title == "AnimeTrace" and section.items and section.items[0].source %}
+                  <span class="level-badge">{{ section.items[0].source }}</span>
+                {% endif %}
+              </div>
+            </div>
+            {% if section.subtitle %}
+              <div class="section-subtitle">{{ section.subtitle }}</div>
+            {% endif %}
+          </div>
+
+          {% if section.notices %}
+            <div class="notice-list">
+              {% for notice in section.notices %}
+                <div class="section-notice">{{ notice }}</div>
+              {% endfor %}
+            </div>
+          {% endif %}
+
+          {% if section.error %}
+            <div class="error">
+              <span class="icon-tile" aria-hidden="true">
+                <svg class="icon-svg" viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="10"></circle>
+                  <path d="M12 8v4"></path>
+                  <path d="M12 16h.01"></path>
+                </svg>
+              </span>
+              <span>{{ section.error }}</span>
+            </div>
+          {% elif section.items %}
+            <div class="result-list">
+              {% for item in section.items %}
+                <article class="item">
+                  <div class="thumb-column">
+                    {% if item.thumbnail_visible and item.thumbnail_data_uri %}
+                      <img class="thumb" src="{{ item.thumbnail_data_uri }}" alt="" />
+                    {% else %}
+                      <div class="thumb-placeholder">
+                        {% if item.hidden %}
+                          预览已隐藏
+                        {% elif item.metadata.get("预览") %}
+                          {{ item.metadata.get("预览") }}
+                        {% else %}
+                          无预览图
+                        {% endif %}
+                      </div>
+                    {% endif %}
+                  </div>
+
+                  <div class="item-body">
+                    {% if not item.candidates %}
+                      <div class="meta-row">
+                        <span class="badge badge-muted">#{{ item.display_index or loop.index }}</span>
+                        {% if item.similarity is not none %}
+                          <span class="badge">{{ "%.2f"|format(item.similarity) }}%</span>
+                        {% endif %}
+                        {% if item.hidden %}
+                          <span class="badge badge-warn">媒体已隐藏</span>
+                        {% endif %}
+                        {% if item.source %}
+                          <span class="badge badge-muted">{{ item.source }}</span>
+                        {% endif %}
+                      </div>
+                    {% endif %}
+
+                    {% if item.candidates %}
+                      {% if item.metadata %}
+                        <div class="details">
+                          {% for key, value in item.metadata.items() %}
+                            {% if value and key != "预览" %}
+                              <span>{{ key }}：{{ value }}</span>
+                            {% endif %}
+                          {% endfor %}
+                        </div>
+                      {% endif %}
+
+                      <div class="candidate-list">
+                        {% for candidate in item.candidates %}
+                          <div class="candidate{% if loop.first %} candidate-primary{% endif %}">
+                            <div class="candidate-index">{{ loop.index }}</div>
+                            <div>
+                              <div class="candidate-title">{{ candidate.title }}</div>
+                              {% if candidate.subtitle %}
+                                <div class="candidate-subtitle">{{ candidate.subtitle }}</div>
+                              {% endif %}
+                            </div>
+                          </div>
+                        {% endfor %}
+                      </div>
+                    {% else %}
+                      <h3 class="item-title">{{ item.title }}</h3>
+
+                      {% if item.author %}
+                        <div class="details">
+                          <span>作者：{{ item.author }}</span>
+                        </div>
+                      {% endif %}
+
+                      {% if item.metadata %}
+                        <div class="details">
+                          {% for key, value in item.metadata.items() %}
+                            {% if value and key != "预览" %}
+                              <span>{{ key }}：{{ value }}</span>
+                            {% endif %}
+                          {% endfor %}
+                        </div>
+                      {% endif %}
+                    {% endif %}
+                  </div>
+                </article>
+              {% endfor %}
+            </div>
+          {% else %}
+            <div class="empty">没有可展示的结果。</div>
+          {% endif %}
+        </section>
+      {% endfor %}
+
+      <footer class="footer">
+        Results Generated by PoleSudBot. Images belong to their respective owners.
+      </footer>
+    </div>
   </main>
 </body>
 </html>
