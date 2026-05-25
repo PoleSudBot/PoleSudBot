@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from numbers import Number
 from typing import Any, Literal
 
 from zhenxun.configs.config import Config
@@ -17,6 +18,7 @@ DEFAULT_ATTRIBUTION_MAX_SIZE = 10000
 DEFAULT_ATTRIBUTION_SWEEP_INTERVAL_SECONDS = 15
 DEFAULT_EVENT_QUEUE_MAX_SIZE = 1000
 DEFAULT_ENABLE_AUTO_SLASH = True
+DEFAULT_AUTO_SLASH_ENABLED_GROUP_IDS: list[str] = []
 DEFAULT_AUTO_SLASH_DISABLED_GROUP_IDS: list[str] = []
 DEFAULT_AUTO_SLASH_FUSE_ENABLED = True
 DEFAULT_AUTO_SLASH_FUSE_ECHO_SOURCE_SECONDS = 3.0
@@ -59,6 +61,33 @@ DEFAULT_HELP_URLS = (
     "使用帮助: https://neo.haruki.seiunx.com\n"
     "Haruki工具箱：https://haruki.seiunx.com"
 )
+
+BOOL_TRUE_VALUES = {
+    "1",
+    "true",
+    "yes",
+    "y",
+    "on",
+    "enable",
+    "enabled",
+    "开启",
+    "启用",
+    "是",
+    "真",
+}
+BOOL_FALSE_VALUES = {
+    "0",
+    "false",
+    "no",
+    "n",
+    "off",
+    "disable",
+    "disabled",
+    "关闭",
+    "禁用",
+    "否",
+    "假",
+}
 
 REGISTER_CONFIGS = [
     RegisterConfig(
@@ -130,15 +159,23 @@ REGISTER_CONFIGS = [
         key="ENABLE_AUTO_SLASH",
         value=DEFAULT_ENABLE_AUTO_SLASH,
         default_value=DEFAULT_ENABLE_AUTO_SLASH,
-        help="是否把无斜杠文本指令自动改写为 /指令",
+        help="PJSK 宽松模式全局总开关；实际启用群由 AUTO_SLASH_ENABLED_GROUP_IDS 控制",
         type=bool,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="AUTO_SLASH_ENABLED_GROUP_IDS",
+        value=DEFAULT_AUTO_SLASH_ENABLED_GROUP_IDS,
+        default_value=DEFAULT_AUTO_SLASH_ENABLED_GROUP_IDS,
+        help="这些群启用 PJSK 宽松模式，会把无斜杠文本指令自动改写为 /指令",
+        type=list,
     ),
     RegisterConfig(
         module=MODULE_NAME,
         key="AUTO_SLASH_DISABLED_GROUP_IDS",
         value=DEFAULT_AUTO_SLASH_DISABLED_GROUP_IDS,
         default_value=DEFAULT_AUTO_SLASH_DISABLED_GROUP_IDS,
-        help="这些群只使用显式 / 指令，不自动补 /",
+        help="兼容兜底禁用列表；命中后即使在宽松模式启用列表内也不自动补 /",
         type=list,
     ),
     RegisterConfig(
@@ -381,6 +418,7 @@ class ExternalOneBotAppSettings:
     attribution_sweep_interval_seconds: float
     event_queue_max_size: int
     enable_auto_slash: bool
+    auto_slash_enabled_group_ids: set[str]
     auto_slash_disabled_group_ids: set[str]
     auto_slash_fuse_enabled: bool
     auto_slash_fuse_echo_source_seconds: float
@@ -430,6 +468,25 @@ def _as_str_dict(value: Any) -> dict[str, str]:
         for source, target in value.items()
         if str(source).strip() and str(target).strip()
     }
+
+
+def parse_config_bool(value: Any, default: bool = False) -> bool:
+    # 配置可能来自手写 YAML 或 WebUI 文本输入，
+    # 显式解析可避免 "false" 被 bool() 当成 True。
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, Number):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in BOOL_TRUE_VALUES:
+            return True
+        if normalized in BOOL_FALSE_VALUES:
+            return False
+        return default
+    return bool(value)
 
 
 def _parse_id_filter(mode_value: Any, ids_value: Any) -> IdFilterSettings:
@@ -501,8 +558,15 @@ def get_pjsk_app_settings() -> ExternalOneBotAppSettings:
                 )
             ),
         ),
-        enable_auto_slash=bool(
-            config_group.get("ENABLE_AUTO_SLASH", DEFAULT_ENABLE_AUTO_SLASH)
+        enable_auto_slash=parse_config_bool(
+            config_group.get("ENABLE_AUTO_SLASH", DEFAULT_ENABLE_AUTO_SLASH),
+            DEFAULT_ENABLE_AUTO_SLASH,
+        ),
+        auto_slash_enabled_group_ids=_as_str_set(
+            config_group.get(
+                "AUTO_SLASH_ENABLED_GROUP_IDS",
+                DEFAULT_AUTO_SLASH_ENABLED_GROUP_IDS,
+            )
         ),
         auto_slash_disabled_group_ids=_as_str_set(
             config_group.get(
@@ -510,11 +574,12 @@ def get_pjsk_app_settings() -> ExternalOneBotAppSettings:
                 DEFAULT_AUTO_SLASH_DISABLED_GROUP_IDS,
             )
         ),
-        auto_slash_fuse_enabled=bool(
+        auto_slash_fuse_enabled=parse_config_bool(
             config_group.get(
                 "AUTO_SLASH_FUSE_ENABLED",
                 DEFAULT_AUTO_SLASH_FUSE_ENABLED,
-            )
+            ),
+            DEFAULT_AUTO_SLASH_FUSE_ENABLED,
         ),
         auto_slash_fuse_echo_source_seconds=max(
             1.0,
@@ -552,17 +617,19 @@ def get_pjsk_app_settings() -> ExternalOneBotAppSettings:
                 )
             ),
         ),
-        auto_slash_fuse_group_notice_enabled=bool(
+        auto_slash_fuse_group_notice_enabled=parse_config_bool(
             config_group.get(
                 "AUTO_SLASH_FUSE_GROUP_NOTICE_ENABLED",
                 DEFAULT_AUTO_SLASH_FUSE_GROUP_NOTICE_ENABLED,
-            )
+            ),
+            DEFAULT_AUTO_SLASH_FUSE_GROUP_NOTICE_ENABLED,
         ),
-        auto_slash_fuse_superuser_notice_enabled=bool(
+        auto_slash_fuse_superuser_notice_enabled=parse_config_bool(
             config_group.get(
                 "AUTO_SLASH_FUSE_SUPERUSER_NOTICE_ENABLED",
                 DEFAULT_AUTO_SLASH_FUSE_SUPERUSER_NOTICE_ENABLED,
-            )
+            ),
+            DEFAULT_AUTO_SLASH_FUSE_SUPERUSER_NOTICE_ENABLED,
         ),
         heartbeat_interval_seconds=max(
             1.0,
@@ -573,8 +640,9 @@ def get_pjsk_app_settings() -> ExternalOneBotAppSettings:
                 )
             ),
         ),
-        timing_enabled=bool(
-            config_group.get("TIMING_ENABLED", DEFAULT_TIMING_ENABLED)
+        timing_enabled=parse_config_bool(
+            config_group.get("TIMING_ENABLED", DEFAULT_TIMING_ENABLED),
+            DEFAULT_TIMING_ENABLED,
         ),
         timing_slow_ms=max(
             1.0,

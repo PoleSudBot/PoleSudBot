@@ -1,7 +1,9 @@
 # ruff: noqa: E501,W291
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
+from threading import RLock
 
 import nonebot
 from nonebot import on_message
@@ -13,8 +15,10 @@ from nonebot.adapters.onebot.v11 import (
     PrivateMessageEvent,
 )
 from nonebot.matcher import Matcher
+from nonebot.permission import SUPERUSER
 from nonebot.plugin import PluginMetadata
 from nonebot.rule import Rule
+from nonebot.typing import T_State
 
 from zhenxun.configs.config import Config
 from zhenxun.configs.utils import Command, PluginExtraData, PluginSetting
@@ -23,18 +27,54 @@ from zhenxun.services.external_onebot_gateway import (
     external_onebot_gateway,
 )
 from zhenxun.services.external_onebot_gateway_config import (
+    DEFAULT_AUTO_SLASH_DISABLED_GROUP_IDS,
+    DEFAULT_AUTO_SLASH_ENABLED_GROUP_IDS,
+    DEFAULT_ENABLE_AUTO_SLASH,
     DEFAULT_HELP_IMAGE_PATH,
     DEFAULT_HELP_URLS,
     REGISTER_CONFIGS,
     get_pjsk_app_settings,
+    parse_config_bool,
 )
 from zhenxun.utils.enum import PluginType
 from zhenxun.utils.message import MessageUtils
 
 APP_NAME = "pjsk"
 HELP_COMMANDS = {"skhelp", "pjskhelp", "pjsk帮助", "sk帮助"}
+LOOSE_MODE_COMMANDS = ("pjsk宽松模式", "pjsk快捷模式", "pjsk免前缀")
+LOOSE_MODE_USAGE = "用法：pjsk宽松模式 <开启|关闭|状态> [群号]"
+LOOSE_MODE_ACTIONS = {
+    "开启": "enable",
+    "打开": "enable",
+    "启用": "enable",
+    "on": "enable",
+    "enable": "enable",
+    "关闭": "disable",
+    "关": "disable",
+    "禁用": "disable",
+    "off": "disable",
+    "disable": "disable",
+    "状态": "status",
+    "查看": "status",
+    "status": "status",
+}
+LOOSE_MODE_RISK_NOTICE = (
+    "宽松模式会允许不带 / 的 PJSK 指令，匹配范围更宽，偶尔可能误触发。"
+    "如果本群还有其他分布式 HarukiBot，双方可能因为“无前缀指令”互相回响；"
+    "目前已有熔断兜底，但仍建议谨慎开启。\n"
+    "关闭方式：本群发送 `pjsk宽松模式 关闭`；超级用户也可以发送 "
+    "`pjsk宽松模式 关闭 <群号>`。"
+)
 PLUGIN_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = PLUGIN_DIR.parents[2]
+_LOOSE_MODE_CONFIG_LOCK = RLock()
+
+
+@dataclass(frozen=True)
+class LooseModeCommand:
+    action: str | None
+    group_id: str | None = None
+    error: str | None = None
 
 
 async def _pjsk_rule(event: Event) -> bool:
@@ -58,6 +98,178 @@ async def _pjsk_help_rule(event: Event) -> bool:
     if plain_text.startswith("/"):
         plain_text = plain_text[1:].strip()
     return plain_text in HELP_COMMANDS
+
+
+def _parse_loose_mode_command(raw_text: str) -> LooseModeCommand | None:
+    # 解析宽松模式管理命令，未命中指令前缀时交给后续 matcher。
+    plain_text = str(raw_text or "").strip()
+    if plain_text.startswith("/"):
+        plain_text = plain_text[1:].strip()
+    for command in LOOSE_MODE_COMMANDS:
+        if plain_text == command:
+            args_text = ""
+        elif plain_text.startswith(f"{command} "):
+            args_text = plain_text[len(command) :].strip()
+        else:
+            continue
+
+        # 管理命令只接受一个动作和一个可选群号，避免宽泛入口吞掉普通 PJSK 查询。
+        tokens = args_text.split()
+        if not tokens:
+            return LooseModeCommand(None, error=LOOSE_MODE_USAGE)
+        action = LOOSE_MODE_ACTIONS.get(tokens[0].lower())
+        if action is None:
+            return LooseModeCommand(None, error=LOOSE_MODE_USAGE)
+        if len(tokens) > 2:
+            return LooseModeCommand(action, error=LOOSE_MODE_USAGE)
+        group_id = tokens[1] if len(tokens) == 2 else None
+        if group_id is not None and not group_id.isdecimal():
+            return LooseModeCommand(action, error="群号必须是纯数字。\n" + LOOSE_MODE_USAGE)
+        return LooseModeCommand(action, group_id=group_id)
+    return None
+
+
+async def _pjsk_loose_mode_rule(event: Event, state: T_State) -> bool:
+    if not isinstance(event, MessageEvent):
+        return False
+    # 将解析结果放入 state，让 handler 统一返回错误或执行业务逻辑。
+    parsed = _parse_loose_mode_command(event.get_plaintext())
+    if parsed is None:
+        return False
+    state["pjsk_loose_mode_command"] = parsed
+    return True
+
+
+def _is_group_admin(event: MessageEvent) -> bool:
+    # OneBot 群消息会携带 sender.role，用它判断群主/管理员权限。
+    if not isinstance(event, GroupMessageEvent):
+        return False
+    sender = getattr(event, "sender", None)
+    return getattr(sender, "role", None) in {"admin", "owner"}
+
+
+def _resolve_loose_mode_target_group(
+    event: MessageEvent,
+    parsed: LooseModeCommand,
+    *,
+    is_superuser: bool,
+) -> tuple[str | None, str | None]:
+    # 超级用户可以跨群管理；私聊没有当前群上下文，因此必须显式给群号。
+    current_group_id = (
+        str(event.group_id) if isinstance(event, GroupMessageEvent) else None
+    )
+    if is_superuser:
+        if parsed.group_id:
+            return parsed.group_id, None
+        if current_group_id:
+            return current_group_id, None
+        return None, "超级用户私聊操作时需要指定群号。\n" + LOOSE_MODE_USAGE
+
+    # 群管理员只允许管理当前群，防止普通群管越权修改其他群配置。
+    if not current_group_id:
+        return None, "该指令仅群管理员或超级用户可用。"
+    if parsed.group_id:
+        return None, "只有超级用户可以指定群号；群管理员请在本群使用不带群号的指令。"
+    if not _is_group_admin(event):
+        return None, "该指令仅群管理员或超级用户可用。"
+    return current_group_id, None
+
+
+def _get_config_str_set(key: str, default: list[str]) -> set[str]:
+    # 配置中心可能返回 list 或逗号字符串，这里统一成去空白后的字符串集合。
+    value = Config.get(APP_NAME).get(key, default)
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        return {item.strip() for item in value.split(",") if item.strip()}
+    if isinstance(value, list | tuple | set):
+        return {str(item).strip() for item in value if str(item).strip()}
+    return {str(value).strip()} if str(value).strip() else set()
+
+
+def _save_loose_mode_group_ids(
+    enabled_group_ids: set[str],
+    disabled_group_ids: set[str] | None = None,
+) -> None:
+    # 使用项目配置层持久化群列表，保持 WebUI 与运行时读取同一份配置。
+    Config.set_config(
+        APP_NAME,
+        "AUTO_SLASH_ENABLED_GROUP_IDS",
+        sorted(enabled_group_ids),
+        auto_save=disabled_group_ids is None,
+    )
+    if disabled_group_ids is not None:
+        Config.set_config(
+            APP_NAME,
+            "AUTO_SLASH_DISABLED_GROUP_IDS",
+            sorted(disabled_group_ids),
+            auto_save=True,
+        )
+
+
+def _is_loose_mode_globally_enabled() -> bool:
+    # 全局总开关保留给部署侧兜底，关闭时群级启用列表不会实际生效。
+    return parse_config_bool(
+        Config.get(APP_NAME).get("ENABLE_AUTO_SLASH", DEFAULT_ENABLE_AUTO_SLASH),
+        DEFAULT_ENABLE_AUTO_SLASH,
+    )
+
+
+def _build_loose_mode_status_message(group_id: str) -> str:
+    # 状态展示区分“配置已开启”和“实际生效”，方便定位全局或兜底配置覆盖。
+    with _LOOSE_MODE_CONFIG_LOCK:
+        enabled_group_ids = _get_config_str_set(
+            "AUTO_SLASH_ENABLED_GROUP_IDS",
+            DEFAULT_AUTO_SLASH_ENABLED_GROUP_IDS,
+        )
+        disabled_group_ids = _get_config_str_set(
+            "AUTO_SLASH_DISABLED_GROUP_IDS",
+            DEFAULT_AUTO_SLASH_DISABLED_GROUP_IDS,
+        )
+        configured_enabled = group_id in enabled_group_ids
+        globally_enabled = _is_loose_mode_globally_enabled()
+        deny_listed = group_id in disabled_group_ids
+        active = configured_enabled and globally_enabled and not deny_listed
+
+    message = f"群 {group_id} 的 PJSK 宽松模式：{'开启' if active else '关闭'}。"
+    if configured_enabled and not active:
+        reasons = []
+        if not globally_enabled:
+            reasons.append("全局总开关 ENABLE_AUTO_SLASH 当前为关闭")
+        if deny_listed:
+            reasons.append("该群命中 AUTO_SLASH_DISABLED_GROUP_IDS 兜底禁用列表")
+        if reasons:
+            message += "\n配置已在启用列表中，但暂未实际生效：" + "；".join(reasons) + "。"
+    return message
+
+
+def _set_loose_mode_status(action: str, group_id: str) -> str:
+    # 开关动作只维护群级启用列表，显式 / 指令与高级群硬拦截不受影响。
+    if action == "status":
+        return _build_loose_mode_status_message(group_id)
+
+    with _LOOSE_MODE_CONFIG_LOCK:
+        enabled_group_ids = _get_config_str_set(
+            "AUTO_SLASH_ENABLED_GROUP_IDS",
+            DEFAULT_AUTO_SLASH_ENABLED_GROUP_IDS,
+        )
+        disabled_group_ids = _get_config_str_set(
+            "AUTO_SLASH_DISABLED_GROUP_IDS",
+            DEFAULT_AUTO_SLASH_DISABLED_GROUP_IDS,
+        )
+        if action == "enable":
+            enabled_group_ids.add(group_id)
+            # 手动开启时移除旧禁用列表中的同群记录，避免历史配置让“开启成功”不生效。
+            disabled_group_ids.discard(group_id)
+            _save_loose_mode_group_ids(enabled_group_ids, disabled_group_ids)
+            message = f"已为群 {group_id} 开启 PJSK 宽松模式。\n{LOOSE_MODE_RISK_NOTICE}"
+            if not _is_loose_mode_globally_enabled():
+                message += "\n注意：全局总开关 ENABLE_AUTO_SLASH 当前为关闭，本群配置已保存但暂不会生效。"
+            return message
+
+        enabled_group_ids.discard(group_id)
+        _save_loose_mode_group_ids(enabled_group_ids)
+    return f"已为群 {group_id} 关闭 PJSK 宽松模式。显式 / 指令仍可正常使用。"
 
 
 def _resolve_help_image_path(value: str) -> Path:
@@ -90,6 +302,20 @@ __plugin_meta__ = PluginMetadata(
         "歌曲、活动、榜线、个人资料等常用查询。"
     ),
     usage="""
+> **⚠️ PJSK 宽松模式默认关闭**
+>
+> 默认只处理带 `/` 的 PJSK 指令，避免自然语言误触发。
+> 如需允许本群使用不带 `/` 的快捷写法，群管理员或超级用户可发送：
+>
+> - `pjsk宽松模式 开启`
+> - `pjsk宽松模式 关闭`
+> - `pjsk宽松模式 状态`
+>
+> 超级用户也可在任意群聊或私聊指定群号：`pjsk宽松模式 开启 <群号>`。
+> 开启后可能误触发，并且与其他分布式 HarukiBot 同群时存在互相回响风险，请谨慎使用。
+
+---
+
 > **📌 网页版帮助与工具箱指路**
 >
 > - **使用帮助**：https://neo.haruki.seiunx.com
@@ -386,6 +612,8 @@ __plugin_meta__ = PluginMetadata(
         setting=PluginSetting(default_status=True),
         configs=REGISTER_CONFIGS,
         commands=[
+            Command(command="pjsk宽松模式 <开启|关闭|状态> [群号]", description="群级开关 PJSK 免 / 快捷触发"),
+            Command(command="pjsk快捷模式 / pjsk免前缀", description="同 pjsk宽松模式"),
             Command(command="sk帮助", description="查看 PJSK 本地帮助图片与网址"),
             Command(command="skhelp / pjskhelp", description="查看 PJSK 本地帮助图片与网址"),
             Command(command="/haruki_info", description="查看 HarukiBot NEO 状态"),
@@ -408,8 +636,41 @@ external_onebot_gateway.register_app(
 )
 
 # 本地帮助需要先于黑箱转发命中，避免 help 文本被自动补斜杠后发给 Haruki。
+loose_mode_matcher = on_message(
+    priority=0,
+    block=True,
+    rule=Rule(_pjsk_loose_mode_rule),
+)
 help_matcher = on_message(priority=0, block=True, rule=Rule(_pjsk_help_rule))
 matcher = on_message(priority=1, block=False, rule=Rule(_pjsk_rule))
+
+
+@loose_mode_matcher.handle()
+async def _handle_pjsk_loose_mode(
+    bot: OneBotV11Bot,
+    event: MessageEvent,
+    state: T_State,
+):
+    parsed: LooseModeCommand = state["pjsk_loose_mode_command"]
+    if parsed.error or not parsed.action:
+        await MessageUtils.build_message(parsed.error or LOOSE_MODE_USAGE).finish(
+            reply_to=True
+        )
+
+    target_group_id, error = _resolve_loose_mode_target_group(
+        event,
+        parsed,
+        is_superuser=await SUPERUSER(bot, event),
+    )
+    if error or not target_group_id:
+        await MessageUtils.build_message(error or LOOSE_MODE_USAGE).finish(
+            reply_to=True
+        )
+
+    # 完成权限与目标群解析后，再修改配置并返回明确的操作结果。
+    await MessageUtils.build_message(
+        _set_loose_mode_status(parsed.action, target_group_id)
+    ).finish(reply_to=True)
 
 
 @help_matcher.handle()

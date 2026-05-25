@@ -6,7 +6,12 @@ import importlib
 import time
 
 import nonebot
-from nonebot.adapters.onebot.v11 import GroupMessageEvent, Message, MessageSegment
+from nonebot.adapters.onebot.v11 import (
+    GroupMessageEvent,
+    Message,
+    MessageSegment,
+    PrivateMessageEvent,
+)
 import pytest
 
 nonebot.init()
@@ -30,12 +35,14 @@ from zhenxun.services.external_onebot_gateway import (
     content_filter_allows,
     extract_reply_id,
     normalize_action_message,
+    should_apply_auto_slash,
 )
 from zhenxun.services.external_onebot_gateway_config import (
     DEFAULT_CONTENT_FILTER_REGEX,
     ContentFilterSettings,
     ExternalOneBotAppSettings,
     IdFilterSettings,
+    parse_config_bool,
 )
 from zhenxun.utils.manager.message_manager import MessageManager
 
@@ -43,6 +50,7 @@ from zhenxun.utils.manager.message_manager import MessageManager
 def _settings(
     *,
     action_allowlist: set[str] | None = None,
+    auto_slash_enabled_group_ids: set[str] | None = None,
 ) -> ExternalOneBotAppSettings:
     return ExternalOneBotAppSettings(
         ws_url="ws://127.0.0.1:1/ws",
@@ -54,6 +62,7 @@ def _settings(
         attribution_sweep_interval_seconds=15,
         event_queue_max_size=1000,
         enable_auto_slash=True,
+        auto_slash_enabled_group_ids=auto_slash_enabled_group_ids or set(),
         auto_slash_disabled_group_ids=set(),
         auto_slash_fuse_enabled=True,
         auto_slash_fuse_echo_source_seconds=3,
@@ -110,7 +119,12 @@ def _pjsk_plugin():
     return importlib.import_module("zhenxun.plugins.pjsk")
 
 
-def _group_event(text: str, *, group_id: int = 444) -> GroupMessageEvent:
+def _group_event(
+    text: str,
+    *,
+    group_id: int = 444,
+    role: str = "member",
+) -> GroupMessageEvent:
     return GroupMessageEvent(
         time=1,
         self_id=111,
@@ -131,10 +145,32 @@ def _group_event(text: str, *, group_id: int = 444) -> GroupMessageEvent:
             "age": 0,
             "area": "",
             "level": "",
-            "role": "member",
+            "role": role,
             "title": "",
         },
         group_id=group_id,
+    )
+
+
+def _private_event(text: str) -> PrivateMessageEvent:
+    return PrivateMessageEvent(
+        time=1,
+        self_id=111,
+        post_type="message",
+        sub_type="friend",
+        user_id=222,
+        message_type="private",
+        message_id=333,
+        message=Message([MessageSegment.text(text)]),
+        original_message=Message([MessageSegment.text(text)]),
+        raw_message=text,
+        font=0,
+        sender={
+            "user_id": 222,
+            "nickname": "tester",
+            "sex": "unknown",
+            "age": 0,
+        },
     )
 
 
@@ -159,6 +195,143 @@ async def test_pjsk_rule_allows_normal_user(monkeypatch):
     monkeypatch.setattr(nonebot, "get_bots", lambda: {"111": object(), "222": object()})
 
     assert await pjsk_plugin._pjsk_rule(event) is True
+
+
+def test_pjsk_loose_mode_command_parser_accepts_aliases():
+    pjsk_plugin = _pjsk_plugin()
+
+    parsed = pjsk_plugin._parse_loose_mode_command("pjsk免前缀 开启 123456")
+
+    assert parsed is not None
+    assert parsed.action == "enable"
+    assert parsed.group_id == "123456"
+    assert parsed.error is None
+
+
+def test_pjsk_loose_mode_command_parser_rejects_bad_group_id():
+    pjsk_plugin = _pjsk_plugin()
+
+    parsed = pjsk_plugin._parse_loose_mode_command("pjsk快捷模式 关闭 abc")
+
+    assert parsed is not None
+    assert parsed.error == "群号必须是纯数字。\n" + pjsk_plugin.LOOSE_MODE_USAGE
+
+
+def test_pjsk_loose_mode_target_allows_group_admin_current_group():
+    pjsk_plugin = _pjsk_plugin()
+    parsed = pjsk_plugin.LooseModeCommand("enable")
+
+    target_group_id, error = pjsk_plugin._resolve_loose_mode_target_group(
+        _group_event("pjsk宽松模式 开启", group_id=444, role="admin"),
+        parsed,
+        is_superuser=False,
+    )
+
+    assert target_group_id == "444"
+    assert error is None
+
+
+def test_pjsk_loose_mode_target_rejects_admin_group_argument():
+    pjsk_plugin = _pjsk_plugin()
+    parsed = pjsk_plugin.LooseModeCommand("enable", group_id="555")
+
+    target_group_id, error = pjsk_plugin._resolve_loose_mode_target_group(
+        _group_event("pjsk宽松模式 开启 555", group_id=444, role="admin"),
+        parsed,
+        is_superuser=False,
+    )
+
+    assert target_group_id is None
+    assert error == "只有超级用户可以指定群号；群管理员请在本群使用不带群号的指令。"
+
+
+def test_pjsk_loose_mode_target_allows_superuser_private_with_group_argument():
+    pjsk_plugin = _pjsk_plugin()
+    parsed = pjsk_plugin.LooseModeCommand("enable", group_id="555")
+
+    target_group_id, error = pjsk_plugin._resolve_loose_mode_target_group(
+        _private_event("pjsk宽松模式 开启 555"),
+        parsed,
+        is_superuser=True,
+    )
+
+    assert target_group_id == "555"
+    assert error is None
+
+
+def test_pjsk_loose_mode_target_requires_superuser_private_group_argument():
+    pjsk_plugin = _pjsk_plugin()
+    parsed = pjsk_plugin.LooseModeCommand("enable")
+
+    target_group_id, error = pjsk_plugin._resolve_loose_mode_target_group(
+        _private_event("pjsk宽松模式 开启"),
+        parsed,
+        is_superuser=True,
+    )
+
+    assert target_group_id is None
+    assert error == "超级用户私聊操作时需要指定群号。\n" + pjsk_plugin.LOOSE_MODE_USAGE
+
+
+def test_pjsk_loose_mode_target_rejects_normal_member():
+    pjsk_plugin = _pjsk_plugin()
+    parsed = pjsk_plugin.LooseModeCommand("status")
+
+    target_group_id, error = pjsk_plugin._resolve_loose_mode_target_group(
+        _group_event("pjsk宽松模式 状态", group_id=444, role="member"),
+        parsed,
+        is_superuser=False,
+    )
+
+    assert target_group_id is None
+    assert error == "该指令仅群管理员或超级用户可用。"
+
+
+def test_pjsk_loose_mode_status_updates_config(monkeypatch):
+    pjsk_plugin = _pjsk_plugin()
+    store = {
+        "ENABLE_AUTO_SLASH": True,
+        "AUTO_SLASH_ENABLED_GROUP_IDS": [],
+        "AUTO_SLASH_DISABLED_GROUP_IDS": ["444"],
+    }
+
+    class FakeConfigGroup:
+        def get(self, key: str, default=None):
+            return store.get(key, default)
+
+    def fake_set_config(module: str, key: str, value, auto_save: bool = False):
+        assert module == "pjsk"
+        store[key] = value
+
+    monkeypatch.setattr(pjsk_plugin.Config, "get", lambda module: FakeConfigGroup())
+    monkeypatch.setattr(pjsk_plugin.Config, "set_config", fake_set_config)
+
+    result = pjsk_plugin._set_loose_mode_status("enable", "444")
+
+    assert store["AUTO_SLASH_ENABLED_GROUP_IDS"] == ["444"]
+    assert store["AUTO_SLASH_DISABLED_GROUP_IDS"] == []
+    assert "已为群 444 开启 PJSK 宽松模式" in result
+    assert "互相回响" in result
+
+
+def test_pjsk_loose_mode_status_parses_string_false(monkeypatch):
+    pjsk_plugin = _pjsk_plugin()
+    store = {
+        "ENABLE_AUTO_SLASH": "false",
+        "AUTO_SLASH_ENABLED_GROUP_IDS": ["444"],
+        "AUTO_SLASH_DISABLED_GROUP_IDS": [],
+    }
+
+    class FakeConfigGroup:
+        def get(self, key: str, default=None):
+            return store.get(key, default)
+
+    monkeypatch.setattr(pjsk_plugin.Config, "get", lambda module: FakeConfigGroup())
+
+    result = pjsk_plugin._set_loose_mode_status("status", "444")
+
+    assert "PJSK 宽松模式：关闭" in result
+    assert "ENABLE_AUTO_SLASH 当前为关闭" in result
 
 
 def test_auto_slash_rewrites_first_text_segment_after_at():
@@ -208,6 +381,40 @@ def test_content_filter_modes():
     assert content_filter_allows(whitelist, "查卡 957") is True
     assert content_filter_allows(whitelist, "你好") is False
     assert content_filter_allows(whitelist, "你好", bypass=True) is True
+
+
+def test_parse_config_bool_handles_common_string_values():
+    assert parse_config_bool("false", True) is False
+    assert parse_config_bool("0", True) is False
+    assert parse_config_bool("开启", False) is True
+    assert parse_config_bool("unknown", True) is True
+
+
+def test_should_apply_auto_slash_requires_enabled_group():
+    settings = _settings()
+
+    assert should_apply_auto_slash(settings, 444) is False
+
+
+def test_should_apply_auto_slash_allows_enabled_group():
+    settings = _settings(auto_slash_enabled_group_ids={"444"})
+
+    assert should_apply_auto_slash(settings, 444) is True
+
+
+def test_should_apply_auto_slash_disabled_group_overrides_enabled_group():
+    settings = replace(
+        _settings(auto_slash_enabled_group_ids={"444"}),
+        auto_slash_disabled_group_ids={"444"},
+    )
+
+    assert should_apply_auto_slash(settings, 444) is False
+
+
+def test_should_apply_auto_slash_skips_private_context():
+    settings = _settings(auto_slash_enabled_group_ids={"444"})
+
+    assert should_apply_auto_slash(settings, None) is False
 
 
 def test_default_content_filter_preserves_low_misfire_haruki_commands():
@@ -474,10 +681,11 @@ def test_build_event_payload_rewrites_segments_and_raw_message():
         },
         group_id=444,
     )
-    session = _session(_settings())
+    settings = _settings(auto_slash_enabled_group_ids={"444"})
+    session = _session(settings)
 
     built_event = session._build_event_payload(
-        QueuedOneBotEvent("111", event), _settings()
+        QueuedOneBotEvent("111", event), settings
     )
 
     assert built_event is not None
@@ -490,8 +698,8 @@ def test_build_event_payload_rewrites_segments_and_raw_message():
     assert "original_message" not in payload
 
 
-def test_build_event_payload_skips_auto_slash_for_disabled_group():
-    settings = replace(_settings(), auto_slash_disabled_group_ids={"444"})
+def test_build_event_payload_skips_auto_slash_by_default():
+    settings = _settings()
     session = _session(settings)
 
     built_event = session._build_event_payload(
@@ -506,8 +714,8 @@ def test_build_event_payload_skips_auto_slash_for_disabled_group():
     assert payload["raw_message"] == "查卡"
 
 
-def test_build_event_payload_keeps_explicit_slash_for_disabled_group():
-    settings = replace(_settings(), auto_slash_disabled_group_ids={"444"})
+def test_build_event_payload_keeps_explicit_slash_when_loose_mode_off():
+    settings = _settings()
     session = _session(settings)
 
     built_event = session._build_event_payload(
@@ -522,8 +730,8 @@ def test_build_event_payload_keeps_explicit_slash_for_disabled_group():
     assert payload["raw_message"] == "/查卡"
 
 
-def test_build_event_payload_auto_slash_still_applies_outside_disabled_group():
-    settings = replace(_settings(), auto_slash_disabled_group_ids={"444"})
+def test_build_event_payload_auto_slash_applies_for_enabled_group():
+    settings = _settings(auto_slash_enabled_group_ids={"555"})
     session = _session(settings)
 
     built_event = session._build_event_payload(
@@ -540,7 +748,7 @@ def test_build_event_payload_auto_slash_still_applies_outside_disabled_group():
 
 def test_build_event_payload_global_auto_slash_switch_has_precedence():
     settings = replace(
-        _settings(),
+        _settings(auto_slash_enabled_group_ids={"555"}),
         enable_auto_slash=False,
         auto_slash_disabled_group_ids=set(),
     )
@@ -548,6 +756,25 @@ def test_build_event_payload_global_auto_slash_switch_has_precedence():
 
     built_event = session._build_event_payload(
         QueuedOneBotEvent("111", _group_event("查卡", group_id=555)),
+        settings,
+    )
+
+    assert built_event is not None
+    assert built_event.auto_slash_applied is False
+    payload = built_event.payload
+    assert payload["message"][0]["data"]["text"] == "查卡"
+    assert payload["raw_message"] == "查卡"
+
+
+def test_build_event_payload_disabled_group_overrides_enabled_group():
+    settings = replace(
+        _settings(auto_slash_enabled_group_ids={"444"}),
+        auto_slash_disabled_group_ids={"444"},
+    )
+    session = _session(settings)
+
+    built_event = session._build_event_payload(
+        QueuedOneBotEvent("111", _group_event("查卡", group_id=444)),
         settings,
     )
 
@@ -581,7 +808,10 @@ def test_build_event_payload_group_filter_remains_hard_block():
 @pytest.mark.asyncio
 async def test_send_queued_event_records_slow_inbound_timing(monkeypatch):
     logs: list[tuple[str, str]] = []
-    settings = replace(_settings(), timing_slow_ms=1)
+    settings = replace(
+        _settings(auto_slash_enabled_group_ids={"444"}),
+        timing_slow_ms=1,
+    )
     session = _session(settings)
 
     async def fake_send_ws(payload: dict):
@@ -652,7 +882,7 @@ def test_echo_source_tracker_keeps_per_source_records():
 
 
 def test_build_event_payload_marks_same_source_echo_suspect():
-    settings = _settings()
+    settings = _settings(auto_slash_enabled_group_ids={"444"})
     session = _session(settings)
     session._echo_source_tracker.put(
         group_id="444",
@@ -675,7 +905,7 @@ def test_build_event_payload_marks_same_source_echo_suspect():
 
 
 def test_build_event_payload_does_not_cross_pollinate_echo_sources():
-    settings = _settings()
+    settings = _settings(auto_slash_enabled_group_ids={"444"})
     session = _session(settings)
     session._echo_source_tracker.put(
         group_id="444",
@@ -698,7 +928,7 @@ def test_build_event_payload_does_not_cross_pollinate_echo_sources():
 
 
 def test_build_event_payload_ignores_expired_echo_source():
-    settings = _settings()
+    settings = _settings(auto_slash_enabled_group_ids={"444"})
     session = _session(settings)
     session._echo_source_tracker.put(
         group_id="444",
@@ -720,7 +950,10 @@ def test_build_event_payload_ignores_expired_echo_source():
 
 
 def test_build_event_payload_requires_auto_slash_for_echo_suspect():
-    settings = replace(_settings(), auto_slash_disabled_group_ids={"444"})
+    settings = replace(
+        _settings(auto_slash_enabled_group_ids={"444"}),
+        auto_slash_disabled_group_ids={"444"},
+    )
     session = _session(settings)
     session._echo_source_tracker.put(
         group_id="444",
@@ -861,7 +1094,7 @@ def test_auto_slash_fuse_ignores_non_echo_attribution():
 
 def test_build_event_payload_skips_auto_slash_while_user_fuse_suspended():
     settings = replace(
-        _settings(),
+        _settings(auto_slash_enabled_group_ids={"444"}),
         auto_slash_fuse_max_replies=1,
         auto_slash_fuse_window_seconds=5,
         auto_slash_fuse_suspend_seconds=30,

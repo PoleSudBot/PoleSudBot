@@ -772,8 +772,12 @@ def should_apply_auto_slash(
     if not settings.enable_auto_slash:
         return False
     if group_id is None:
-        return True
-    return str(group_id) not in settings.auto_slash_disabled_group_ids
+        return False
+    normalized_group_id = str(group_id)
+    return (
+        normalized_group_id in settings.auto_slash_enabled_group_ids
+        and normalized_group_id not in settings.auto_slash_disabled_group_ids
+    )
 
 
 def extract_reply_id(message: Any) -> str | None:
