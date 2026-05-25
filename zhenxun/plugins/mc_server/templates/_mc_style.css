@@ -1,0 +1,239 @@
+:root {
+  --color-primary: #FF6699;
+  --color-primary-dark: #D14775;
+  --color-primary-soft: #fff5f8;
+  --color-primary-pale: #fff9fb;
+  --color-bg-main: #ffffff;
+  --color-bg-card: #fff5f8;
+  --color-bg-page: #fff0f5;
+  --color-border: #ffe0ea;
+  --color-border-strong: #ffcada;
+  --color-text-dark: #4a2c36;
+  --color-text-muted: #9b7582;
+  --color-call: #E7799A;
+  --color-warning: #E7799A;
+  --color-danger: #D14775;
+  --color-info: #E7799A;
+  --shadow-soft: 0 10px 24px rgba(209, 71, 117, 0.08);
+}
+
+@font-face {
+  font-family: "PingFangSCRegular";
+  src: url("../../../../resources/font/pingfangsc-regular.otf") format("opentype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  font-family: "PingFangSCRegular", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  color: var(--color-text-dark);
+}
+
+.mc-wrapper {
+  width: 860px;
+  margin: 0;
+  padding: 30px 30px 22px;
+  background: var(--color-bg-page);
+  overflow: hidden;
+}
+
+.mc-wrapper.narrow {
+  width: 760px;
+}
+
+.mc-card,
+.stat-box {
+  background: var(--color-bg-main);
+  border: 1px solid var(--color-border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-soft);
+}
+
+.mc-card {
+  padding: 18px;
+}
+
+.card-head,
+.hero-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.title-group {
+  min-width: 0;
+}
+
+.eyebrow {
+  margin: 0 0 7px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.page-title {
+  margin: 0;
+  color: var(--color-primary-dark);
+  font-family: "PingFangSCRegular", "Noto Sans SC", sans-serif;
+  font-size: 28px;
+  line-height: 1.14;
+  font-weight: 900;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+
+.subtle {
+  margin-top: 7px;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  line-height: 1.35;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.status-badge,
+.level-badge {
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.status-badge.online,
+.level-badge {
+  color: var(--color-primary-dark);
+  background: var(--color-primary-soft);
+  border: 1px solid var(--color-border-strong);
+}
+
+.status-badge.offline {
+  color: var(--color-danger);
+  background: var(--color-primary-soft);
+  border: 1px solid var(--color-border-strong);
+}
+
+.icon-tile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  background: var(--color-primary-soft);
+  border-radius: 13px;
+}
+
+.icon-svg {
+  width: 19px;
+  height: 19px;
+  color: var(--color-primary-dark);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.stat-grid.two {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.stat-box {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+  min-height: 68px;
+  padding: 13px 15px;
+}
+
+.stat-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+.stat-label {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.stat-value {
+  margin-top: 6px;
+  color: var(--color-primary-dark);
+  font-size: 18px;
+  line-height: 1.05;
+  font-weight: 900;
+  overflow-wrap: anywhere;
+}
+
+.section {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--color-border);
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  color: var(--color-text-dark);
+  font-size: 16px;
+  line-height: 1.25;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+.empty,
+.error-panel {
+  margin-top: 14px;
+  padding: 15px;
+  border-radius: 12px;
+  font-size: 14px;
+  line-height: 1.45;
+  font-weight: 700;
+}
+
+.empty {
+  color: var(--color-text-muted);
+  background: var(--color-primary-pale);
+  border: 1px solid var(--color-border);
+}
+
+.error-panel {
+  color: var(--color-danger);
+  background: var(--color-primary-soft);
+  border: 1px solid var(--color-border-strong);
+}

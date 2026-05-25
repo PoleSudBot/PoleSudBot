@@ -1,0 +1,167 @@
+{% import './_icons.html' as icons %}
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <style>
+    {% include './_mc_style.css' %}
+    .player-panel {
+      margin-top: 16px;
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--color-primary-pale);
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+    }
+
+    .player-name {
+      min-width: 0;
+      color: var(--color-text-dark);
+      font-size: 16px;
+      line-height: 1.25;
+      font-weight: 900;
+      overflow-wrap: anywhere;
+    }
+
+    .player-meta {
+      margin-top: 4px;
+      color: var(--color-text-muted);
+      font-size: 12px;
+      line-height: 1.2;
+      font-weight: 700;
+    }
+
+    .timeline-shell {
+      margin-top: 16px;
+      padding: 18px 16px 14px;
+      background: var(--color-primary-pale);
+      border: 1px solid var(--color-border);
+      border-radius: 12px;
+    }
+
+    .timeline {
+      position: relative;
+      height: 54px;
+      border-radius: 12px;
+      background: var(--color-primary-soft);
+      border: 1px solid var(--color-border-strong);
+      overflow: hidden;
+    }
+
+    .segment {
+      position: absolute;
+      top: 9px;
+      height: 34px;
+      border-radius: 10px;
+      background: var(--color-primary);
+      box-shadow: inset 0 -9px 18px rgba(209, 71, 117, 0.2);
+    }
+
+    .axis {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: 9px;
+      color: var(--color-text-muted);
+      font-size: 11px;
+      line-height: 1.2;
+      font-weight: 800;
+    }
+
+    .segment-list {
+      margin-top: 16px;
+      border-top: 1px solid var(--color-border);
+    }
+
+    .segment-row {
+      display: grid;
+      grid-template-columns: 1fr 104px;
+      gap: 12px;
+      align-items: center;
+      min-height: 42px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--color-border);
+    }
+
+    .segment-time {
+      color: var(--color-text-dark);
+      font-size: 13px;
+      line-height: 1.25;
+      font-weight: 800;
+      overflow-wrap: anywhere;
+    }
+
+    .segment-duration {
+      color: var(--color-primary-dark);
+      font-size: 13px;
+      line-height: 1.2;
+      font-weight: 900;
+      text-align: right;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <div class="mc-wrapper">
+    <div class="mc-card">
+      <div class="card-head">
+        <div class="title-group">
+          <p class="eyebrow">MC 个人在线情况</p>
+          <h1 class="page-title">{{ title }}</h1>
+          <div class="subtle">{{ range_label }}</div>
+        </div>
+        <span class="level-badge">{{ segment_count }} 段</span>
+      </div>
+
+      <div class="stat-grid two">
+        <div class="stat-box">
+          {{ icons.icon_tile("clock") }}
+          <div class="stat-copy">
+            <div class="stat-label">总时长</div>
+            <div class="stat-value">{{ total_duration }}</div>
+          </div>
+        </div>
+        <div class="stat-box">
+          {{ icons.icon_tile("calendar") }}
+          <div class="stat-copy">
+            <div class="stat-label">范围</div>
+            <div class="stat-value">{{ range_label }}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="player-panel">
+        {{ icons.icon_tile("user") }}
+        <div>
+          <div class="player-name">{{ player_label }}</div>
+          <div class="player-meta">按在线 session 裁剪统计</div>
+        </div>
+      </div>
+
+      {% if segments %}
+      <div class="timeline-shell">
+        <div class="timeline">
+          {% for segment in segments %}
+          <div class="segment" style="left: {{ segment.left }}%; width: {{ segment.width }}%;" title="{{ segment.start }} ~ {{ segment.end }} {{ segment.duration }}"></div>
+          {% endfor %}
+        </div>
+        <div class="axis"><span>{{ range_start }}</span><span>{{ range_end }}</span></div>
+      </div>
+
+      <div class="segment-list">
+        {% for segment in segment_rows %}
+        <div class="segment-row">
+          <div class="segment-time">{{ segment.start }} ~ {{ segment.end }}</div>
+          <div class="segment-duration">{{ segment.duration }}</div>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="empty">暂无在线记录</div>
+      {% endif %}
+    </div>
+  </div>
+</body>
+</html>

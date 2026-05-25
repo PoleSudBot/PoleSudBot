@@ -1,0 +1,138 @@
+{% import './_icons.html' as icons %}
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <style>
+    {% include './_mc_style.css' %}
+    .status-layout {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 14px;
+    }
+
+    .hero-card {
+      padding: 20px;
+    }
+
+    .metric-row {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr 1.2fr 1.3fr;
+      gap: 12px;
+      margin-top: 17px;
+    }
+
+    .player-list {
+      display: grid;
+      grid-template-columns: 1fr;
+    }
+
+    .player-row {
+      display: grid;
+      grid-template-columns: minmax(120px, 170px) 1fr minmax(88px, 116px);
+      gap: 12px;
+      align-items: center;
+      min-height: 44px;
+      padding: 10px 0;
+      border-top: 1px solid var(--color-border);
+    }
+
+    .player-row:first-child {
+      border-top: 0;
+    }
+
+    .player-name {
+      color: var(--color-text-dark);
+      font-size: 15px;
+      line-height: 1.2;
+      font-weight: 900;
+      overflow-wrap: anywhere;
+    }
+
+    .player-detail,
+    .player-online {
+      color: var(--color-text-muted);
+      font-size: 12px;
+      line-height: 1.25;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .player-online {
+      text-align: right;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <div class="mc-wrapper">
+    <div class="status-layout">
+      <div class="mc-card hero-card">
+        <div class="hero-head">
+          <div class="title-group">
+            <p class="eyebrow">MC 服务器状态</p>
+            <h1 class="page-title">{{ status.name }}</h1>
+            <div class="subtle">{{ status.address }}</div>
+          </div>
+          <span class="status-badge {{ 'online' if status.online else 'offline' }}">{{ "在线" if status.online else "离线" }}</span>
+        </div>
+
+        <div class="metric-row">
+          <div class="stat-box">
+            {{ icons.icon_tile("users") }}
+            <div class="stat-copy">
+              <div class="stat-label">在线人数</div>
+              <div class="stat-value">{{ status.online_players }}/{{ status.max_players }}</div>
+            </div>
+          </div>
+          <div class="stat-box">
+            {{ icons.icon_tile("gauge") }}
+            <div class="stat-copy">
+              <div class="stat-label">延迟</div>
+              <div class="stat-value">{% if status.latency_ms is not none %}{{ "%.0f"|format(status.latency_ms) }}ms{% else %}未知{% endif %}</div>
+            </div>
+          </div>
+          <div class="stat-box">
+            {{ icons.icon_tile("box") }}
+            <div class="stat-copy">
+              <div class="stat-label">版本</div>
+              <div class="stat-value">{{ status.version or "未知" }}</div>
+            </div>
+          </div>
+          <div class="stat-box">
+            {{ icons.icon_tile("cloud") }}
+            <div class="stat-copy">
+              <div class="stat-label">天气</div>
+              <div class="stat-value">{{ status.weather or "未知" }}</div>
+            </div>
+          </div>
+        </div>
+
+        {% if status.error %}
+        <div class="error-panel">{{ status.error }}</div>
+        {% endif %}
+      </div>
+
+      <div class="mc-card">
+        <div class="section-head">
+          <h2 class="section-title">{{ icons.icon_tile("map-pin") }}在线玩家</h2>
+          <span class="level-badge">{{ players|length }} 人可见</span>
+        </div>
+        {% if players %}
+        <div class="player-list">
+          {% for player in players %}
+          <div class="player-row">
+            <div class="player-name">{{ player.name }}</div>
+            <div class="player-detail">{{ player.position or "无坐标数据" }}</div>
+            <div class="player-online">{{ player.online or "" }}</div>
+          </div>
+          {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty">暂无可见玩家列表</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</body>
+</html>

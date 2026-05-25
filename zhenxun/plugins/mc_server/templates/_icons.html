@@ -1,0 +1,56 @@
+{% macro icon_tile(name) -%}
+<span class="icon-tile" aria-hidden="true">
+  <svg class="icon-svg" viewBox="0 0 24 24">
+    {% if name == "server" %}
+    <rect x="3" y="4" width="18" height="8" rx="2" />
+    <rect x="3" y="14" width="18" height="6" rx="2" />
+    <path d="M7 8h.01" />
+    <path d="M7 17h.01" />
+    {% elif name == "users" %}
+    <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+    <circle cx="9" cy="7" r="4" />
+    <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+    <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+    {% elif name == "gauge" %}
+    <path d="M12 14l3-3" />
+    <path d="M3.34 19a10 10 0 1 1 17.32 0" />
+    {% elif name == "box" %}
+    <path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z" />
+    <path d="m3.3 7 8.7 5 8.7-5" />
+    <path d="M12 22V12" />
+    {% elif name == "cloud" %}
+    <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
+    {% elif name == "map-pin" %}
+    <path d="M20 10c0 4.9-8 12-8 12S4 14.9 4 10a8 8 0 0 1 16 0Z" />
+    <circle cx="12" cy="10" r="3" />
+    {% elif name == "clock" %}
+    <circle cx="12" cy="12" r="10" />
+    <path d="M12 6v6l4 2" />
+    {% elif name == "trophy" %}
+    <path d="M8 21h8" />
+    <path d="M12 17v4" />
+    <path d="M7 4h10v6a5 5 0 0 1-10 0Z" />
+    <path d="M5 5H3v3a4 4 0 0 0 4 4" />
+    <path d="M19 5h2v3a4 4 0 0 1-4 4" />
+    {% elif name == "chart" %}
+    <path d="M4 19V5" />
+    <path d="M4 19h16" />
+    <path d="m7 15 4-4 3 3 5-7" />
+    {% elif name == "activity" %}
+    <path d="M22 12h-4l-3 8-6-16-3 8H2" />
+    {% elif name == "calendar" %}
+    <path d="M8 2v4" />
+    <path d="M16 2v4" />
+    <rect x="3" y="4" width="18" height="18" rx="2" />
+    <path d="M3 10h18" />
+    {% elif name == "user" %}
+    <circle cx="12" cy="8" r="5" />
+    <path d="M20 21a8 8 0 0 0-16 0" />
+    {% else %}
+    <circle cx="12" cy="12" r="10" />
+    <path d="M12 8v4" />
+    <path d="M12 16h.01" />
+    {% endif %}
+  </svg>
+</span>
+{%- endmacro %}

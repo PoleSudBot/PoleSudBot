@@ -1,0 +1,102 @@
+{% import './_icons.html' as icons %}
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <style>
+    {% include './_mc_style.css' %}
+    .rank-list {
+      margin-top: 16px;
+      border-top: 1px solid var(--color-border);
+    }
+
+    .rank-row {
+      display: grid;
+      grid-template-columns: 54px 1fr 132px;
+      gap: 12px;
+      align-items: center;
+      min-height: 52px;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--color-border);
+    }
+
+    .rank-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 38px;
+      height: 38px;
+      border-radius: 14px;
+      color: var(--color-primary-dark);
+      background: var(--color-primary-soft);
+      border: 1px solid var(--color-border);
+      font-size: 15px;
+      line-height: 1;
+      font-weight: 900;
+    }
+
+    .rank-row:nth-child(1) .rank-badge {
+      color: var(--color-primary-dark);
+      background: #fff0f5;
+      border-color: var(--color-border-strong);
+    }
+
+    .rank-row:nth-child(2) .rank-badge {
+      color: var(--color-primary-dark);
+      background: #fff5f8;
+      border-color: var(--color-border);
+    }
+
+    .rank-row:nth-child(3) .rank-badge {
+      color: var(--color-primary-dark);
+      background: #fff9fb;
+      border-color: var(--color-border);
+    }
+
+    .player-name {
+      min-width: 0;
+      color: var(--color-text-dark);
+      font-size: 16px;
+      line-height: 1.25;
+      font-weight: 900;
+      overflow-wrap: anywhere;
+    }
+
+    .duration {
+      color: var(--color-primary-dark);
+      font-size: 15px;
+      line-height: 1.2;
+      font-weight: 900;
+      text-align: right;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <div class="mc-wrapper narrow">
+    <div class="mc-card">
+      <div class="card-head">
+        <div class="title-group">
+          <p class="eyebrow">MC 在线时长</p>
+          <h1 class="page-title">{{ title }}</h1>
+        </div>
+        <span class="level-badge">{{ items|length }} 名玩家</span>
+      </div>
+
+      {% if items %}
+      <div class="rank-list">
+        {% for item in items %}
+        <div class="rank-row">
+          <div class="rank-badge">#{{ item.rank }}</div>
+          <div class="player-name">{{ item.name }}</div>
+          <div class="duration">{{ item.duration }}</div>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div class="empty">暂无在线时长记录</div>
+      {% endif %}
+    </div>
+  </div>
+</body>
+</html>

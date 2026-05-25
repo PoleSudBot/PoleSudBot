@@ -1,0 +1,129 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime
+
+
+@dataclass(frozen=True)
+class RenderedMessage:
+    image: bytes | None
+    fallback_text: str
+    lead_text: str = ""
+
+    def to_message_parts(self) -> list[object]:
+        if self.image:
+            if self.lead_text:
+                return [self.lead_text, "\n", self.image]
+            return [self.image]
+        return [self.fallback_text]
+
+
+@dataclass(frozen=True)
+class ParsedAddress:
+    host: str
+    port: int
+
+    @property
+    def display(self) -> str:
+        if ":" in self.host and not self.host.startswith("["):
+            return f"[{self.host}]:{self.port}"
+        return f"{self.host}:{self.port}"
+
+
+@dataclass(frozen=True)
+class TimeRange:
+    label: str
+    start: datetime
+    end: datetime
+
+
+@dataclass(frozen=True)
+class LogEvent:
+    type: str
+    player_name: str = ""
+    message: str = ""
+    raw: str = ""
+    occurred_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class BlueMapPlayer:
+    uuid: str
+    name: str
+    map_id: str
+    x: float
+    y: float
+    z: float
+
+    @property
+    def position_text(self) -> str:
+        return f"{self.map_id} ({self.x:.1f}, {self.y:.1f}, {self.z:.1f})"
+
+
+@dataclass(frozen=True)
+class PlayerStatus:
+    name: str
+    uuid: str = ""
+    online_seconds: int = 0
+    position: str = ""
+
+
+@dataclass(frozen=True)
+class ServerStatus:
+    name: str
+    address: str
+    online: bool
+    latency_ms: float | None = None
+    version: str = ""
+    online_players: int = 0
+    max_players: int = 0
+    players: list[PlayerStatus] = field(default_factory=list)
+    weather: str = "未知/未配置数据源"
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class PlaytimeEntry:
+    player_name: str
+    seconds: int
+    qq_id: str = ""
+
+
+@dataclass(frozen=True)
+class PlaytimeRow:
+    player_name: str
+    qq_id: str
+    seconds: int
+
+
+@dataclass(frozen=True)
+class SamplePoint:
+    captured_at: datetime
+    online_count: int
+
+
+@dataclass(frozen=True)
+class PersonalOnlineSegment:
+    started_at: datetime
+    ended_at: datetime
+    seconds: int
+
+
+@dataclass(frozen=True)
+class PersonalOnlineData:
+    title: str
+    range_label: str
+    range_start: datetime
+    range_end: datetime
+    qq_id: str
+    player_names: list[str] = field(default_factory=list)
+    segments: list[PersonalOnlineSegment] = field(default_factory=list)
+    total_seconds: int = 0
+
+
+@dataclass(frozen=True)
+class ChartData:
+    title: str
+    range_label: str
+    points: list[SamplePoint]
+    playtime_entries: list[PlaytimeEntry] = field(default_factory=list)
