@@ -23,6 +23,7 @@ from zhenxun.models.group_console import GroupConsole
 from zhenxun.services.cache import CacheRoot
 from zhenxun.services.log import logger
 from zhenxun.utils.enum import EventLogType, PluginType, RequestHandleType, RequestType
+from zhenxun.utils.manager.auto_greeting_manager import AutoGreetingManager
 from zhenxun.utils.platform import PlatformUtils
 
 base_config = Config.get("invite_manager")
@@ -163,6 +164,8 @@ async def _(bot: v12Bot | v11Bot, event: FriendRequestEvent, session: EventSessi
         await FriendUser.create(
             user_id=str(user["user_id"]), user_name=user["nickname"]
         )
+        # 自动同意好友请求时也走统一欢迎消息，避免只覆盖手动同意入口。
+        await AutoGreetingManager.send_friend_greeting(bot, str(event.user_id))
     else:
         # 旧请求全部设置为过期
         await FgRequest.filter(

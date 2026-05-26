@@ -4,14 +4,22 @@ import importlib.util
 from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
 
 class _FakeMatcher:
+    def __init__(self):
+        self.handler = None
+
     def handle(self):
         # 将 matcher 装饰器退化为原函数，测试只关注模块内纯逻辑。
-        return lambda func: func
+        def decorator(func):
+            self.handler = func
+            return func
+
+        return decorator
 
 
 class _PluginMetadata:
@@ -58,6 +66,16 @@ class _FakeLogger:
 
     def error(self, *_args, **_kwargs):
         return None
+
+
+class _FakeAutoGreetingManager:
+    calls: ClassVar[list[tuple[object, str]]] = []
+
+    @classmethod
+    async def send_friend_greeting(cls, bot, user_id: str):
+        # 记录调用参数，验证自动同意好友后会走新欢迎消息服务。
+        cls.calls.append((bot, user_id))
+        return True
 
 
 class _FakeBanConsole:
@@ -140,6 +158,10 @@ def _record_request_stubs() -> dict[str, ModuleType]:
             RequestHandleType=SimpleNamespace(APPROVE="approve", EXPIRE="expire"),
             RequestType=SimpleNamespace(FRIEND="friend", GROUP="group"),
         ),
+        "zhenxun.utils.manager.auto_greeting_manager": _module(
+            "zhenxun.utils.manager.auto_greeting_manager",
+            AutoGreetingManager=_FakeAutoGreetingManager,
+        ),
         "zhenxun.utils.platform": _module(
             "zhenxun.utils.platform", PlatformUtils=type("PlatformUtils", (), {})
         ),
@@ -196,6 +218,20 @@ def _ban_record(
     )
 
 
+class _FakeFriendRequestBot:
+    self_id = "10000"
+
+    def __init__(self) -> None:
+        self.set_friend_requests: list[dict] = []
+
+    async def get_stranger_info(self, user_id: int):
+        # 模拟 OneBot 获取申请人信息。
+        return {"user_id": user_id, "nickname": f"用户{user_id}"}
+
+    async def set_friend_add_request(self, **kwargs):
+        self.set_friend_requests.append(kwargs)
+
+
 def test_format_ban_target_handles_user_group_and_combined_targets():
     assert record_request._format_ban_target(
         _ban_record(user_id="1001")
@@ -206,6 +242,37 @@ def test_format_ban_target_handles_user_group_and_combined_targets():
     assert record_request._format_ban_target(
         _ban_record(user_id="1001", group_id="2001")
     ) == "用户 1001 在群组 2001"
+
+
+@pytest.mark.asyncio
+async def test_auto_add_friend_sends_auto_greeting(monkeypatch: pytest.MonkeyPatch):
+    bot = _FakeFriendRequestBot()
+    event = SimpleNamespace(user_id=10001, flag="flag-1", comment="你好")
+    session = SimpleNamespace(platform="qq")
+    created_friends: list[dict] = []
+    _FakeAutoGreetingManager.calls.clear()
+    old_auto_add_friend = record_request.base_config.get("AUTO_ADD_FRIEND")
+    record_request.base_config["AUTO_ADD_FRIEND"] = True
+
+    async def fake_create(**kwargs):
+        created_friends.append(kwargs)
+
+    monkeypatch.setattr(
+        record_request.FriendUser, "create", staticmethod(fake_create), raising=False
+    )
+    monkeypatch.setattr(record_request.random, "randint", lambda _start, _end: 0)
+    monkeypatch.setattr(record_request.asyncio, "sleep", _fake_sleep)
+
+    await record_request.friend_req.handler(bot, event, session)
+
+    assert bot.set_friend_requests == [{"flag": "flag-1", "approve": True}]
+    assert created_friends == [{"user_id": "10001", "user_name": "用户10001"}]
+    assert _FakeAutoGreetingManager.calls == [(bot, "10001")]
+    record_request.base_config["AUTO_ADD_FRIEND"] = old_auto_add_friend
+
+
+async def _fake_sleep(_delay: int):
+    return None
 
 
 @pytest.mark.asyncio
