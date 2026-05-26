@@ -238,6 +238,22 @@ __plugin_meta__ = PluginMetadata(
             ),
             RegisterConfig(
                 module="summary_group",
+                key="SUMMARY_THINKING_MODE",
+                value="off",
+                help="总结模型思考模式，可选 off/low/medium/high；默认关闭可见思考。",
+                default_value="off",
+                type=str,
+            ),
+            RegisterConfig(
+                module="summary_group",
+                key="SUMMARY_STRIP_THINKING_FALLBACK",
+                value=True,
+                help="是否兜底清理模型误输出的 <think> 思考标签。",
+                default_value=True,
+                type=bool,
+            ),
+            RegisterConfig(
+                module="summary_group",
                 key="ENABLE_AVATAR_ENHANCEMENT",
                 value=True,
                 help="是否启用头像增强功能",

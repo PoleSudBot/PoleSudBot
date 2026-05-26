@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
+import re
+from typing import Any
 
 import aiofiles
 import markdown
@@ -8,11 +10,13 @@ from nonebot_plugin_alconna.uniseg import MsgTarget, UniMessage
 
 from zhenxun.services.llm import (
     LLMException,
+    LLMGenerationConfig,
     LLMMessage,
     get_global_default_model_name,
     get_model_instance,
     list_available_models,
 )
+from zhenxun.services.llm.config.generation import ReasoningConfig, ReasoningEffort
 from zhenxun.services.log import logger
 
 from .. import base_config
@@ -35,6 +39,9 @@ if base_config.get("summary_output_type") == "image":
 class SummaryGenerationResult:
     summary_text: str
     resolved_model_name: str | None
+
+
+SUMMARY_THINKING_MODES = {"off", "low", "medium", "high"}
 
 
 def resolve_summary_model_name(
@@ -66,6 +73,86 @@ def resolve_summary_model_name(
         logger.warning(f"未显式配置总结模型，回退到首个可用模型: {fallback_model}")
         return fallback_model
     return None
+
+
+def _get_summary_thinking_mode() -> str:
+    """读取总结任务的思考模式配置，未知值回退到默认关闭。"""
+    raw_mode = base_config.get("SUMMARY_THINKING_MODE", "off")
+    mode = str(raw_mode or "off").strip().lower()
+    if mode in SUMMARY_THINKING_MODES:
+        return mode
+    logger.warning(
+        f"SUMMARY_THINKING_MODE={raw_mode!r} 无效，已回退为 off",
+        command="messages_summary",
+    )
+    return "off"
+
+
+def _looks_like_gemini(model: Any, resolved_model_name: str | None) -> bool:
+    """判断当前模型是否走 Gemini 协议或 Gemini 命名。"""
+    values = [
+        getattr(model, "api_type", None),
+        getattr(model, "provider_name", None),
+        getattr(model, "model_name", None),
+        resolved_model_name,
+    ]
+    return any("gemini" in str(value).lower() for value in values if value)
+
+
+def _looks_like_deepseek(model: Any, resolved_model_name: str | None) -> bool:
+    """判断当前模型是否为 DeepSeek，即使配置成 OpenAI 兼容协议也能识别。"""
+    values = [
+        getattr(model, "api_type", None),
+        getattr(model, "provider_name", None),
+        getattr(model, "model_name", None),
+        resolved_model_name,
+    ]
+    return any("deepseek" in str(value).lower() for value in values if value)
+
+
+def _build_summary_generation_config(
+    model: Any, resolved_model_name: str | None
+) -> LLMGenerationConfig:
+    """为总结任务构造只返回最终答案的模型配置。"""
+    mode = _get_summary_thinking_mode()
+    config = LLMGenerationConfig()
+
+    # Gemini 的思考摘要由 includeThoughts 控制；总结场景只需要最终答案。
+    if _looks_like_gemini(model, resolved_model_name):
+        if mode == "off":
+            config.reasoning = ReasoningConfig(show_thoughts=False)
+        else:
+            effort = ReasoningEffort(mode.upper())
+            config.reasoning = ReasoningConfig(effort=effort, show_thoughts=False)
+        return config
+
+    # DeepSeek V4 默认启用 thinking；总结默认显式关闭，避免 reasoning_content 泄漏。
+    if _looks_like_deepseek(model, resolved_model_name):
+        thinking_type = "disabled" if mode == "off" else "enabled"
+        config.custom_params = {"thinking": {"type": thinking_type}}
+        return config
+
+    return config
+
+
+def _strip_visible_thinking(summary_text: str) -> str:
+    """兜底移除可见思考标签，正常路径应依赖 provider 原生字段隔离。"""
+    if not base_config.get("SUMMARY_STRIP_THINKING_FALLBACK", True):
+        return summary_text.strip()
+
+    cleaned = re.sub(
+        r"<\s*think\b[^>]*>.*?<\s*/\s*think\s*>",
+        "",
+        summary_text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"<\s*/?\s*think\b[^>]*>",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return cleaned.strip()
 
 
 async def messages_summary(
@@ -119,8 +206,7 @@ async def messages_summary(
 
     prompt_parts.append(
         "要求：排版需层次清晰，用中文回答，请包含谁说了什么重要内容。\n"
-        "在正式回答前，请务必进行高强度的深度思考流程，"
-        "并将你的思考内容放在 <think> 和 </think> 标签内。\n"
+        "只输出最终总结，不要输出思考过程、分析草稿或任何思考标签。\n"
         "注意使用丰富的markdown格式让内容更美观，注意要在合适的场景使用合适的样式,包括："
         "标题层级(h1-h6),分隔线(hr)、表格(table)、斜体(em)、"
         "任务列表(chekbox)、删除线 (Strikethrough)、"
@@ -147,22 +233,16 @@ async def messages_summary(
         )
 
         async with await get_model_instance(final_model_name_str) as model:
-            from zhenxun.services.llm import CommonOverrides
-
             from ..config import summary_config
 
-            config = CommonOverrides.gemini_3_thinking("HIGH")
+            config = _build_summary_generation_config(model, final_model_name_str)
 
             response = await model.generate_response(
                 llm_messages, config=config, timeout=summary_config.get_timeout()
             )
             summary_text = response.text
 
-        import re
-
-        summary_text = re.sub(
-            r"<think>.*?</think>", "", summary_text, flags=re.DOTALL
-        ).strip()
+        summary_text = _strip_visible_thinking(summary_text)
 
         return SummaryGenerationResult(
             summary_text=summary_text,
