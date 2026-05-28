@@ -14,44 +14,12 @@ SERVER_LABELS = {
     "jp": "日服",
     "tw": "台服",
 }
-PREDICTION_SUPPORTED_SERVERS = {"cn", "jp"}
-YCX_SUPPORTED_SERVERS = {"cn", "jp"}
-RANK_SOURCE_NAME = "rk.exmeaning.com"
-
 FEATURE_LIVE_REMINDER = "live_reminder"
 FEATURE_NEW_CARD_REMINDER = "new_card_reminder"
 SCOPE_GLOBAL = "global"
 
 ALIAS_TARGET_CHARACTER = "character"
 ALIAS_TARGET_MUSIC = "music"
-
-DIFFICULTY_ALIASES = {
-    "easy": "easy",
-    "ez": "easy",
-    "normal": "normal",
-    "nm": "normal",
-    "hard": "hard",
-    "hd": "hard",
-    "expert": "expert",
-    "ex": "expert",
-    "master": "master",
-    "ma": "master",
-    "append": "append",
-    "apd": "append",
-}
-
-LIVE_TYPE_ALIASES = {
-    "multi": "multi",
-    "多人": "multi",
-    "协力": "multi",
-    "solo": "solo",
-    "单人": "solo",
-    "auto": "auto",
-    "自动": "auto",
-    "cheerful": "cheerful",
-    "cheer": "cheerful",
-    "嘉年华": "cheerful",
-}
 
 PLUGIN_DATA_DIR = DATA_PATH / MODULE_NAME
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -82,26 +50,10 @@ for path in (
     path.mkdir(parents=True, exist_ok=True)
 
 
-def server_path_prefix(server: str) -> str:
-    return "" if server == "cn" else f"{server}/"
-
-
 def server_label(server: str | None) -> str:
     if not server:
         return "未设置"
     return SERVER_LABELS.get(server, server.upper())
-
-
-def normalize_deck_difficulty(value: str | None) -> str | None:
-    if not value:
-        return None
-    return DIFFICULTY_ALIASES.get(value.lower().strip())
-
-
-def normalize_live_type(value: str | None) -> str | None:
-    if not value:
-        return None
-    return LIVE_TYPE_ALIASES.get(value.lower().strip())
 
 
 def make_scope_key(group_id: str | None = None, *, platform: str | None = None) -> str:

@@ -7,7 +7,6 @@ import nonebot
 nonebot.init()
 
 from zhenxun.plugins.moesekai.command_parser import parse_command
-from zhenxun.plugins.moesekai.deck import DeckCommandRequest, parse_deck_command_request
 
 
 @dataclass
@@ -153,92 +152,9 @@ def test_parse_custom_deck_command_is_hidden():
     assert parsed is None
 
 
-def test_parse_custom_deck_request_unit_bonus():
-    request, error = parse_deck_command_request(
-        raw_text="组卡 绿 vbs",
-        mode="custom",
-        server=None,
-        rest="绿 vbs",
-        at_targets=[],
-    )
-    assert error is None
-    assert isinstance(request, DeckCommandRequest)
-    assert request.mode == "custom"
-    assert request.custom_bonus is not None
-    assert request.custom_bonus.kind == "unit"
-    assert request.custom_bonus.attr == "pure"
-    assert request.custom_bonus.unit == "vivid_bad_squad"
-    assert request.music_query is None
-
-
-def test_parse_custom_deck_request_unit_bonus_reverse_order():
-    request, error = parse_deck_command_request(
-        raw_text="组卡 vbs 绿",
-        mode="custom",
-        server=None,
-        rest="vbs 绿",
-        at_targets=[],
-    )
-    assert error is None
-    assert isinstance(request, DeckCommandRequest)
-    assert request.custom_bonus is not None
-    assert request.custom_bonus.kind == "unit"
-    assert request.custom_bonus.attr == "pure"
-    assert request.custom_bonus.unit == "vivid_bad_squad"
-
-
-def test_parse_custom_deck_request_mixed_bonus():
-    request, error = parse_deck_command_request(
-        raw_text="组卡 %miku rin @绿",
-        mode="custom",
-        server=None,
-        rest="%miku rin @绿",
-        at_targets=[],
-    )
-    assert error is None
-    assert isinstance(request, DeckCommandRequest)
-    assert request.mode == "custom"
-    assert request.custom_bonus is not None
-    assert request.custom_bonus.kind == "mixed"
-    assert request.custom_bonus.attr == "pure"
-    assert [item.query for item in request.custom_bonus.characters] == [
-        "miku",
-        "rin",
-    ]
-
-
-def test_parse_custom_deck_request_with_vs_support_prefix():
-    request, error = parse_deck_command_request(
-        raw_text="组卡 %lnmiku vbsrin @绿",
-        mode="custom",
-        server=None,
-        rest="%lnmiku vbsrin @绿",
-        at_targets=[],
-    )
-    assert error is None
-    assert isinstance(request, DeckCommandRequest)
-    assert request.custom_bonus is not None
-    assert [item.support_unit for item in request.custom_bonus.characters] == [
-        "leo_need",
-        "vivid_bad_squad",
-    ]
-
-
 def test_parse_hidden_deck_command_without_args_returns_none():
     assert parse_command(FakeEvent("最强组卡")) is None  # type: ignore[arg-type]
     assert parse_command(FakeEvent("挑战组卡")) is None  # type: ignore[arg-type]
-
-
-def test_parse_custom_deck_request_rejects_missing_bonus_pair():
-    request, error = parse_deck_command_request(
-        raw_text="组卡 绿",
-        mode="custom",
-        server=None,
-        rest="绿",
-        at_targets=[],
-    )
-    assert isinstance(request, DeckCommandRequest)
-    assert error == "箱活组卡需要同时提供颜色和团体，例如：组卡 绿 vbs"
 
 
 def test_parse_update_with_prefix_server():
@@ -344,8 +260,21 @@ def test_parse_specific_manga_requires_single_numeric_arg():
     assert parse_command(FakeEvent("四格 12 34")) is None  # type: ignore[arg-type]
 
 
-def test_parse_character_command_is_archived():
-    assert parse_command(FakeEvent("查角色 初音未来")) is None  # type: ignore[arg-type]
+def test_parse_character_command_is_retained():
+    parsed = parse_command(FakeEvent("查角色 初音未来"))  # type: ignore[arg-type]
+
+    assert parsed is not None
+    assert parsed.action == "character"
+    assert parsed.query_text == "初音未来"
+
+
+def test_parse_character_force_refresh():
+    parsed = parse_command(FakeEvent("查角色 初音未来 强制刷新"))  # type: ignore[arg-type]
+
+    assert parsed is not None
+    assert parsed.action == "character"
+    assert parsed.query_text == "初音未来"
+    assert parsed.force_refresh is True
 
 
 def test_parse_multiplier_commands_are_hidden():

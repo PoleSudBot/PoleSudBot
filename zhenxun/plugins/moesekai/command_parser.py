@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import re
-import shlex
 
 from nonebot.adapters.onebot.v11 import MessageEvent
 
-from .deck import DECK_COMMAND_SPECS, DeckCommandRequest, parse_deck_command_request
 from .constants import (
     ALL_SERVERS_KEYWORD,
     SERVER_SET,
@@ -28,15 +26,11 @@ class ParsedCommand:
     admin_target_type: str | None = None
     admin_value: str | None = None
     query_text: str | None = None
-    alias: str | None = None
     all_servers: bool = False
-    global_scope: bool = False
     card_ids: list[int] = field(default_factory=list)
     live_id: int | None = None
     manga_id: int | None = None
-    multiplier_values: list[int] = field(default_factory=list)
     force_refresh: bool = False
-    deck_request: DeckCommandRequest | None = None
     error: str | None = None
 
 
@@ -231,41 +225,13 @@ def _parse_manga_by_id(text: str) -> ParsedCommand | None:
     return ParsedCommand("manga_by_id", text, manga_id=int(manga_id))
 
 
-def _parse_multiplier(text: str) -> ParsedCommand | None:
-    matched = _match_command(text, ("倍率计算", "倍率"), allow_prefix=False)
-    if not matched:
-        return None
-    _, rest = matched
-    rest = rest.strip()
-    if not rest:
-        return ParsedCommand(
-            "multiplier",
-            text,
-            error="用法: 倍率计算 <a> <b> <c> <d> <e>",
-        )
-    parts = rest.split()
-    if len(parts) != 5 or any(not part.isdigit() for part in parts):
-        return ParsedCommand(
-            "multiplier",
-            text,
-            error="用法: 倍率计算 <a> <b> <c> <d> <e>",
-        )
-    return ParsedCommand(
-        "multiplier",
-        text,
-        multiplier_values=[int(part) for part in parts],
-    )
-
-
 def _parse_character(text: str) -> ParsedCommand | None:
     matched = _match_command(text, ("查角色",), allow_prefix=False)
     if not matched:
         return None
     _, query = matched
-    query = query.strip()
-    if not query:
-        return ParsedCommand("character", text, error="用法: 查角色 <角色ID|名称|别名>")
-    parts = query.split()
+    parts = query.strip().split()
+    # 角色查询保留一个可选刷新标记，继续复用截图缓存层的强制刷新能力。
     force_refresh_indexes = [
         index for index, part in enumerate(parts) if part == "强制刷新"
     ]
@@ -275,8 +241,7 @@ def _parse_character(text: str) -> ParsedCommand | None:
             text,
             error="用法: 查角色 <角色ID|名称|别名> [强制刷新]",
         )
-    force_refresh = bool(force_refresh_indexes)
-    if force_refresh:
+    if force_refresh_indexes:
         parts.pop(force_refresh_indexes[0])
     if not parts:
         return ParsedCommand(
@@ -288,101 +253,8 @@ def _parse_character(text: str) -> ParsedCommand | None:
         "character",
         text,
         query_text=" ".join(parts),
-        force_refresh=force_refresh,
+        force_refresh=bool(force_refresh_indexes),
     )
-
-
-def _parse_alias(text: str) -> ParsedCommand | None:
-    for name, target_type in (("角色别名", "character"), ("歌曲别名", "music")):
-        matched = _match_command(text, (name,), allow_prefix=False)
-        if not matched:
-            continue
-        _, rest = matched
-        rest = rest.strip()
-        if not rest:
-            return ParsedCommand(
-                "alias",
-                text,
-                error=f"用法: {name} <关键词> 或 {name} <查询|添加|删除> ...",
-            )
-        try:
-            tokens = shlex.split(rest)
-        except ValueError as exc:
-            return ParsedCommand("alias", text, error=f"参数解析失败: {exc}")
-        action_map = {"查询": "query", "添加": "add", "删除": "remove"}
-        if tokens[0] not in action_map:
-            return ParsedCommand(
-                "alias",
-                text,
-                admin_target_type=target_type,
-                admin_subaction="query",
-                query_text=rest,
-            )
-        operation = action_map[tokens[0]]
-        remaining = tokens[1:]
-        global_scope = False
-        if remaining and remaining[0] in {"全局", "global"}:
-            global_scope = True
-            remaining = remaining[1:]
-        if operation == "query":
-            if not remaining:
-                return ParsedCommand("alias", text, error=f"用法: {name} 查询 <关键词>")
-            return ParsedCommand(
-                "alias",
-                text,
-                admin_target_type=target_type,
-                admin_subaction=operation,
-                query_text=" ".join(remaining),
-                global_scope=global_scope,
-            )
-        if operation == "add":
-            if len(remaining) < 2:
-                return ParsedCommand("alias", text, error=f"用法: {name} 添加 [全局] <目标> <别名>")
-            return ParsedCommand(
-                "alias",
-                text,
-                admin_target_type=target_type,
-                admin_subaction=operation,
-                query_text=remaining[0],
-                alias=" ".join(remaining[1:]),
-                global_scope=global_scope,
-            )
-        if not remaining:
-            return ParsedCommand("alias", text, error=f"用法: {name} 删除 [全局] <别名>")
-        return ParsedCommand(
-            "alias",
-            text,
-            admin_target_type=target_type,
-            admin_subaction=operation,
-            alias=" ".join(remaining),
-            global_scope=global_scope,
-        )
-    return None
-
-
-def _parse_deck_command(text: str, at_targets: list[str]) -> ParsedCommand | None:
-    for spec in DECK_COMMAND_SPECS:
-        matched = _match_command(text, spec.command_names)
-        if not matched:
-            continue
-        prefix, rest = matched
-        server, rest = _consume_server(prefix, rest)
-        deck_request, error = parse_deck_command_request(
-            raw_text=text,
-            mode=spec.mode,
-            server=server,
-            rest=rest,
-            at_targets=at_targets,
-        )
-        return ParsedCommand(
-            action="deck",
-            raw_text=text,
-            server=server,
-            target_user_id=deck_request.target_user_id if deck_request else None,
-            deck_request=deck_request,
-            error=error,
-        )
-    return None
 
 
 def _parse_admin(text: str, at_targets: list[str]) -> ParsedCommand | None:
@@ -568,6 +440,8 @@ def parse_command(event: MessageEvent) -> ParsedCommand | None:
 
     if manga := _parse_manga_by_id(text):
         return manga
+    if character := _parse_character(text):
+        return character
     if story := _parse_story(text):
         return story
     if live_toggle := _parse_toggle_command(text, ("live提醒",), action="live_toggle"):
@@ -581,4 +455,4 @@ def parse_command(event: MessageEvent) -> ParsedCommand | None:
     if subscription := _parse_live_subscription(text):
         return subscription
 
-    return _parse_deck_command(text, at_targets)
+    return None

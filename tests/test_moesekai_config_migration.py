@@ -11,6 +11,7 @@ from zhenxun.plugins.moesekai.config import (
     LEGACY_PROFILE_TOKEN_DEFAULT,
     REGISTER_CONFIGS,
     build_default_master_sources,
+    get_settings,
 )
 from zhenxun.plugins.moesekai.config_migration import migrate_legacy_plugin_config
 
@@ -88,6 +89,25 @@ def test_register_configs_do_not_expose_legacy_keys():
     assert "MOESEKAI_PROFILE_URL_TEMPLATES" not in config_keys
     assert "MOESEKAI_MASTER_SOURCES" not in config_keys
     assert "MOESEKAI_MASTER_AUTO_CHECK_INTERVAL_SECONDS" not in config_keys
+    assert "MOESEKAI_RANKING_API_BASE" not in config_keys
+    assert "MOESEKAI_RANKING_VIEWPORT_WIDTH" not in config_keys
+    assert "MOESEKAI_DECK_VIEWPORT_WIDTH" not in config_keys
+    assert "MOESEKAI_DECK_DEFAULT_MUSIC_ID" not in config_keys
+    assert "MOESEKAI_ALIAS_GLOBAL_EDITOR_GROUPS" not in config_keys
+    assert "MOESEKAI_CHARACTER_VIEWPORT_WIDTH" in config_keys
+
+
+def test_character_viewport_width_falls_back_to_legacy_deck_width(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fake_config = _FakeConfig({"MOESEKAI_DECK_VIEWPORT_WIDTH": 640})
+    monkeypatch.setattr("zhenxun.plugins.moesekai.config.Config", fake_config)
+    get_settings.cache_clear()
+
+    try:
+        assert get_settings().character_viewport_width == 640
+    finally:
+        get_settings.cache_clear()
 
 
 def test_migrate_legacy_plugin_config_normalizes_defaults(

@@ -50,7 +50,7 @@ PLUGIN_REGISTER_CONFIGS = [*SEKAI_RESOURCE_REGISTER_CONFIGS, *REGISTER_CONFIGS]
 
 __plugin_meta__ = PluginMetadata(
     name="MoeSekai",
-    description="Project Sekai 档案、榜线、提醒与资料助手",
+    description="Project Sekai 档案、提醒与资料助手",
     usage="""
 ## 🌟 快速开始
 `个人档案 / 查询档案 / 档案查询 [区服可选] [游戏ID|@用户可选]`
@@ -133,7 +133,7 @@ __plugin_meta__ = PluginMetadata(
 """.strip(),
     extra={
         "author": "k1yuyu",
-        "version": "3.2.0",
+        "version": "3.2.1",
         "menu_type": "游戏相关",
         "configs": [
             c.model_dump() if hasattr(c, "model_dump") else c.dict()

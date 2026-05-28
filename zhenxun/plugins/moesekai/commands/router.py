@@ -9,22 +9,23 @@ from nonebot.typing import T_State
 from nonebot_plugin_alconna import UniMessage
 from nonebot_plugin_uninfo import Uninfo
 
-from ..adapters.results import MoeForwardMessage, MoeImageTextMessage, build_image_message
+from ..adapters.results import (
+    MoeForwardMessage,
+    MoeImageTextMessage,
+    build_image_message,
+)
 from ..adapters.runtime import MessageUtils, PlatformUtils, logger
 from ..command_parser import ParsedCommand, parse_command
 from ..services import (
     handle_admin_blacklist,
     handle_admin_query_binding,
-    handle_alias_command,
     handle_bind,
-    handle_deck,
+    handle_character,
     handle_default_server,
     handle_live_subscription,
     handle_live_toggle,
     handle_manga_by_id,
-    handle_multiplier,
     handle_new_card_toggle,
-    handle_prediction,
     handle_query_archive,
     handle_random_manga,
     handle_story,
@@ -33,7 +34,6 @@ from ..services import (
     handle_unbind,
     handle_update,
     handle_visibility,
-    handle_ycx,
 )
 
 
@@ -145,33 +145,6 @@ async def _(
             target_user_id=parsed.target_user_id,
             is_superuser=is_superuser,
         )
-    elif parsed.action == "prediction":
-        result = await handle_prediction(
-            platform,
-            user_id,
-            parsed.server,
-            parsed.event_id,
-            is_superuser=is_superuser,
-        )
-    elif parsed.action == "ycx":
-        result = await handle_ycx(
-            platform,
-            user_id,
-            parsed.server,
-            parsed.event_id,
-            is_superuser=is_superuser,
-        )
-    elif parsed.action == "deck":
-        if not parsed.deck_request:
-            result = "组卡参数解析失败"
-        else:
-            result = await handle_deck(
-                platform,
-                user_id,
-                request=parsed.deck_request,
-                group_id=group_id,
-                is_superuser=is_superuser,
-            )
     elif parsed.action == "update":
         result = await handle_update(
             platform,
@@ -189,20 +162,12 @@ async def _(
         result = await handle_random_manga()
     elif parsed.action == "manga_by_id":
         result = await handle_manga_by_id(parsed.manga_id or 0)
-    elif parsed.action == "multiplier":
-        result = await handle_multiplier(parsed.multiplier_values)
-    elif parsed.action == "alias":
-        result = await handle_alias_command(
-            target_type=parsed.admin_target_type or "character",
-            operation=parsed.admin_subaction or "query",
-            query=parsed.query_text or "",
-            alias=parsed.alias,
-            group_id=group_id,
+    elif parsed.action == "character":
+        result = await handle_character(
+            parsed.query_text or "",
             platform=platform,
-            user_id=user_id,
-            is_superuser=is_superuser,
-            can_manage_group=can_manage_group,
-            global_scope=parsed.global_scope,
+            group_id=group_id,
+            force_refresh=parsed.force_refresh,
         )
     elif parsed.action == "live_toggle":
         result = await handle_live_toggle(

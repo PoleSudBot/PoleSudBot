@@ -82,7 +82,11 @@ async def test_query_archive_router_does_not_inject_requester_for_explicit_uid(
         raise AssertionError("handle_query_archive 返回 None 时不应回消息")
 
     monkeypatch.setattr(router_module, "SUPERUSER", fake_superuser)
-    monkeypatch.setattr(router_module.PlatformUtils, "get_platform", lambda _session: "qq")
+    monkeypatch.setattr(
+        router_module.PlatformUtils,
+        "get_platform",
+        lambda _session: "qq",
+    )
     monkeypatch.setattr(router_module, "handle_query_archive", fake_handle_query_archive)
     monkeypatch.setattr(router_module, "_send_result", fake_send_result)
 
@@ -108,4 +112,59 @@ async def test_query_archive_router_does_not_inject_requester_for_explicit_uid(
         "game_id": "26958722584772616",
         "target_user_id": None,
         "is_superuser": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_character_router_keeps_query_context(monkeypatch: pytest.MonkeyPatch):
+    captured: dict[str, object] = {}
+
+    async def fake_superuser(_bot, _event):
+        return False
+
+    async def fake_handle_character(
+        query: str,
+        *,
+        platform: str | None,
+        group_id: str | None,
+        force_refresh: bool,
+    ):
+        captured["query"] = query
+        captured["platform"] = platform
+        captured["group_id"] = group_id
+        captured["force_refresh"] = force_refresh
+        return None
+
+    async def fake_send_result(_result, *, bot=None, event=None):
+        raise AssertionError("handle_character 返回 None 时不应回消息")
+
+    monkeypatch.setattr(router_module, "SUPERUSER", fake_superuser)
+    monkeypatch.setattr(router_module.PlatformUtils, "get_platform", lambda _session: "qq")
+    monkeypatch.setattr(router_module, "handle_character", fake_handle_character)
+    monkeypatch.setattr(router_module, "_send_result", fake_send_result)
+
+    parsed = ParsedCommand(
+        action="character",
+        raw_text="查角色 初音未来 强制刷新",
+        query_text="初音未来",
+        force_refresh=True,
+    )
+    session = SimpleNamespace(
+        user=SimpleNamespace(id="1163272259"),
+        group=SimpleNamespace(id="654321"),
+    )
+    state = {"moesekai_parsed_command": parsed}
+
+    await router_module._(
+        bot=SimpleNamespace(),
+        event=SimpleNamespace(),
+        session=session,
+        state=state,
+    )
+
+    assert captured == {
+        "query": "初音未来",
+        "platform": "qq",
+        "group_id": "654321",
+        "force_refresh": True,
     }

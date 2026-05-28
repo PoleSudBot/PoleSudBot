@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from io import BytesIO
 from math import ceil, floor
+import time
 from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -13,8 +13,7 @@ from PIL import Image
 
 from .adapters.runtime import logger
 from .config import get_settings
-from .constants import MODULE_NAME, server_path_prefix
-from .deck import DeckBackendRequest, moesekai_deck_screenshot_adapter
+from .constants import MODULE_NAME
 
 _DEFAULT_VIEWPORT_HEIGHT = 932
 _MOBILE_USER_AGENT = (
@@ -86,9 +85,6 @@ class ScreenshotJob:
 
 
 class ScreenshotService:
-    _DECK_IDLE_GRACE_SECONDS = 2.0
-    _DECK_POLL_INTERVAL_SECONDS = 0.2
-
     def __init__(self) -> None:
         self._site_failures: dict[str, float] = {}
         self._last_success_site: dict[str, str] = {}
@@ -195,179 +191,6 @@ async (ms) => {
         from zhenxun.services.renderer.engine import get_managed_browser
 
         return await get_managed_browser()
-
-    @staticmethod
-    def _is_deck_terminal_state(phase: str) -> bool:
-        return phase in {"success", "empty", "error"}
-
-    async def _read_deck_page_state(self, page: Any) -> dict[str, Any]:
-        state = await page.evaluate(
-            """
-() => {
-  const isVisible = (element) => {
-    if (!(element instanceof HTMLElement)) {
-      return false;
-    }
-    const style = window.getComputedStyle(element);
-    if (style.display === 'none' || style.visibility === 'hidden') {
-      return false;
-    }
-    const rect = element.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
-  };
-  const text = document.body?.innerText || '';
-  const knownErrors = [
-    '用户数据未找到，请确认用户ID/所选服务器是否正确，并已在 Haruki 上传数据。',
-    '该用户的公开API未开启，请先在 Haruki 上开启公开API。',
-    '读取到的用户数据格式异常，请重新同步 Haruki/OAuth 数据后重试。',
-    '用户数据未找到 (404)',
-    '公开API未开启 (403)',
-  ];
-  const errorText = knownErrors.find((item) => text.includes(item)) || '';
-  const emptyText = '未找到可推荐的卡组，请检查您的卡牌数据和配置。';
-  const startButton = Array.from(document.querySelectorAll('button')).find(
-    (button) => isVisible(button) && (button.textContent || '').includes('开始计算')
-  );
-  const resultCards = Array.from(
-    document.querySelectorAll(
-      '.dr-result-row, .deck-card, .result-card, [class*="deck-card"], [class*="result-card"]'
-    )
-  ).filter((element) => {
-    if (!(element instanceof HTMLElement) || !isVisible(element)) {
-      return false;
-    }
-    const rect = element.getBoundingClientRect();
-    return rect.width >= 24 && rect.height >= 24;
-  });
-  const keyImages = resultCards
-    .slice(0, 3)
-    .flatMap((card) => Array.from(card.querySelectorAll('img')).slice(0, 4));
-  const keyImagesReady =
-    keyImages.length === 0 ||
-    keyImages.every((img) => img.complete && img.naturalWidth > 0);
-  const hasResultTitle =
-    text.includes('推荐卡组 Top') ||
-    text.includes('组卡结果') ||
-    text.includes('推荐结果');
-  const isRunning =
-    text.includes('计算中...') || !!document.querySelector('.dr-progress-container');
-  let phase = 'loading';
-  if (errorText) {
-    phase = 'error';
-  } else if (text.includes(emptyText)) {
-    phase = 'empty';
-  } else if (hasResultTitle && resultCards.length > 0 && keyImagesReady) {
-    phase = 'success';
-  } else if (isRunning || (hasResultTitle && resultCards.length > 0)) {
-    phase = 'running';
-  } else if (startButton && !startButton.disabled) {
-    phase = 'idle';
-  }
-  return {
-    phase,
-    detail: errorText,
-    hasStartButton: !!startButton,
-    startButtonDisabled: !!startButton?.disabled,
-    hasResultTitle,
-    keyImagesReady,
-    resultCardCount: resultCards.length,
-  };
-}
-            """.strip()
-        )
-        if not isinstance(state, dict):
-            return {"phase": "loading"}
-        return state
-
-    async def _click_deck_start_button(self, page: Any) -> bool:
-        clicked = await page.evaluate(
-            """
-() => {
-  const isVisible = (element) => {
-    if (!(element instanceof HTMLElement)) {
-      return false;
-    }
-    const style = window.getComputedStyle(element);
-    if (style.display === 'none' || style.visibility === 'hidden') {
-      return false;
-    }
-    const rect = element.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
-  };
-  const button = Array.from(document.querySelectorAll('button')).find(
-    (candidate) =>
-      isVisible(candidate) &&
-      !candidate.disabled &&
-      (candidate.textContent || '').includes('开始计算')
-  );
-  if (!(button instanceof HTMLElement)) {
-    return false;
-  }
-  button.click();
-  return true;
-}
-            """.strip()
-        )
-        return bool(clicked)
-
-    async def _wait_for_deck_terminal_state(
-        self,
-        page: Any,
-        timeout_ms: int,
-        attempt_meta: dict[str, Any] | None = None,
-    ) -> None:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + (timeout_ms / 1000)
-        idle_since: float | None = None
-        clicked_fallback = False
-        last_phase = "loading"
-
-        while True:
-            state = await self._read_deck_page_state(page)
-            phase = str(state.get("phase") or "loading")
-            last_phase = phase
-            if attempt_meta is not None:
-                attempt_meta["page_state"] = phase
-                detail = str(state.get("detail") or "")
-                if detail:
-                    attempt_meta["page_state_detail"] = detail
-                else:
-                    attempt_meta.pop("page_state_detail", None)
-
-            if self._is_deck_terminal_state(phase):
-                return
-
-            now = loop.time()
-            can_fallback_click = bool(state.get("hasStartButton")) and not bool(
-                state.get("startButtonDisabled")
-            )
-            if phase == "idle" and can_fallback_click:
-                if idle_since is None:
-                    idle_since = now
-                if (
-                    not clicked_fallback
-                    and now - idle_since >= self._DECK_IDLE_GRACE_SECONDS
-                ):
-                    clicked_fallback = await self._click_deck_start_button(page)
-                    if clicked_fallback:
-                        if attempt_meta is not None:
-                            attempt_meta["fallback_clicked"] = "1"
-                        logger.debug(
-                            "MoeSekai 截图阶段 [活动组卡] "
-                            "检测到待机态，触发一次兜底点击 开始计算",
-                            MODULE_NAME,
-                        )
-                        idle_since = None
-                        continue
-            else:
-                idle_since = None
-
-            if now >= deadline:
-                if attempt_meta is not None:
-                    attempt_meta["page_state"] = "stalled"
-                raise TimeoutError(f"活动组卡页面在 {last_phase} 状态下等待超时")
-
-            await asyncio.sleep(self._DECK_POLL_INTERVAL_SECONDS)
 
     async def _capture_once(
         self,
@@ -793,284 +616,6 @@ async () => {
             )
         )
 
-    async def capture_ranking(
-        self,
-        server: str,
-        event_id: int | None = None,
-    ) -> bytes:
-        settings = get_settings()
-        if event_id is not None:
-            urls = [
-                template.format(
-                    server=server,
-                    server_path=server_path_prefix(server),
-                    event_id=event_id,
-                )
-                for template in settings.ranking_history_screenshot_templates
-            ]
-            wait_selector = ".header-wrapper"
-            wait_function = f"""
-() => {{
-  const loading = document.querySelector('.loading-overlay');
-  const loadingHidden = !loading || loading.classList.contains('hidden');
-  const header = document.querySelector('.header-wrapper');
-  const tags = Array.from(document.querySelectorAll('.meta-tags .tag'));
-  const cards = document.querySelectorAll('.kline-card, .card, .mini-card');
-  const hasEventTag = tags.some((tag) => (tag.textContent || '').includes('Event {event_id}'));
-  return loadingHidden && !!header && hasEventTag && cards.length > 0;
-}}
-            """.strip()
-            job = ScreenshotJob(
-                kind="榜线",
-                urls=urls,
-                viewport=_build_viewport(settings.ranking_viewport_width),
-                device_scale_factor=self._quality_scale_factor(settings.screenshot_quality),
-                full_page=True,
-                capture_mode="full_page",
-                user_agent=_MOBILE_USER_AGENT,
-                wait_until="domcontentloaded",
-                wait_selector=wait_selector,
-                wait_function=wait_function,
-                stability_wait_ms=24,
-                extra_wait_seconds=0,
-                timeout_seconds=settings.screenshot_timeout_seconds,
-            )
-            return await self.capture(job)
-
-        urls = [
-            template.format(server=server, server_path=server_path_prefix(server))
-            for template in settings.ranking_screenshot_templates
-        ]
-        wait_function = """
-() => {
-  const headerImages = Array.from(document.querySelectorAll('.header-simple img'));
-  const rankCards = Array.from(document.querySelectorAll('.rank-card'));
-  if (!rankCards.length) {
-    return false;
-  }
-  if (!headerImages.every((img) => img.complete && img.naturalWidth > 0)) {
-    return false;
-  }
-  const chartContainers = rankCards
-    .slice(0, 3)
-    .map((card) => card.querySelector('.chart-container'))
-    .filter(Boolean);
-  return chartContainers.every((container) => {
-    const canvas = container.querySelector('canvas');
-    if (!canvas) {
-      return false;
-    }
-    const containerRect = container.getBoundingClientRect();
-    const canvasRect = canvas.getBoundingClientRect();
-    return (
-      containerRect.width > 0 &&
-      containerRect.height > 0 &&
-      canvasRect.width >= containerRect.width * 0.85 &&
-      canvasRect.height >= containerRect.height * 0.85 &&
-      Math.abs(canvasRect.left - containerRect.left) < 24 &&
-      Math.abs(canvasRect.top - containerRect.top) < 24
-    );
-  });
-}
-        """.strip()
-        before_capture_script = """
-() => {
-  const hiddenLink = document.querySelector('a[aria-hidden="true"][rel*="nofollow"]');
-  if (hiddenLink instanceof HTMLElement) {
-    hiddenLink.style.display = 'none';
-  }
-  const echartsGlobal = window.echarts;
-  if (!echartsGlobal || typeof echartsGlobal.getInstanceByDom !== 'function') {
-    return;
-  }
-  const targets = Array.from(document.querySelectorAll('#kline-mini, .chart-container'))
-    .filter((element) => {
-      const rect = element.getBoundingClientRect();
-      if (rect.width < 24 || rect.height < 24) {
-        return false;
-      }
-      if (rect.bottom < 0 || rect.top > window.innerHeight + 120) {
-        return false;
-      }
-      const style = window.getComputedStyle(element);
-      return style.display !== 'none' && style.visibility !== 'hidden';
-    });
-  targets.forEach((element) => {
-    const instance = echartsGlobal.getInstanceByDom(element);
-    if (instance && typeof instance.resize === 'function') {
-      instance.resize();
-    }
-  });
-}
-        """.strip()
-        job = ScreenshotJob(
-            kind="榜线",
-            urls=urls,
-            viewport=_build_viewport(settings.ranking_viewport_width),
-            device_scale_factor=self._quality_scale_factor(settings.screenshot_quality),
-            full_page=True,
-            capture_mode="full_page",
-            user_agent=_MOBILE_USER_AGENT,
-            wait_until="domcontentloaded",
-            wait_selector=".rank-list",
-            wait_function=wait_function,
-            before_capture_script=before_capture_script,
-            stability_wait_ms=36,
-            extra_wait_seconds=0,
-            timeout_seconds=settings.screenshot_timeout_seconds,
-        )
-        return await self.capture(job)
-
-    async def capture_deck(
-        self,
-        *,
-        request: DeckBackendRequest,
-    ) -> bytes:
-        settings = get_settings()
-        urls = moesekai_deck_screenshot_adapter.build_urls(
-            request,
-            site_bases=settings.site_bases,
-        )
-        prepare_script = """
-() => {
-  const nav = document.querySelector('body > main > nav');
-  if (nav instanceof HTMLElement) {
-    nav.style.display = 'none';
-  }
-  Array.from(
-    document.querySelectorAll(
-      '[class*="floating"], [class*="Float"], [class*="back-to-top"], [class*="BackToTop"]'
-    )
-  ).forEach((element) => {
-    if (element instanceof HTMLElement) {
-      element.style.display = 'none';
-    }
-  });
-  if (!document.head || document.getElementById('__moesekai_capture_style__')) {
-    return;
-  }
-  const style = document.createElement('style');
-  style.id = '__moesekai_capture_style__';
-  style.textContent = `
-    *, *::before, *::after {
-      animation-duration: 0s !important;
-      animation-delay: 0s !important;
-      transition-duration: 0s !important;
-      transition-delay: 0s !important;
-      scroll-behavior: auto !important;
-    }
-  `;
-  document.head.appendChild(style);
-}
-        """.strip()
-        scroll_if_function = """
-() => {
-  const text = document.body?.innerText || '';
-  if (
-    text.includes('未找到可推荐的卡组') ||
-    text.includes('用户数据未找到') ||
-    text.includes('公开API未开启') ||
-    text.includes('读取到的用户数据格式异常')
-  ) {
-    return false;
-  }
-  const card = document.querySelector(
-    '.dr-result-row, .deck-card, .result-card, [class*="deck-card"], [class*="result-card"]'
-  );
-  if (!(card instanceof HTMLElement)) {
-    return false;
-  }
-  const rect = card.getBoundingClientRect();
-  if (rect.top < 0 || rect.bottom > window.innerHeight + 80) {
-    return true;
-  }
-  return Array.from(card.querySelectorAll('img'))
-    .slice(0, 8)
-    .some((img) => !img.complete || img.naturalWidth <= 0);
-}
-        """.strip()
-        before_capture_script = """
-async () => {
-  const nav = document.querySelector('body > main > nav');
-  if (nav instanceof HTMLElement) {
-    nav.style.display = 'none';
-  }
-  Array.from(
-    document.querySelectorAll(
-      '[class*="floating"], [class*="Float"], [class*="back-to-top"], [class*="BackToTop"]'
-    )
-  ).forEach((element) => {
-    if (element instanceof HTMLElement) {
-      element.style.display = 'none';
-    }
-  });
-  const cards = Array.from(
-    document.querySelectorAll(
-      '.dr-result-row, .deck-card, .result-card, [class*="deck-card"], [class*="result-card"]'
-    )
-  ).slice(0, 3);
-  const images = cards.flatMap(
-    (card) => Array.from(card.querySelectorAll('img')).slice(0, 4)
-  );
-  await Promise.allSettled(
-    images.map(
-      (img) =>
-        img.complete && img.naturalWidth > 0
-          ? Promise.resolve()
-          : new Promise((resolve) => {
-              let settled = false;
-              const finish = () => {
-                if (settled) {
-                  return;
-                }
-                settled = true;
-                resolve(null);
-              };
-              const timer = window.setTimeout(finish, 1200);
-              img.addEventListener(
-                'load',
-                () => {
-                  window.clearTimeout(timer);
-                  finish();
-                },
-                { once: true }
-              );
-              img.addEventListener(
-                'error',
-                () => {
-                  window.clearTimeout(timer);
-                  finish();
-                },
-                { once: true }
-              );
-            })
-    )
-  );
-  window.scrollTo(0, 0);
-}
-        """.strip()
-        job = ScreenshotJob(
-            kind=request.kind_label,
-            urls=urls,
-            viewport=_build_viewport(settings.deck_viewport_width),
-            device_scale_factor=self._quality_scale_factor(settings.screenshot_quality),
-            full_page=True,
-            capture_mode="full_page",
-            user_agent=_MOBILE_USER_AGENT,
-            wait_until="domcontentloaded",
-            wait_selector="main",
-            wait_callback=self._wait_for_deck_terminal_state,
-            prepare_script=prepare_script,
-            before_capture_script=before_capture_script,
-            scroll_if_function=scroll_if_function,
-            top_crop_css_pixels=settings.deck_top_crop,
-            stability_wait_ms=42,
-            extra_wait_seconds=0,
-            timeout_seconds=settings.deck_wait_timeout_seconds,
-            log_timing=True,
-        )
-        return await self.capture(job)
-
     async def capture_story(self, event_id: int) -> bytes:
         settings = get_settings()
         urls = [
@@ -1080,7 +625,7 @@ async () => {
         job = ScreenshotJob(
             kind="活动剧情",
             urls=urls,
-            viewport=_build_viewport(settings.deck_viewport_width),
+            viewport=_build_viewport(settings.character_viewport_width),
             device_scale_factor=self._quality_scale_factor(settings.screenshot_quality),
             full_page=True,
             capture_mode="full_page",
@@ -1177,7 +722,7 @@ async () => {
         job = ScreenshotJob(
             kind="查角色",
             urls=urls,
-            viewport=_build_viewport(settings.deck_viewport_width),
+            viewport=_build_viewport(settings.character_viewport_width),
             device_scale_factor=self._quality_scale_factor(settings.screenshot_quality),
             full_page=True,
             capture_mode="full_page",

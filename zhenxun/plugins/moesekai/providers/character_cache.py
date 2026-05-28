@@ -17,7 +17,7 @@ class CharacterCacheProvider:
         return {
             "character_id": character_id,
             "site_bases": list(settings.site_bases),
-            "viewport_width": settings.deck_viewport_width,
+            "viewport_width": settings.character_viewport_width,
             "top_crop": settings.character_top_crop,
             "screenshot_quality": settings.screenshot_quality,
             "viewer_color_scheme": "light",

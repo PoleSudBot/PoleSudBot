@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 import importlib
 import os
 import time
@@ -31,7 +30,6 @@ from zhenxun.plugins.moesekai.providers.profile import (
     ProfileProvider,
     ProfileStaticAssetProvider,
 )
-from zhenxun.plugins.moesekai.providers.ranking import RankingSnapshot, ranking_provider
 from zhenxun.plugins.moesekai.providers.story_cache import StoryCacheProvider
 from zhenxun.plugins.moesekai.storage import BinaryFileCacheStore, PathBinaryFileStore
 from zhenxun.plugins.moesekai.storage.state import JsonStateStore
@@ -384,7 +382,7 @@ def test_character_cache_provider_respects_ttl_and_refresh_signature(
             "https://snowyviewer.exmeaning.com",
             "https://pjsk.moe",
         ]
-        deck_viewport_width = 650
+        character_viewport_width = 650
         character_top_crop = 100
         screenshot_quality = 85
         character_cache_ttl_seconds = 10
@@ -630,80 +628,6 @@ async def test_asset_fetcher_unwraps_all_uris_failed_to_httpx_error(
         await asset_fetcher.fetch_content(target_url)
 
     assert exc_info.value.response.status_code == 404
-
-
-@pytest.mark.asyncio
-async def test_ranking_provider_get_snapshot_does_not_fallback_to_legacy(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    now = datetime.now()
-    current_event = {
-        "id": 199,
-        "startAt": int((now - timedelta(hours=1)).timestamp() * 1000),
-        "aggregateAt": int((now + timedelta(hours=1)).timestamp() * 1000),
-    }
-    expected_snapshot = RankingSnapshot(
-        server="jp",
-        event_id=199,
-        status="running",
-        updated_at="2026-03-29T09:00:00+08:00",
-        items=[],
-    )
-
-    async def fake_get_current_event(server: str, fallback: str = "prev"):
-        assert server == "jp"
-        assert fallback == "prev"
-        return current_event
-
-    async def fake_get_event_meta(server: str, event_id: int):
-        assert server == "jp"
-        assert event_id == 199
-        return {"event_id": 199}
-
-    async def fake_get_latest_snapshot(server: str, event_id: int):
-        assert server == "jp"
-        assert event_id == 199
-        return expected_snapshot
-
-    monkeypatch.setattr(
-        "zhenxun.plugins.moesekai.providers.ranking.master_data_provider.get_current_event",
-        fake_get_current_event,
-    )
-    monkeypatch.setattr(ranking_provider, "get_event_meta", fake_get_event_meta)
-    monkeypatch.setattr(
-        ranking_provider, "get_latest_snapshot", fake_get_latest_snapshot
-    )
-
-    snapshot, event_meta, used_previous_event = await ranking_provider.get_snapshot(
-        "jp",
-        fallback="prev",
-    )
-
-    assert snapshot is expected_snapshot
-    assert event_meta == {"event_id": 199}
-    assert used_previous_event is False
-
-
-@pytest.mark.asyncio
-async def test_ranking_provider_treats_empty_cache_as_cache_hit(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    async def fake_cache_get(_key: str):
-        return []
-
-    async def fail_get_json(*_args, **_kwargs):
-        raise AssertionError("空列表缓存命中时不应再次请求远端")
-
-    monkeypatch.setattr(
-        "zhenxun.plugins.moesekai.providers.ranking.MoeSekaiCache.get",
-        fake_cache_get,
-    )
-    monkeypatch.setattr(
-        "zhenxun.plugins.moesekai.providers.ranking.AsyncHttpx.get_json",
-        fail_get_json,
-    )
-
-    assert await ranking_provider.list_events("jp") == []
 
 
 def test_profile_provider_build_profile_url_keeps_encoded_uni_placeholder():

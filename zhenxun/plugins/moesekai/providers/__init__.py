@@ -6,7 +6,6 @@ from .character_cache import character_cache_provider
 from .hub import hub_provider
 from .masterdata import master_data_provider
 from .profile import profile_provider, profile_static_asset_provider
-from .ranking import ranking_provider
 from .story_cache import story_cache_provider
 
 __all__ = [
@@ -19,6 +18,5 @@ __all__ = [
     "master_data_provider",
     "profile_provider",
     "profile_static_asset_provider",
-    "ranking_provider",
     "story_cache_provider",
 ]

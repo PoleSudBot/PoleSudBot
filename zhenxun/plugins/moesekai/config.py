@@ -4,7 +4,6 @@ from functools import lru_cache
 import os
 import sys
 from typing import Any, Literal
-from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -60,11 +59,7 @@ else:
         arg_parser: Any = None
 
 
-from .constants import (
-    MODULE_NAME,
-    normalize_deck_difficulty,
-    normalize_live_type,
-)
+from .constants import MODULE_NAME
 
 DEFAULT_PROFILE_STATIC_ASSET_BASES = [
     "https://raw.githubusercontent.com/Exmeaning/Exmeaning-Image-hosting/main",
@@ -73,21 +68,6 @@ DEFAULT_PROFILE_STATIC_ASSET_BASES = [
 LEGACY_PROFILE_TOKEN_DEFAULT = (
     "0357a6c752a7cb080bce495891911d0da722a907eecfc4d28b0ff952375466b0"
 )
-
-
-def _normalize_ranking_api_base_url(value: str) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return "https://rk.exmeaning.com"
-    if not text.startswith(("http://", "https://")):
-        text = f"https://{text.lstrip('/')}"
-    split = urlsplit(text)
-    host = split.netloc.lower()
-    path = split.path.strip("/")
-    normalized = f"{split.scheme or 'https'}://{host}"
-    if path:
-        normalized = f"{normalized}/{path}"
-    return normalized.rstrip("/")
 
 
 class MoeSekaiSettings(BaseModel):
@@ -115,35 +95,14 @@ class MoeSekaiSettings(BaseModel):
             "https://pjsk.moe",
         ]
     )
-    ranking_api_base: str = "https://rk.exmeaning.com"
-    ranking_screenshot_templates: list[str] = Field(
-        default_factory=lambda: [
-            "https://sekairanking.exmeaning.com/{server_path}simple"
-        ]
-    )
-    ranking_history_screenshot_templates: list[str] = Field(
-        default_factory=lambda: [
-            "https://sekairanking.exmeaning.com/{server_path}event/{event_id}"
-        ]
-    )
     screenshot_quality: int = 85
     screenshot_retry_times: int = 3
     screenshot_retry_delay_seconds: int = 3
     screenshot_timeout_seconds: int = 45
     profile_viewport_width: int = 625
-    ranking_viewport_width: int = 850
-    deck_viewport_width: int = 750
-    deck_top_crop: int = 75
+    character_viewport_width: int = 750
     story_top_crop: int = 125
     character_top_crop: int = 100
-    deck_wait_timeout_seconds: int = 120
-    deck_default_music_id: int = 74
-    deck_default_difficulty: str = "expert"
-    deck_default_live_type: str = "multi"
-    deck_strongest_default_music_id: int = 141
-    deck_strongest_default_difficulty: str = "append"
-    deck_challenge_default_music_id: int = 540
-    deck_challenge_default_difficulty: str = "master"
     cache_mode: str = "REDIS"
     cache_ttl_seconds: int = 600
     character_cache_ttl_seconds: int = 1_209_600
@@ -161,7 +120,6 @@ class MoeSekaiSettings(BaseModel):
     new_card_fallback_delay_min_seconds: float = 1.5
     new_card_fallback_delay_max_seconds: float = 3.0
     new_card_fallback_abort_after_consecutive_failures: int = 2
-    alias_global_editor_groups: list[str] = Field(default_factory=list)
     alias_sync_interval_seconds: int = 21600
     theme_primary: str = "#FF6699"
     theme_primary_dark: str = "#E64D80"
@@ -177,22 +135,10 @@ class MoeSekaiSettings(BaseModel):
         "profile_url_templates",
         "profile_static_asset_bases",
         "site_bases",
-        "ranking_screenshot_templates",
-        "ranking_history_screenshot_templates",
     )
     @classmethod
     def _filter_empty_values(cls, value: list[str]) -> list[str]:
         return [str(item).strip() for item in value if item and str(item).strip()]
-
-    @field_validator("alias_global_editor_groups")
-    @classmethod
-    def _normalize_group_ids(cls, value: list[str | int]) -> list[str]:
-        result: list[str] = []
-        for item in value:
-            text = str(item).strip()
-            if text:
-                result.append(text)
-        return result
 
     @field_validator("screenshot_quality")
     @classmethod
@@ -211,14 +157,13 @@ class MoeSekaiSettings(BaseModel):
 
     @field_validator(
         "profile_viewport_width",
-        "ranking_viewport_width",
-        "deck_viewport_width",
+        "character_viewport_width",
     )
     @classmethod
     def _normalize_viewport_width(cls, value: int) -> int:
         return max(320, value)
 
-    @field_validator("deck_top_crop", "story_top_crop", "character_top_crop")
+    @field_validator("story_top_crop", "character_top_crop")
     @classmethod
     def _normalize_crop_pixels(cls, value: int) -> int:
         return max(0, value)
@@ -227,25 +172,6 @@ class MoeSekaiSettings(BaseModel):
     @classmethod
     def _normalize_ttl_seconds(cls, value: int) -> int:
         return max(0, value)
-
-    @field_validator(
-        "deck_default_difficulty",
-        "deck_strongest_default_difficulty",
-        "deck_challenge_default_difficulty",
-    )
-    @classmethod
-    def _normalize_difficulty(cls, value: str) -> str:
-        return normalize_deck_difficulty(value) or "hard"
-
-    @field_validator("deck_default_live_type")
-    @classmethod
-    def _normalize_live_type(cls, value: str) -> str:
-        return normalize_live_type(value) or "multi"
-
-    @field_validator("ranking_api_base")
-    @classmethod
-    def _normalize_ranking_api_base(cls, value: str) -> str:
-        return _normalize_ranking_api_base_url(value)
 
 
 def _build_profile_url_templates(settings: MoeSekaiSettings) -> list[str]:
@@ -344,31 +270,7 @@ REGISTER_CONFIGS = [
         key="MOESEKAI_SITE_BASES",
         value=list(REGISTER_DEFAULTS.site_bases),
         default_value=list(REGISTER_DEFAULTS.site_bases),
-        help="MoeSekai 网页站点列表，按顺序尝试，主要用于组卡/剧情/角色截图",
-        type=list[str],
-    ),
-    RegisterConfig(
-        module=MODULE_NAME,
-        key="MOESEKAI_RANKING_API_BASE",
-        value=REGISTER_DEFAULTS.ranking_api_base,
-        default_value=REGISTER_DEFAULTS.ranking_api_base,
-        help="榜线预测 API 基础地址",
-        type=str,
-    ),
-    RegisterConfig(
-        module=MODULE_NAME,
-        key="MOESEKAI_RANKING_SCREENSHOT_TEMPLATES",
-        value=list(REGISTER_DEFAULTS.ranking_screenshot_templates),
-        default_value=list(REGISTER_DEFAULTS.ranking_screenshot_templates),
-        help="ycx 榜线截图 URL 模板列表，支持 {server} {server_path}",
-        type=list[str],
-    ),
-    RegisterConfig(
-        module=MODULE_NAME,
-        key="MOESEKAI_RANKING_HISTORY_SCREENSHOT_TEMPLATES",
-        value=list(REGISTER_DEFAULTS.ranking_history_screenshot_templates),
-        default_value=list(REGISTER_DEFAULTS.ranking_history_screenshot_templates),
-        help="ycx 历史活动截图 URL 模板列表，支持 {server} {server_path} {event_id}",
+        help="MoeSekai 网页站点列表，按顺序尝试，主要用于剧情/角色截图",
         type=list[str],
     ),
     RegisterConfig(
@@ -389,26 +291,10 @@ REGISTER_CONFIGS = [
     ),
     RegisterConfig(
         module=MODULE_NAME,
-        key="MOESEKAI_RANKING_VIEWPORT_WIDTH",
-        value=REGISTER_DEFAULTS.ranking_viewport_width,
-        default_value=REGISTER_DEFAULTS.ranking_viewport_width,
-        help="ycx 榜线截图宽度（CSS viewport width）",
-        type=int,
-    ),
-    RegisterConfig(
-        module=MODULE_NAME,
-        key="MOESEKAI_DECK_VIEWPORT_WIDTH",
-        value=REGISTER_DEFAULTS.deck_viewport_width,
-        default_value=REGISTER_DEFAULTS.deck_viewport_width,
-        help="组卡截图宽度（CSS viewport width）",
-        type=int,
-    ),
-    RegisterConfig(
-        module=MODULE_NAME,
-        key="MOESEKAI_DECK_TOP_CROP",
-        value=REGISTER_DEFAULTS.deck_top_crop,
-        default_value=REGISTER_DEFAULTS.deck_top_crop,
-        help="组卡截图顶部裁剪高度（CSS 像素）",
+        key="MOESEKAI_CHARACTER_VIEWPORT_WIDTH",
+        value=REGISTER_DEFAULTS.character_viewport_width,
+        default_value=REGISTER_DEFAULTS.character_viewport_width,
+        help="角色/剧情页面截图宽度（CSS viewport width）",
         type=int,
     ),
     RegisterConfig(
@@ -450,70 +336,6 @@ REGISTER_CONFIGS = [
         default_value=REGISTER_DEFAULTS.screenshot_timeout_seconds,
         help="单次截图总超时秒数",
         type=int,
-    ),
-    RegisterConfig(
-        module=MODULE_NAME,
-        key="MOESEKAI_DECK_WAIT_TIMEOUT_SECONDS",
-        value=REGISTER_DEFAULTS.deck_wait_timeout_seconds,
-        default_value=REGISTER_DEFAULTS.deck_wait_timeout_seconds,
-        help="组卡等待网页计算完成的超时秒数",
-        type=int,
-    ),
-    RegisterConfig(
-        module=MODULE_NAME,
-        key="MOESEKAI_DECK_DEFAULT_MUSIC_ID",
-        value=REGISTER_DEFAULTS.deck_default_music_id,
-        default_value=REGISTER_DEFAULTS.deck_default_music_id,
-        help="活动组卡默认歌曲 ID",
-        type=int,
-    ),
-    RegisterConfig(
-        module=MODULE_NAME,
-        key="MOESEKAI_DECK_DEFAULT_DIFFICULTY",
-        value=REGISTER_DEFAULTS.deck_default_difficulty,
-        default_value=REGISTER_DEFAULTS.deck_default_difficulty,
-        help="活动组卡默认难度",
-        type=str,
-    ),
-    RegisterConfig(
-        module=MODULE_NAME,
-        key="MOESEKAI_DECK_DEFAULT_LIVE_TYPE",
-        value=REGISTER_DEFAULTS.deck_default_live_type,
-        default_value=REGISTER_DEFAULTS.deck_default_live_type,
-        help="活动组卡默认 Live 类型",
-        type=str,
-    ),
-    RegisterConfig(
-        module=MODULE_NAME,
-        key="MOESEKAI_DECK_STRONGEST_DEFAULT_MUSIC_ID",
-        value=REGISTER_DEFAULTS.deck_strongest_default_music_id,
-        default_value=REGISTER_DEFAULTS.deck_strongest_default_music_id,
-        help="最强组卡默认歌曲 ID",
-        type=int,
-    ),
-    RegisterConfig(
-        module=MODULE_NAME,
-        key="MOESEKAI_DECK_STRONGEST_DEFAULT_DIFFICULTY",
-        value=REGISTER_DEFAULTS.deck_strongest_default_difficulty,
-        default_value=REGISTER_DEFAULTS.deck_strongest_default_difficulty,
-        help="最强组卡默认难度",
-        type=str,
-    ),
-    RegisterConfig(
-        module=MODULE_NAME,
-        key="MOESEKAI_DECK_CHALLENGE_DEFAULT_MUSIC_ID",
-        value=REGISTER_DEFAULTS.deck_challenge_default_music_id,
-        default_value=REGISTER_DEFAULTS.deck_challenge_default_music_id,
-        help="挑战组卡默认歌曲 ID",
-        type=int,
-    ),
-    RegisterConfig(
-        module=MODULE_NAME,
-        key="MOESEKAI_DECK_CHALLENGE_DEFAULT_DIFFICULTY",
-        value=REGISTER_DEFAULTS.deck_challenge_default_difficulty,
-        default_value=REGISTER_DEFAULTS.deck_challenge_default_difficulty,
-        help="挑战组卡默认难度",
-        type=str,
     ),
     RegisterConfig(
         module=MODULE_NAME,
@@ -610,14 +432,6 @@ REGISTER_CONFIGS = [
         default_value=REGISTER_DEFAULTS.new_card_abort_after_consecutive_failures,
         help="自动新卡提醒连续失败多少次就中止该群本轮发送",
         type=int,
-    ),
-    RegisterConfig(
-        module=MODULE_NAME,
-        key="MOESEKAI_ALIAS_GLOBAL_EDITOR_GROUPS",
-        value=list(REGISTER_DEFAULTS.alias_global_editor_groups),
-        default_value=list(REGISTER_DEFAULTS.alias_global_editor_groups),
-        help="允许编辑全局别名的群号白名单",
-        type=list[str],
     ),
     RegisterConfig(
         module=MODULE_NAME,
@@ -761,18 +575,6 @@ def get_settings() -> MoeSekaiSettings:
             "MOESEKAI_SITE_BASES",
             defaults.site_bases,
         ),
-        "ranking_api_base": _get_compat_config(
-            "MOESEKAI_RANKING_API_BASE",
-            defaults.ranking_api_base,
-        ),
-        "ranking_screenshot_templates": _get_compat_config(
-            "MOESEKAI_RANKING_SCREENSHOT_TEMPLATES",
-            defaults.ranking_screenshot_templates,
-        ),
-        "ranking_history_screenshot_templates": _get_compat_config(
-            "MOESEKAI_RANKING_HISTORY_SCREENSHOT_TEMPLATES",
-            defaults.ranking_history_screenshot_templates,
-        ),
         "screenshot_quality": _get_compat_config(
             "MOESEKAI_SCREENSHOT_QUALITY",
             defaults.screenshot_quality,
@@ -781,17 +583,10 @@ def get_settings() -> MoeSekaiSettings:
             "MOESEKAI_PROFILE_VIEWPORT_WIDTH",
             defaults.profile_viewport_width,
         ),
-        "ranking_viewport_width": _get_compat_config(
-            "MOESEKAI_RANKING_VIEWPORT_WIDTH",
-            defaults.ranking_viewport_width,
-        ),
-        "deck_viewport_width": _get_compat_config(
-            "MOESEKAI_DECK_VIEWPORT_WIDTH",
-            defaults.deck_viewport_width,
-        ),
-        "deck_top_crop": _get_compat_config(
-            "MOESEKAI_DECK_TOP_CROP",
-            defaults.deck_top_crop,
+        "character_viewport_width": _get_compat_config(
+            "MOESEKAI_CHARACTER_VIEWPORT_WIDTH",
+            defaults.character_viewport_width,
+            legacy_keys=["MOESEKAI_DECK_VIEWPORT_WIDTH"],
         ),
         "story_top_crop": _get_compat_config(
             "MOESEKAI_STORY_TOP_CROP",
@@ -812,38 +607,6 @@ def get_settings() -> MoeSekaiSettings:
         "screenshot_timeout_seconds": _get_compat_config(
             "MOESEKAI_SCREENSHOT_TIMEOUT_SECONDS",
             defaults.screenshot_timeout_seconds,
-        ),
-        "deck_wait_timeout_seconds": _get_compat_config(
-            "MOESEKAI_DECK_WAIT_TIMEOUT_SECONDS",
-            defaults.deck_wait_timeout_seconds,
-        ),
-        "deck_default_music_id": _get_compat_config(
-            "MOESEKAI_DECK_DEFAULT_MUSIC_ID",
-            defaults.deck_default_music_id,
-        ),
-        "deck_default_difficulty": _get_compat_config(
-            "MOESEKAI_DECK_DEFAULT_DIFFICULTY",
-            defaults.deck_default_difficulty,
-        ),
-        "deck_default_live_type": _get_compat_config(
-            "MOESEKAI_DECK_DEFAULT_LIVE_TYPE",
-            defaults.deck_default_live_type,
-        ),
-        "deck_strongest_default_music_id": _get_compat_config(
-            "MOESEKAI_DECK_STRONGEST_DEFAULT_MUSIC_ID",
-            defaults.deck_strongest_default_music_id,
-        ),
-        "deck_strongest_default_difficulty": _get_compat_config(
-            "MOESEKAI_DECK_STRONGEST_DEFAULT_DIFFICULTY",
-            defaults.deck_strongest_default_difficulty,
-        ),
-        "deck_challenge_default_music_id": _get_compat_config(
-            "MOESEKAI_DECK_CHALLENGE_DEFAULT_MUSIC_ID",
-            defaults.deck_challenge_default_music_id,
-        ),
-        "deck_challenge_default_difficulty": _get_compat_config(
-            "MOESEKAI_DECK_CHALLENGE_DEFAULT_DIFFICULTY",
-            defaults.deck_challenge_default_difficulty,
         ),
         "cache_mode": _get_compat_config(
             "MOESEKAI_CACHE_MODE",
@@ -897,10 +660,6 @@ def get_settings() -> MoeSekaiSettings:
             "MOESEKAI_NEW_CARD_ABORT_AFTER_CONSECUTIVE_FAILURES",
             defaults.new_card_abort_after_consecutive_failures,
             legacy_keys=["MOESEKAI_NEW_CARD_FALLBACK_ABORT_AFTER_CONSECUTIVE_FAILURES"],
-        ),
-        "alias_global_editor_groups": _get_compat_config(
-            "MOESEKAI_ALIAS_GLOBAL_EDITOR_GROUPS",
-            defaults.alias_global_editor_groups,
         ),
         "alias_sync_interval_seconds": _get_compat_config(
             "MOESEKAI_ALIAS_SYNC_INTERVAL_SECONDS",

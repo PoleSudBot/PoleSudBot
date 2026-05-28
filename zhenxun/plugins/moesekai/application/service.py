@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 import random
@@ -12,39 +12,26 @@ from nonebot.adapters import Bot
 from nonebot.exception import ActionFailed, AdapterException
 from nonebot_plugin_alconna import At, Image, Text, UniMessage
 from tortoise import Tortoise
+
 from zhenxun.utils.exception import RenderingError
 
 from ..adapters.profile_renderer import render_profile_image
-from ..adapters.results import (
-    MoeImageTextMessage,
-    build_alias_profile_image,
-    build_image_message,
-    build_native_image_text_message,
-    build_text_block_image,
-)
 from ..adapters.reminder_renderer import render_reminder_card
+from ..adapters.results import (
+    build_native_image_text_message,
+)
 from ..adapters.runtime import AsyncHttpx, MessageUtils, PlatformUtils, logger
 from ..adapters.viewmodels import ReminderCardViewModel
-from .calculators import calculate_multiplier
 from ..command_parser import ParsedCommand
 from ..config import get_settings
 from ..constants import (
-    ALIAS_TARGET_CHARACTER,
-    ALIAS_TARGET_MUSIC,
     FEATURE_LIVE_REMINDER,
     FEATURE_NEW_CARD_REMINDER,
     MODULE_NAME,
-    PREDICTION_SUPPORTED_SERVERS,
-    RANK_SOURCE_NAME,
     SERVER_SET,
-    SERVERS,
-    SCOPE_GLOBAL,
     STATE_DIR,
-    YCX_SUPPORTED_SERVERS,
-    make_scope_key,
     server_label,
 )
-from ..deck import DeckCommandRequest, DeckResolvedRequest, deck_mode_label, to_backend_request
 from ..master_data import RegionUpdateResult
 from ..providers import (
     alias_provider,
@@ -52,7 +39,6 @@ from ..providers import (
     character_cache_provider,
     hub_provider,
     master_data_provider,
-    ranking_provider,
     story_cache_provider,
 )
 from ..providers.profile import ProfileRenderError
@@ -64,12 +50,9 @@ from ..repositories import (
     get_group_feature_toggle,
     get_or_create_user_settings,
     get_user_binding,
-    list_notification_record_keys_by_groups,
-    get_user_feature_subscription,
-    get_user_settings,
     has_notification_record,
-    list_blacklist_entries,
     list_enabled_group_feature_toggles,
+    list_notification_record_keys_by_groups,
     list_user_bindings,
     list_user_feature_subscriptions,
     query_bindings_by_uid,
@@ -84,10 +67,7 @@ from ..repositories import (
 from ..screenshot import ScreenshotError, screenshot_service
 from ..storage.state import JsonStateStore
 
-PREDICTION_RANKS = [50, 100, 200, 300, 500, 1000, 2000, 3000, 5000, 10000]
 NEW_CARD_TEST_SCAN_LIMIT = 12
-ALIAS_IMAGE_TEXT_THRESHOLD = 100
-ALIAS_IMAGE_COUNT_THRESHOLD = 20
 _ALIAS_STATE = JsonStateStore(STATE_DIR / "alias_sync_state.json")
 _NEW_CARD_PENDING_STATE = JsonStateStore(STATE_DIR / "new_card_pending_state.json")
 _LIVE_REMINDER_START_LEAD = timedelta(minutes=3)
@@ -486,116 +466,6 @@ class MoeSekaiApplication:
         except ScreenshotError as exc:
             return exc.to_user_message()
 
-    def _build_ranking_message(
-        self,
-        *,
-        server: str,
-        event: dict[str, Any] | None,
-        snapshot: Any,
-        title: str,
-        note: str | None = None,
-    ) -> list[str]:
-        lines = []
-        event_status = snapshot.status
-        lines.append(f"<strong>状态</strong>：{event_status}")
-        if note:
-            lines.append(f"<strong>注意</strong>：{note}")
-
-        rank_map = {item.rank: item for item in snapshot.items}
-        for rank in PREDICTION_RANKS:
-            item = rank_map.get(rank)
-            if not item:
-                continue
-            if item.score is not None and item.prediction is not None:
-                lines.append(f"<strong>T{rank}</strong>: 当前 {item.score:,} / 预测 {item.prediction:,}")
-            elif item.score is not None:
-                label = "结榜" if item.is_final else "当前"
-                lines.append(f"<strong>T{rank}</strong>: {label} {item.score:,}")
-            elif item.prediction is not None:
-                lines.append(f"<strong>T{rank}</strong>: 预测 {item.prediction:,}")
-
-        first_collect_time = next(
-            (item.collect_time for item in snapshot.items if item.collect_time),
-            None,
-        )
-        lines.append(f"<strong>采集时间</strong>：{self._format_iso_time(first_collect_time, include_seconds=True)}")
-        lines.append(f"<strong>数据来源</strong>：{snapshot.source_name or RANK_SOURCE_NAME}")
-        return lines
-
-    async def handle_multiplier(self, values: list[int]) -> str:
-        try:
-            result = calculate_multiplier(values)
-        except ValueError:
-            return "用法: 倍率计算 <a> <b> <c> <d> <e>"
-        return "\n".join(
-            [
-                f"车头{result.leader}/内部{result.internal}",
-                f"倍率为{result.multiplier}",
-                f"实效为{result.effective_percent}%",
-            ]
-        )
-
-    async def handle_prediction(
-        self,
-        platform: str,
-        user_id: str,
-        server: str | None,
-        event_id: int | None = None,
-        *,
-        is_superuser: bool,
-    ) -> UniMessage | str:
-        if error := await self._is_qq_blacklisted(platform, user_id, is_superuser):
-            return error
-        resolved_server, error = await self._resolve_default_server(
-            platform,
-            user_id,
-            explicit_server=server,
-            fallback_jp=True,
-        )
-        if error or not resolved_server:
-            return "请先绑定账号或使用区服前缀指定查询区服"
-        if resolved_server not in PREDICTION_SUPPORTED_SERVERS:
-            return f"{server_label(resolved_server)}暂不支持预测线查询"
-        snapshot, _, used_previous_event = await ranking_provider.get_snapshot(
-            resolved_server,
-            event_id=event_id,
-            fallback="prev",
-        )
-        if event_id is not None:
-            event = await self._get_event_by_id(resolved_server, event_id)
-            if not event:
-                return f"{server_label(resolved_server)}不存在活动 {event_id}"
-        else:
-            event = await master_data_provider.get_current_event(resolved_server, fallback="prev")
-        if not snapshot:
-            if event_id is None:
-                return f"{server_label(resolved_server)}当前没有进行中的活动，且没有可用的上期活动数据"
-            return f"第{event_id}期活动暂无可用预测线数据"
-        if not event:
-            event = await self._get_event_by_id(resolved_server, snapshot.event_id)
-        lines = self._build_ranking_message(
-            server=resolved_server,
-            event=event,
-            snapshot=snapshot,
-            title="预测线",
-            note="当前无进行中活动，已回退到上期活动结榜线" if used_previous_event else None,
-        )
-        banner = None
-        if event and event.get("assetbundleName"):
-            banner = await asset_provider.get_event_banner(
-                resolved_server, str(event["assetbundleName"])
-            )
-
-        view_model = ReminderCardViewModel(
-            title=f"{server_label(resolved_server)}预测线",
-            subtitle=f'第{snapshot.event_id}期 {str(event.get("name", "")).strip()}' if event else None,
-            lines=lines,
-            banner=banner,
-            accent="Prediction",
-        )
-        image_bytes = await render_reminder_card(view_model)
-        return build_image_message(image_bytes)
-
     async def handle_update(
         self,
         platform: str,
@@ -622,381 +492,6 @@ class MoeSekaiApplication:
             return "请先绑定账号设置默认区服，或使用 pjsk update <cn|jp|tw> 显式指定区服"
         result = await master_data_provider.update_region(resolved_server, force=True)
         return result.to_message()
-
-    async def handle_ycx(
-        self,
-        platform: str,
-        user_id: str,
-        server: str | None,
-        event_id: int | None = None,
-        *,
-        is_superuser: bool,
-    ) -> bytes | str:
-        if error := await self._is_qq_blacklisted(platform, user_id, is_superuser):
-            return error
-        resolved_server, error = await self._resolve_default_server(
-            platform,
-            user_id,
-            explicit_server=server,
-            fallback_jp=True,
-        )
-        if error or not resolved_server:
-            return "请先绑定账号或使用区服前缀指定查询区服"
-        if resolved_server not in YCX_SUPPORTED_SERVERS:
-            return f"{server_label(resolved_server)}暂不支持ycx榜线查询"
-        current_event = None
-        if event_id is not None:
-            current_event = await self._get_event_by_id(resolved_server, event_id)
-            if not current_event:
-                return f"{server_label(resolved_server)}不存在活动 {event_id}"
-        try:
-            return await screenshot_service.capture_ranking(resolved_server, event_id=event_id)
-        except ScreenshotError as exc:
-            if event_id is None or current_event is None:
-                return exc.to_user_message()
-            snapshot = await ranking_provider.get_latest_snapshot(resolved_server, event_id)
-            if not snapshot:
-                return f"第{event_id}期活动暂无可用榜线数据"
-            lines = self._build_ranking_message(
-                server=resolved_server,
-                event=current_event,
-                snapshot=snapshot,
-                title="结榜榜线",
-                note="历史活动页面暂不可用，已回退为文字数据",
-            )
-            return "\n".join(lines).replace("<strong>", "").replace("</strong>", "")
-
-    async def _resolve_music_query(
-        self,
-        query: str,
-        *,
-        platform: str | None = None,
-        group_id: str | None = None,
-    ) -> tuple[int | None, str | None]:
-        music_id = await self._resolve_music_id(
-            query,
-            platform=platform,
-            group_id=group_id,
-        )
-        if not music_id:
-            return None, f"未找到歌曲：{query}"
-        return int(music_id), None
-
-    async def _resolve_character_query(
-        self,
-        query: str,
-        *,
-        platform: str | None = None,
-        group_id: str | None = None,
-    ) -> tuple[int | None, str | None]:
-        character_id = await self._resolve_character_id(
-            query,
-            platform=platform,
-            group_id=group_id,
-        )
-        if not character_id:
-            return None, f"未找到角色：{query}"
-        return int(character_id), None
-
-    async def _resolve_deck_event_id(
-        self,
-        server: str,
-        *,
-        event_id: int | None,
-        not_found_message: str,
-    ) -> tuple[int | None, str | None]:
-        if event_id is not None:
-            event = await self._get_event_by_id(server, event_id)
-            if not event:
-                return None, f"{server_label(server)}不存在活动 {event_id}"
-            return event_id, None
-        current_event = await master_data_provider.get_current_event(
-            server,
-            fallback="next_first",
-        )
-        if not current_event:
-            return None, not_found_message
-        return int(current_event["id"]), None
-
-    async def _split_challenge_queries(
-        self,
-        query: str,
-        *,
-        platform: str | None = None,
-        group_id: str | None = None,
-    ) -> tuple[str | None, str | None, str | None]:
-        tokens = [segment for segment in str(query).split() if segment]
-        if not tokens:
-            return None, None, "挑战组卡需要至少提供一个角色"
-
-        fallback_character_query: str | None = None
-        fallback_music_query: str | None = None
-        for index in range(len(tokens), 0, -1):
-            character_query = " ".join(tokens[:index])
-            character_id = await self._resolve_character_id(
-                character_query,
-                platform=platform,
-                group_id=group_id,
-            )
-            if not character_id:
-                continue
-            if index == len(tokens):
-                return character_query, None, None
-            music_query = " ".join(tokens[index:])
-            if await self._resolve_music_id(
-                music_query,
-                platform=platform,
-                group_id=group_id,
-            ):
-                return character_query, music_query, None
-            if fallback_character_query is None:
-                fallback_character_query = character_query
-                fallback_music_query = music_query
-
-        if fallback_music_query:
-            return None, None, f"未找到歌曲：{fallback_music_query}"
-        return None, None, f"未找到角色：{query}"
-
-    async def _resolve_deck_request(
-        self,
-        request: DeckCommandRequest,
-        *,
-        server: str,
-        game_id: str,
-        platform: str | None = None,
-        group_id: str | None = None,
-    ) -> tuple[DeckResolvedRequest | None, str | None]:
-        settings = get_settings()
-        mode = request.mode
-        kind_label = deck_mode_label(mode)
-
-        if mode == "event":
-            event_id, error = await self._resolve_deck_event_id(
-                server,
-                event_id=request.event_id,
-                not_found_message="当前和下一期活动都不可用，请手动指定活动ID",
-            )
-            if error:
-                return None, error
-            music_id = settings.deck_default_music_id
-            if request.explicit_music and request.music_query:
-                music_id, error = await self._resolve_music_query(
-                    request.music_query,
-                    platform=platform,
-                    group_id=group_id,
-                )
-                if error:
-                    return None, error
-            return (
-                DeckResolvedRequest(
-                    mode=mode,
-                    kind_label=kind_label,
-                    server=server,
-                    game_id=game_id,
-                    event_id=event_id,
-                    music_id=music_id,
-                    difficulty=request.difficulty or settings.deck_default_difficulty,
-                    live_type=request.live_type or settings.deck_default_live_type,
-                ),
-                None,
-            )
-
-        if mode == "custom":
-            if request.custom_bonus is None:
-                return None, "组卡需要指定箱活加成或混活加成"
-            music_id = settings.deck_default_music_id
-            if request.explicit_music and request.music_query:
-                music_id, error = await self._resolve_music_query(
-                    request.music_query,
-                    platform=platform,
-                    group_id=group_id,
-                )
-                if error:
-                    return None, error
-            difficulty = (
-                request.difficulty
-                or ("master" if request.explicit_music else settings.deck_default_difficulty)
-            )
-            live_type = request.live_type or settings.deck_default_live_type
-
-            resolved_request = DeckResolvedRequest(
-                mode=mode,
-                kind_label=kind_label,
-                server=server,
-                game_id=game_id,
-                music_id=music_id,
-                difficulty=difficulty,
-                live_type=live_type,
-            )
-            if request.custom_bonus.kind == "unit":
-                return (
-                    replace(
-                        resolved_request,
-                        custom_attr=request.custom_bonus.attr,
-                        custom_unit=request.custom_bonus.unit,
-                    ),
-                    None,
-                )
-
-            character_ids: list[int] = []
-            character_units: dict[int, str] = {}
-            seen_ids: set[int] = set()
-            for character in request.custom_bonus.characters:
-                character_id, error = await self._resolve_character_query(
-                    character.query,
-                    platform=platform,
-                    group_id=group_id,
-                )
-                if error:
-                    return None, error
-                if character_id not in seen_ids:
-                    seen_ids.add(character_id)
-                    character_ids.append(character_id)
-                if character.support_unit:
-                    existing_unit = character_units.get(character_id)
-                    if existing_unit and existing_unit != character.support_unit:
-                        return None, f"同一虚拟歌手不能同时指定多个团体：{character.query}"
-                    character_units[character_id] = character.support_unit
-
-            return (
-                replace(
-                    resolved_request,
-                    custom_attr=request.custom_bonus.attr,
-                    custom_character_ids=tuple(character_ids),
-                    custom_character_units=character_units,
-                ),
-                None,
-            )
-
-        if mode == "mysekai":
-            event_id, error = await self._resolve_deck_event_id(
-                server,
-                event_id=request.event_id,
-                not_found_message="当前和下一期活动都不可用，请手动指定活动ID",
-            )
-            if error:
-                return None, error
-            return (
-                DeckResolvedRequest(
-                    mode=mode,
-                    kind_label=kind_label,
-                    server=server,
-                    game_id=game_id,
-                    event_id=event_id,
-                ),
-                None,
-            )
-
-        if mode == "strongest":
-            music_id = settings.deck_strongest_default_music_id
-            if request.explicit_music and request.music_query:
-                music_id, error = await self._resolve_music_query(
-                    request.music_query,
-                    platform=platform,
-                    group_id=group_id,
-                )
-                if error:
-                    return None, error
-            difficulty = (
-                request.difficulty
-                or (
-                    "master"
-                    if request.explicit_music
-                    else settings.deck_strongest_default_difficulty
-                )
-            )
-            return (
-                DeckResolvedRequest(
-                    mode=mode,
-                    kind_label=kind_label,
-                    server=server,
-                    game_id=game_id,
-                    music_id=music_id,
-                    difficulty=difficulty,
-                    live_type=request.live_type or settings.deck_default_live_type,
-                    strongest_target=request.strongest_target or "power",
-                ),
-                None,
-            )
-
-        if mode == "challenge":
-            character_query, music_query, error = await self._split_challenge_queries(
-                request.free_text_query or request.character_query or "",
-                platform=platform,
-                group_id=group_id,
-            )
-            if error:
-                return None, error
-            if not character_query:
-                return None, "挑战组卡需要至少提供一个角色"
-            character_id, error = await self._resolve_character_query(
-                character_query,
-                platform=platform,
-                group_id=group_id,
-            )
-            if error:
-                return None, error
-            music_id = settings.deck_challenge_default_music_id
-            if music_query:
-                music_id, error = await self._resolve_music_query(
-                    music_query,
-                    platform=platform,
-                    group_id=group_id,
-                )
-                if error:
-                    return None, error
-            return (
-                DeckResolvedRequest(
-                    mode=mode,
-                    kind_label=kind_label,
-                    server=server,
-                    game_id=game_id,
-                    character_id=character_id,
-                    music_id=music_id,
-                    difficulty=request.difficulty
-                    or settings.deck_challenge_default_difficulty,
-                ),
-                None,
-            )
-
-        return None, f"暂不支持的组卡模式：{mode}"
-
-    async def handle_deck(
-        self,
-        platform: str,
-        requester_user_id: str,
-        *,
-        request: DeckCommandRequest,
-        group_id: str | None = None,
-        is_superuser: bool,
-    ) -> bytes | str:
-        if error := await self._is_qq_blacklisted(platform, requester_user_id, is_superuser):
-            return error
-        target_user_id = request.target_user_id or requester_user_id
-        binding, error = await self._resolve_binding_for_user(
-            platform,
-            is_superuser,
-            target_user_id,
-            request.server,
-            ignore_share=target_user_id == requester_user_id,
-        )
-        if error:
-            return error
-        resolved_request, error = await self._resolve_deck_request(
-            request,
-            server=binding.server,
-            game_id=binding.game_id,
-            platform=platform,
-            group_id=group_id,
-        )
-        if error or not resolved_request:
-            return error or "组卡参数解析失败"
-        try:
-            return await screenshot_service.capture_deck(
-                request=to_backend_request(resolved_request),
-            )
-        except ScreenshotError as exc:
-            return exc.to_user_message()
 
     async def handle_story(self, event_id: int, *, force_refresh: bool = False):
         event = await self._get_event_by_id("jp", event_id)
@@ -1133,146 +628,6 @@ class MoeSekaiApplication:
             group_id=group_id,
         )
         return result.target_id if result else None
-
-    @staticmethod
-    def _format_alias_profile_text(profile: Any) -> str:
-        lines = [profile.display_title]
-        if profile.merged_aliases:
-            lines.append(f"别名：{'，'.join(profile.merged_aliases)}")
-        if profile.group_aliases:
-            lines.append(f"本群别名：{'，'.join(profile.group_aliases)}")
-        return "\n".join(lines)
-
-    async def _maybe_render_alias_message(
-        self,
-        text: str,
-        *,
-        alias_count: int = 0,
-    ) -> str | MoeImageTextMessage:
-        if len(text) <= ALIAS_IMAGE_TEXT_THRESHOLD and alias_count <= ALIAS_IMAGE_COUNT_THRESHOLD:
-            return text
-        return build_native_image_text_message(build_text_block_image(text))
-
-    async def _maybe_render_alias_profile_message(
-        self,
-        profile: Any,
-    ) -> str | MoeImageTextMessage:
-        text = self._format_alias_profile_text(profile)
-        alias_count = len(profile.merged_aliases) + len(profile.group_aliases)
-        if len(text) <= ALIAS_IMAGE_TEXT_THRESHOLD and alias_count <= ALIAS_IMAGE_COUNT_THRESHOLD:
-            return text
-        return build_native_image_text_message(
-            build_alias_profile_image(
-                title=profile.display_title,
-                aliases=profile.merged_aliases,
-                group_aliases=profile.group_aliases,
-            )
-        )
-
-    async def handle_alias_command(
-        self,
-        *,
-        target_type: Literal["character", "music"],
-        operation: Literal["query", "add", "remove"],
-        query: str,
-        alias: str | None = None,
-        group_id: str | None = None,
-        platform: str | None = None,
-        user_id: str | None = None,
-        is_superuser: bool = False,
-        can_manage_group: bool = False,
-        global_scope: bool = False,
-    ) -> str | MoeImageTextMessage:
-        scope = SCOPE_GLOBAL if global_scope else make_scope_key(group_id, platform=platform)
-        allow_global = is_superuser or (
-            group_id and group_id in get_settings().alias_global_editor_groups
-        )
-        if operation in {"add", "remove"}:
-            if global_scope and not allow_global:
-                return "当前没有编辑全局别名的权限"
-            if not global_scope and not (is_superuser or can_manage_group):
-                return "只有群管理员或超级用户才能编辑本群别名"
-
-        if operation == "query":
-            if target_type == ALIAS_TARGET_CHARACTER:
-                resolved = await alias_provider.resolve_character(
-                    query,
-                    platform=platform,
-                    group_id=group_id,
-                )
-                profile_loader = alias_provider.get_character_profile
-                search_loader = alias_provider.search_character
-            else:
-                resolved = await alias_provider.resolve_music(
-                    query,
-                    platform=platform,
-                    group_id=group_id,
-                )
-                profile_loader = alias_provider.get_music_profile
-                search_loader = alias_provider.search_music
-
-            if resolved:
-                profile = await profile_loader(
-                    resolved.target_id,
-                    platform=platform,
-                    group_id=group_id,
-                )
-                if not profile:
-                    return "未找到相关别名"
-                return await self._maybe_render_alias_profile_message(profile)
-
-            matches = await search_loader(
-                query,
-                platform=platform,
-                group_id=group_id,
-            )
-            if not matches:
-                return "未找到相关别名"
-            result = "\n".join(
-                f"{entry.matched_text} -> {entry.target_id}. {entry.canonical_name}"
-                for entry in matches
-            )
-            return await self._maybe_render_alias_message(result)
-
-        if operation == "add":
-            if not alias:
-                return "请提供要添加的别名"
-            if target_type == ALIAS_TARGET_CHARACTER:
-                resolved = await alias_provider.resolve_character(
-                    query,
-                    platform=platform,
-                    group_id=group_id,
-                )
-            else:
-                resolved = await alias_provider.resolve_music(
-                    query,
-                    platform=platform,
-                    group_id=group_id,
-                )
-            target_id = resolved.target_id if resolved else None
-            if not target_id:
-                return f"未找到目标：{query}"
-            await alias_provider.add_managed_alias(
-                target_type=target_type,
-                target_value=target_id,
-                alias=alias,
-                scope=scope,
-                created_by=user_id or "system",
-            )
-            return f"已添加{'全局' if scope == SCOPE_GLOBAL else '本群'}别名：{alias} -> {target_id}"
-
-        if not alias:
-            return "请提供要删除的别名"
-        removed = await alias_provider.remove_managed_alias(
-            target_type=target_type,
-            alias=alias,
-            scope=scope,
-        )
-        if removed == "deleted":
-            return "已删除别名"
-        if removed == "system":
-            return "该别名为系统别名，不可删除"
-        return "该别名不存在"
 
     async def handle_admin_blacklist(self, command: ParsedCommand, operator_id: str) -> str:
         if command.admin_target_type == "uid":

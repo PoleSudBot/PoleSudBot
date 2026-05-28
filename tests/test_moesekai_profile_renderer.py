@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
-from types import ModuleType
 
+from jinja2 import Environment, FileSystemLoader
 import nonebot
 import pytest
-from jinja2 import Environment, FileSystemLoader
 
 nonebot.init()
 
+from zhenxun import ui
 from zhenxun.plugins.moesekai.adapters import profile_renderer
 
 
@@ -100,9 +99,7 @@ async def test_render_profile_image_uses_ui_template_with_expected_options(
         "zhenxun.plugins.moesekai.adapters.profile_renderer.get_settings",
         lambda: _FakeSettings(),
     )
-    fake_ui = ModuleType("zhenxun.ui")
-    fake_ui.render_template = fake_render_template
-    monkeypatch.setitem(sys.modules, "zhenxun.ui", fake_ui)
+    monkeypatch.setattr(ui, "render_template", fake_render_template)
 
     result = await profile_renderer.render_profile_image("jp", "1234567890123")
 
