@@ -164,11 +164,17 @@ async def test_capture_story_waits_for_content_ready(
         assert job.viewport["width"] == 650
         assert job.top_crop_css_pixels == 100
         assert job.full_page is True
-        assert "活动概要" in (job.wait_function or "")
-        assert "章节列表" in (job.wait_function or "")
+        assert "活动概要" not in (job.wait_function or "")
+        assert "章节列表" not in (job.wait_function or "")
+        assert "/events/199/" in (job.wait_function or "")
+        assert "\\/story\\/event\\/199\\/" in (job.wait_function or "")
+        assert "No chapter information yet" in (job.wait_function or "")
         assert "正在加载" in (job.wait_function or "")
-        assert "img.complete" in (job.wait_function or "")
+        assert "img.complete" not in (job.wait_function or "")
         assert job.scroll_if_function is not None
+        assert "img.complete" in (job.scroll_if_function or "")
+        assert "Promise.allSettled" in (job.before_capture_script or "")
+        assert "setTimeout(finish, 2200)" in (job.before_capture_script or "")
         return b"story"
 
     monkeypatch.setattr(screenshot_service, "capture", fake_capture)
@@ -191,10 +197,11 @@ async def test_capture_character_waits_for_related_cards_ready(
         assert job.full_page is True
         assert "正在加载角色信息" in (job.wait_function or "")
         assert "Character Trim" in (job.wait_function or "")
-        assert "基本信息" in (job.wait_function or "")
-        assert "个人档案" in (job.wait_function or "")
-        assert "相关卡牌" in (job.wait_function or "")
+        assert "基本信息" not in (job.wait_function or "")
+        assert "个人档案" not in (job.wait_function or "")
+        assert "相关卡牌" not in (job.wait_function or "")
         assert "\\/cards\\/" in (job.wait_function or "")
+        assert "(?:[?#].*)?" in (job.wait_function or "")
         assert job.scroll_through_page is False
         assert job.scroll_if_function is not None
         assert "svg image" in (job.before_capture_script or "")

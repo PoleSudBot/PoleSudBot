@@ -459,7 +459,8 @@ async () => {
                             logger.debug(
                                 "MoeSekai 截图阶段 "
                                 f"[{job.kind}] 第{attempt}次命中站点 "
-                                f"{_redact_url_secrets(url)} 总耗时 {attempt_elapsed:.1f}ms"
+                                f"{_redact_url_secrets(url)} "
+                                f"总耗时 {attempt_elapsed:.1f}ms"
                                 f"{f' | {meta_text}' if meta_text else ''} | "
                                 f"{self._format_stage_timings(stage_timings)}",
                                 MODULE_NAME,
@@ -499,10 +500,13 @@ async () => {
                     candidates = self._filter_urls(job.kind, job.urls)
                     selection_elapsed = (time.perf_counter() - selection_started) * 1000
                     if job.log_timing:
+                        candidate_text = ", ".join(
+                            _redact_url_secrets(url) for url in candidates
+                        )
                         logger.debug(
                             "MoeSekai 截图阶段 "
                             f"[{job.kind}] 重选候选站点 {selection_elapsed:.1f}ms -> "
-                            f"{', '.join(_redact_url_secrets(url) for url in candidates)}",
+                            f"{candidate_text}",
                             MODULE_NAME,
                         )
         raise ScreenshotError(job.kind, errors)
@@ -536,7 +540,8 @@ async () => {
     return false;
   }
   const leader = document.querySelector(
-    '#app > div > div.pjsk-container > div.section-card > div.deck-grid > div.deck-card.is-leader'
+    '#app > div > div.pjsk-container > div.section-card > ' +
+      'div.deck-grid > div.deck-card.is-leader'
   );
   const cards = Array.from(
     document.querySelectorAll('div.deck-grid .deck-card')
@@ -665,45 +670,110 @@ async () => {
   if (!(root instanceof HTMLElement)) {
     return false;
   }
-  const content = Array.from(root.children).find((element) => element.tagName !== 'ASIDE');
+  const content = Array.from(root.children).find(
+    (element) => element.tagName !== 'ASIDE'
+  );
   if (!(content instanceof HTMLElement)) {
     return false;
   }
   if (content.getBoundingClientRect().height < 480) {
     return false;
   }
-  const headings = Array.from(content.querySelectorAll('h1, h2, h3'))
-    .map((element) => (element.textContent || '').trim());
-  if (!headings.some((text) => text.includes('活动概要'))) {
+  // 站点标题走 i18n，截图就绪只依赖源码中更稳定的详情与章节路由结构。
+  const eventDetailLink = content.querySelector(
+    'a[href^="/events/__EVENT_ID__/"]'
+  );
+  if (!eventDetailLink) {
     return false;
   }
-  if (!headings.some((text) => text.includes('章节列表'))) {
-    return false;
-  }
-  const episodeCards = Array.from(content.querySelectorAll('a[href]')).filter((element) => {
+  const episodeCards = Array.from(
+    content.querySelectorAll('a[href]')
+  ).filter((element) => {
     const href = element.getAttribute('href') || '';
-    return /\\/story\\/event\\/\\d+\\/\\d+\\/?$/.test(href);
+    return /\\/story\\/event\\/__EVENT_ID__\\/\\d+\\/?(?:[?#].*)?$/.test(
+      href
+    );
   });
-  if (!episodeCards.length) {
-    return false;
-  }
-  const images = Array.from(content.querySelectorAll('img'));
-  return images.every((img) => img.complete && img.naturalWidth > 0);
+  const hasNoChapterState =
+    bodyText.includes('暂无章节信息') ||
+    bodyText.includes('No chapter information yet');
+  return episodeCards.length > 0 || hasNoChapterState;
 }
-            """.strip(),
+            """.strip().replace("__EVENT_ID__", str(event_id)),
             scroll_if_function="""
 () => {
   const root = document.querySelector('main > div:nth-of-type(2)');
   if (!(root instanceof HTMLElement)) {
     return false;
   }
-  const content = Array.from(root.children).find((element) => element.tagName !== 'ASIDE');
+  const content = Array.from(root.children).find(
+    (element) => element.tagName !== 'ASIDE'
+  );
   if (!(content instanceof HTMLElement)) {
     return false;
   }
   return Array.from(content.querySelectorAll('img')).some(
     (img) => !img.complete || img.naturalWidth <= 0
   );
+}
+            """.strip(),
+            before_capture_script="""
+async () => {
+  const root = document.querySelector('main > div:nth-of-type(2)');
+  const content = root instanceof HTMLElement
+    ? Array.from(root.children).find((element) => element.tagName !== 'ASIDE')
+    : null;
+  if (!(content instanceof HTMLElement)) {
+    return;
+  }
+  // 章节图懒加载；截图前滚过内容区，并让失败资源不阻断整页截图。
+  const maxHeight = Math.max(
+    document.body?.scrollHeight || 0,
+    document.documentElement?.scrollHeight || 0
+  );
+  const step = Math.max(Math.floor(window.innerHeight * 0.85), 320);
+  for (let offset = 0; offset < maxHeight; offset += step) {
+    window.scrollTo(0, offset);
+    await new Promise((resolve) => setTimeout(resolve, 70));
+  }
+  window.scrollTo(0, maxHeight);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  const images = Array.from(content.querySelectorAll('img'));
+  await Promise.allSettled(
+    images.map(
+      (img) =>
+        img.complete && img.naturalWidth > 0
+          ? Promise.resolve()
+          : new Promise((resolve) => {
+              let settled = false;
+              const finish = () => {
+                if (settled) {
+                  return;
+                }
+                settled = true;
+                resolve(null);
+              };
+              const timer = window.setTimeout(finish, 2200);
+              img.addEventListener(
+                'load',
+                () => {
+                  window.clearTimeout(timer);
+                  finish();
+                },
+                { once: true }
+              );
+              img.addEventListener(
+                'error',
+                () => {
+                  window.clearTimeout(timer);
+                  finish();
+                },
+                { once: true }
+              );
+            })
+    )
+  );
+  window.scrollTo(0, 0);
 }
             """.strip(),
             top_crop_css_pixels=settings.story_top_crop,
@@ -762,33 +832,27 @@ async () => {
   if (!(root instanceof HTMLElement)) {
     return false;
   }
-  const content = Array.from(root.children).find((element) => element.tagName !== 'ASIDE');
+  const content = Array.from(root.children).find(
+    (element) => element.tagName !== 'ASIDE'
+  );
   if (!(content instanceof HTMLElement)) {
     return false;
   }
   if (content.getBoundingClientRect().height < 320) {
     return false;
   }
-  const headings = Array.from(content.querySelectorAll('h1, h2, h3'))
-    .map((element) => (element.textContent || '').trim());
-  if (!headings.some((text) => text.includes('基本信息'))) {
-    return false;
-  }
-  if (!headings.some((text) => text.includes('个人档案'))) {
-    return false;
-  }
-  if (!headings.some((text) => text.includes('相关卡牌'))) {
-    return false;
-  }
+  // 角色页标题同样由 i18n 决定；关键数据边界是角色立绘和卡牌列表。
   const heroImage = Array.from(content.querySelectorAll('img')).find((img) =>
     (img.getAttribute('alt') || '').includes('Character Trim')
   );
   if (!heroImage || !heroImage.complete || heroImage.naturalWidth <= 0) {
     return false;
   }
-  const cardLinks = Array.from(content.querySelectorAll('a[href]')).filter((element) => {
+  const cardLinks = Array.from(
+    content.querySelectorAll('a[href]')
+  ).filter((element) => {
     const href = element.getAttribute('href') || '';
-    return /\\/cards\\/\\d+\\/?$/.test(href);
+    return /\\/cards\\/\\d+\\/?(?:[?#].*)?$/.test(href);
   });
   if (!cardLinks.length) {
     return false;
@@ -805,7 +869,9 @@ async () => {
   if (!(root instanceof HTMLElement)) {
     return false;
   }
-  const content = Array.from(root.children).find((element) => element.tagName !== 'ASIDE');
+  const content = Array.from(root.children).find(
+    (element) => element.tagName !== 'ASIDE'
+  );
   if (!(content instanceof HTMLElement)) {
     return false;
   }
@@ -815,9 +881,11 @@ async () => {
   if (!heroImage || !heroImage.complete || heroImage.naturalWidth <= 0) {
     return true;
   }
-  const cardLinks = Array.from(content.querySelectorAll('a[href]')).filter((element) => {
+  const cardLinks = Array.from(
+    content.querySelectorAll('a[href]')
+  ).filter((element) => {
     const href = element.getAttribute('href') || '';
-    return /\\/cards\\/\\d+\\/?$/.test(href);
+    return /\\/cards\\/\\d+\\/?(?:[?#].*)?$/.test(href);
   });
   if (!cardLinks.length) {
     return false;
@@ -829,7 +897,9 @@ async () => {
   if (!hasVisibleCard) {
     return true;
   }
-  return Array.from(content.querySelectorAll('a[href*="/cards/"] svg image')).some((img) => {
+  return Array.from(
+    content.querySelectorAll('a[href*="/cards/"] svg image')
+  ).some((img) => {
     const href =
       img.getAttribute('href') ||
       img.getAttributeNS('http://www.w3.org/1999/xlink', 'href') ||

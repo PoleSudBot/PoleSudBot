@@ -133,7 +133,7 @@ __plugin_meta__ = PluginMetadata(
 """.strip(),
     extra={
         "author": "k1yuyu",
-        "version": "3.2.1",
+        "version": "3.2.2",
         "menu_type": "游戏相关",
         "configs": [
             c.model_dump() if hasattr(c, "model_dump") else c.dict()
