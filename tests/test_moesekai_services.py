@@ -19,6 +19,7 @@ from zhenxun.plugins.moesekai.application import service as service_module
 from zhenxun.plugins.moesekai.providers.aliases import (
     AliasProfile,
 )
+from zhenxun.plugins.moesekai.providers.suite import SuiteB30Data, SuiteProfile
 from zhenxun.plugins.moesekai.screenshot import ScreenshotError
 
 
@@ -61,6 +62,149 @@ async def test_handle_update_uses_default_server(monkeypatch: pytest.MonkeyPatch
         is_superuser=False,
     )
     assert result == "JP 已更新"
+
+
+@pytest.mark.asyncio
+async def test_handle_best30_uses_explicit_uid_without_binding(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_is_qq_blacklisted(*_args, **_kwargs):
+        return None
+
+    async def fake_is_uid_blacklisted(server: str, game_id: str, _is_superuser: bool):
+        assert (server, game_id) == ("jp", "1234567890123")
+        return None
+
+    async def fake_capture(server: str, game_id: str):
+        assert (server, game_id) == ("jp", "1234567890123")
+        return b"best30"
+
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_is_qq_blacklisted",
+        fake_is_qq_blacklisted,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_is_uid_blacklisted",
+        fake_is_uid_blacklisted,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_capture_best30_image",
+        fake_capture,
+    )
+
+    result = await service_module.moesekai_app.handle_best30(
+        "qq",
+        "1163272259",
+        server="jp",
+        game_id="1234567890123",
+        target_user_id=None,
+        is_superuser=False,
+    )
+
+    assert result == b"best30"
+
+
+@pytest.mark.asyncio
+async def test_handle_best30_uses_share_rule_for_at_target(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_is_qq_blacklisted(*_args, **_kwargs):
+        return None
+
+    async def fake_resolve_binding_for_user(
+        platform: str,
+        requester_is_superuser: bool,
+        target_user_id: str,
+        explicit_server: str | None,
+        *,
+        ignore_share: bool = False,
+    ):
+        assert platform == "qq"
+        assert requester_is_superuser is False
+        assert target_user_id == "2233"
+        assert explicit_server is None
+        assert ignore_share is False
+        return SimpleNamespace(server="jp", game_id="1234567890123"), None
+
+    async def fake_capture(server: str, game_id: str):
+        assert (server, game_id) == ("jp", "1234567890123")
+        return b"best30"
+
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_is_qq_blacklisted",
+        fake_is_qq_blacklisted,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_resolve_binding_for_user",
+        fake_resolve_binding_for_user,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_capture_best30_image",
+        fake_capture,
+    )
+
+    result = await service_module.moesekai_app.handle_best30(
+        "qq",
+        "1163272259",
+        server=None,
+        game_id=None,
+        target_user_id="2233",
+        is_superuser=False,
+    )
+
+    assert result == b"best30"
+
+
+@pytest.mark.asyncio
+async def test_build_best30_avatar_uses_default_deck_leader(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_get_card_image(
+        server: str,
+        assetbundle_name: str,
+        *,
+        after_training: bool,
+        thumbnail: bool,
+        timeout: float,
+    ):
+        assert server == "jp"
+        assert assetbundle_name == "card_1182"
+        assert after_training is False
+        assert thumbnail is True
+        assert timeout == 8
+        return b"avatar"
+
+    monkeypatch.setattr(
+        service_module.asset_provider,
+        "get_card_image",
+        fake_get_card_image,
+    )
+
+    suite_data = SuiteB30Data(
+        profile=SuiteProfile("6540035398873094", "kiyu", 495, 1779774627),
+        music_results=[],
+        user_decks=[
+            {"deckId": 1, "leader": 1},
+            {"deckId": 10, "leader": 1182},
+        ],
+        user_cards=[{"cardId": 1182, "defaultImage": "original"}],
+        default_deck_id=10,
+        source_url="https://suite-api.haruki.seiunx.com/public/jp/suite/6540035398873094",
+    )
+
+    avatar_uri = await service_module.moesekai_app._build_best30_avatar_uri(
+        "jp",
+        suite_data,
+        [{"id": 1182, "assetbundleName": "card_1182"}],
+    )
+
+    assert avatar_uri == "data:image/png;base64,YXZhdGFy"
 
 
 @pytest.mark.asyncio

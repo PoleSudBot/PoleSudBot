@@ -57,6 +57,10 @@ __plugin_meta__ = PluginMetadata(
 查看自己的绑定档案，或查询指定游戏 ID / 指定用户的公开档案。
 示例：`个人档案` / `个人档案 @用户` / `查询档案 1234567890123`
 
+`b30 / pjskb30 [区服可选] [游戏ID|@用户可选]`
+查看自己的 Best 30，或查询指定游戏 ID / 指定用户的公开 B30。
+示例：`b30` / `b30 jp` / `pjskb30 1234567890123` / `b30 @用户`
+
 `绑定 [区服可选] <游戏ID>`
 绑定游戏账号，不写区服时默认绑定 `jp`。
 示例：`绑定1234567890123` / `绑定 jp 1234567890123` / `cn绑定 1234567890123`
@@ -67,6 +71,9 @@ __plugin_meta__ = PluginMetadata(
 
 `给看 / 不给看`
 控制别人能否通过“个人档案 @你”或“查询档案 @你”查看你的绑定档案。
+
+`b30 / pjskb30 [区服可选] [游戏ID|@用户可选]`
+查看 Best 30；@ 用户时同样遵守“给看 / 不给看”设置。
 
 ## 🌍 区服与绑定
 `绑定 [区服可选] <游戏ID>`
@@ -133,7 +140,7 @@ __plugin_meta__ = PluginMetadata(
 """.strip(),
     extra={
         "author": "k1yuyu",
-        "version": "3.2.2",
+        "version": "3.3.0",
         "menu_type": "游戏相关",
         "configs": [
             c.model_dump() if hasattr(c, "model_dump") else c.dict()
@@ -141,6 +148,7 @@ __plugin_meta__ = PluginMetadata(
         ],
         "commands": [
             {"command": "个人档案 / 查询档案 / 档案查询 [区服可选] [游戏ID|@用户可选]"},
+            {"command": "b30 / pjskb30 [区服可选] [游戏ID|@用户可选]"},
             {"command": "绑定 [区服可选] <游戏ID>"},
             {"command": "解绑 [区服可选]"},
             {"command": "默认区服 [cn|jp|tw]"},

@@ -13,6 +13,7 @@ handle_default_server = moesekai_app.handle_default_server
 handle_visibility = moesekai_app.handle_visibility
 handle_personal_archive = moesekai_app.handle_personal_archive
 handle_query_archive = moesekai_app.handle_query_archive
+handle_best30 = moesekai_app.handle_best30
 handle_update = moesekai_app.handle_update
 handle_story = moesekai_app.handle_story
 handle_random_manga = moesekai_app.handle_random_manga

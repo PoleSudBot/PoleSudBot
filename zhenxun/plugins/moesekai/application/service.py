@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 import random
 import time
 from typing import Any, AsyncIterator, Awaitable, Callable, Literal
+from urllib.parse import urlsplit
 
 from nonebot.adapters import Bot
 from nonebot.exception import ActionFailed, AdapterException
@@ -15,6 +17,7 @@ from tortoise import Tortoise
 
 from zhenxun.utils.exception import RenderingError
 
+from ..adapters.best30_renderer import Best30RenderError, render_best30_image
 from ..adapters.profile_renderer import render_profile_image
 from ..adapters.reminder_renderer import render_reminder_card
 from ..adapters.results import (
@@ -22,6 +25,14 @@ from ..adapters.results import (
 )
 from ..adapters.runtime import AsyncHttpx, MessageUtils, PlatformUtils, logger
 from ..adapters.viewmodels import ReminderCardViewModel
+from ..b30 import (
+    B30Result,
+    ChartConstant,
+    MusicMeta,
+    b30_constants_provider,
+    calculate_best30,
+    parse_user_music_results,
+)
 from ..command_parser import ParsedCommand
 from ..config import get_settings
 from ..constants import (
@@ -42,6 +53,7 @@ from ..providers import (
     story_cache_provider,
 )
 from ..providers.profile import ProfileRenderError
+from ..providers.suite import SuiteApiError, SuiteB30Data, SuiteProfile, suite_provider
 from ..repositories import (
     add_blacklist_entry,
     create_notification_record,
@@ -412,7 +424,9 @@ class MoeSekaiApplication:
         target_user_id: str | None,
         is_superuser: bool,
     ) -> bytes | str:
-        if error := await self._is_qq_blacklisted(platform, requester_user_id, is_superuser):
+        if error := await self._is_qq_blacklisted(
+            platform, requester_user_id, is_superuser
+        ):
             return error
         if game_id and target_user_id:
             return "查询档案不能同时指定游戏ID和 @用户"
@@ -422,7 +436,9 @@ class MoeSekaiApplication:
                 return "查询档案区服仅支持 cn / jp / tw"
             if error := self.validate_game_id(game_id):
                 return error
-            if error := await self._is_uid_blacklisted(resolved_server, game_id, is_superuser):
+            if error := await self._is_uid_blacklisted(
+                resolved_server, game_id, is_superuser
+            ):
                 return error
             try:
                 return await self._capture_profile_image(resolved_server, game_id)
@@ -440,7 +456,9 @@ class MoeSekaiApplication:
             )
             if error or not resolved_server:
                 return "你还没有绑定任何账号，请先使用“绑定 [区服] <游戏ID>”"
-            binding = await get_user_binding(platform, requester_user_id, resolved_server)
+            binding = await get_user_binding(
+                platform, requester_user_id, resolved_server
+            )
             if not binding:
                 return f"你还没有绑定{server_label(resolved_server)}账号"
             if error := await self._is_uid_blacklisted(
@@ -465,6 +483,247 @@ class MoeSekaiApplication:
             return await self._capture_profile_image(binding.server, binding.game_id)
         except ScreenshotError as exc:
             return exc.to_user_message()
+
+    async def handle_best30(
+        self,
+        platform: str,
+        requester_user_id: str,
+        *,
+        server: str | None,
+        game_id: str | None,
+        target_user_id: str | None,
+        is_superuser: bool,
+    ) -> bytes | str:
+        if error := await self._is_qq_blacklisted(platform, requester_user_id, is_superuser):
+            return error
+        if game_id and target_user_id:
+            return "B30 查询不能同时指定游戏ID和 @用户"
+        if game_id:
+            resolved_server = server or "jp"
+            if resolved_server not in SERVER_SET:
+                return "B30 区服仅支持 cn / jp / tw"
+            if error := self.validate_game_id(game_id):
+                return error
+            if error := await self._is_uid_blacklisted(resolved_server, game_id, is_superuser):
+                return error
+            return await self._capture_best30_image(resolved_server, game_id)
+
+        query_self = target_user_id is None or target_user_id == requester_user_id
+        if query_self:
+            resolved_server, error = await self._resolve_default_server(
+                platform,
+                requester_user_id,
+                explicit_server=server,
+                fallback_jp=False,
+            )
+            if error or not resolved_server:
+                return "你还没有绑定任何账号，请先使用“绑定 [区服] <游戏ID>”"
+            binding = await get_user_binding(platform, requester_user_id, resolved_server)
+            if not binding:
+                return f"你还没有绑定{server_label(resolved_server)}账号"
+            if error := await self._is_uid_blacklisted(
+                binding.server, binding.game_id, is_superuser
+            ):
+                return error
+            return await self._capture_best30_image(binding.server, binding.game_id)
+
+        binding, error = await self._resolve_binding_for_user(
+            platform,
+            is_superuser,
+            target_user_id,
+            server,
+        )
+        if error:
+            return error
+        return await self._capture_best30_image(binding.server, binding.game_id)
+
+    async def _capture_best30_image(self, server: str, game_id: str) -> bytes | str:
+        try:
+            return await self._build_best30_image(server, game_id)
+        except SuiteApiError:
+            logger.warning(
+                f"MoeSekai B30 Suite 数据获取失败: {server}/{game_id}",
+                MODULE_NAME,
+            )
+            return "B30 数据获取失败，请确认该账号已上传 Suite 数据后稍后重试"
+        except (Best30RenderError, RenderingError) as exc:
+            logger.warning(
+                f"MoeSekai B30 图片渲染失败: {server}/{game_id}",
+                MODULE_NAME,
+                e=exc,
+            )
+            return "B30 图片渲染失败，请稍后重试"
+        except ValueError as exc:
+            logger.warning(
+                f"MoeSekai B30 数据处理失败: {server}/{game_id}",
+                MODULE_NAME,
+                e=exc,
+            )
+            return f"B30 数据处理失败：{exc}"
+
+    async def _build_best30_image(self, server: str, game_id: str) -> bytes:
+        suite_data = await suite_provider.get_b30_data(server, game_id)
+        table = await b30_constants_provider.get_table()
+        musics, cards = await asyncio.gather(
+            master_data_provider.get_musics(server),
+            master_data_provider.get_cards(server),
+        )
+        music_map: dict[int, dict[str, Any]] = {}
+        for music in musics:
+            if not isinstance(music, dict):
+                continue
+            try:
+                music_id = int(music.get("id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if music_id > 0:
+                music_map[music_id] = music
+
+        def resolve_meta(
+            music_id: int, _difficulty: str, _constant: ChartConstant
+        ) -> MusicMeta:
+            music = music_map.get(music_id) or {}
+            return MusicMeta(
+                music_id=music_id,
+                title=str(music.get("title") or ""),
+                assetbundle_name=str(music.get("assetbundleName") or ""),
+                published_at=int(music.get("publishedAt") or 0),
+            )
+
+        # 先用 MasterData 补曲目信息，再集中补曲绘，保证定数计算和资源抓取解耦。
+        result = calculate_best30(
+            parse_user_music_results(suite_data.music_results),
+            table,
+            resolve_meta,
+        )
+        avatar_uri, _missing_jacket_count = await asyncio.gather(
+            self._build_best30_avatar_uri(server, suite_data, cards),
+            self._attach_best30_jackets(server, result),
+        )
+        sources = [
+            f"suite数据来源：{self._source_origin(suite_data.source_url)}",
+            f"定数来源：{self._source_origin(b30_constants_provider.source_url())}",
+        ]
+        return await render_best30_image(
+            server=server,
+            profile=SuiteProfile(
+                user_id=suite_data.profile.user_id,
+                name=suite_data.profile.name,
+                rank=suite_data.profile.rank,
+                upload_time=suite_data.profile.upload_time,
+                avatar_uri=avatar_uri,
+                name_color=suite_data.profile.name_color,
+            ),
+            result=result,
+            sources=sources,
+            warnings=[],
+        )
+
+    async def _build_best30_avatar_uri(
+        self,
+        server: str,
+        suite_data: SuiteB30Data,
+        cards: list[dict[str, Any]],
+    ) -> str:
+        card_map: dict[int, dict[str, Any]] = {}
+        for card in cards:
+            if isinstance(card, dict):
+                card_id = self._to_int(card.get("id"))
+                if card_id > 0:
+                    card_map[card_id] = card
+
+        user_card_map: dict[int, dict[str, Any]] = {}
+        for user_card in suite_data.user_cards:
+            if isinstance(user_card, dict):
+                card_id = self._to_int(user_card.get("cardId"))
+                if card_id > 0:
+                    user_card_map[card_id] = user_card
+
+        leader_card_id = self._resolve_best30_leader_card_id(suite_data)
+        if leader_card_id <= 0:
+            return ""
+        master_card = card_map.get(leader_card_id)
+        if not master_card:
+            return ""
+        assetbundle_name = str(master_card.get("assetbundleName") or "").strip()
+        if not assetbundle_name:
+            return ""
+
+        user_card = user_card_map.get(leader_card_id, {})
+        after_training = str(user_card.get("defaultImage") or "") == "special_training"
+        # 头像只作为视觉增强，任何资源缺失都回退占位，不影响 B30 主结果输出。
+        candidate_after_training_values = (True, False) if after_training else (False,)
+        for candidate_after_training in candidate_after_training_values:
+            content = await asset_provider.get_card_image(
+                server,
+                assetbundle_name,
+                after_training=candidate_after_training,
+                thumbnail=True,
+                timeout=8,
+            )
+            if content:
+                encoded = base64.b64encode(content).decode("ascii")
+                return f"data:image/png;base64,{encoded}"
+        return ""
+
+    def _resolve_best30_leader_card_id(self, suite_data: SuiteB30Data) -> int:
+        deck = None
+        for item in suite_data.user_decks:
+            if not isinstance(item, dict):
+                continue
+            if self._to_int(item.get("deckId")) == suite_data.default_deck_id:
+                deck = item
+                break
+        if deck is None and suite_data.user_decks:
+            first_deck = suite_data.user_decks[0]
+            deck = first_deck if isinstance(first_deck, dict) else None
+        if not deck:
+            return 0
+        return self._to_int(deck.get("leader") or deck.get("member1"))
+
+    @staticmethod
+    def _source_origin(url: str) -> str:
+        # B30 页脚只展示来源站点，避免把 UID、字段过滤参数等查询细节带到图片里。
+        split = urlsplit(url)
+        if split.scheme and split.netloc:
+            return f"{split.scheme}://{split.netloc}"
+        return url
+
+    @staticmethod
+    def _to_int(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    async def _attach_best30_jackets(self, server: str, result: B30Result) -> int:
+        async def build_jacket_uri(assetbundle_name: str) -> str:
+            if not assetbundle_name:
+                return ""
+            content = await asset_provider.get_music_jacket(
+                server,
+                assetbundle_name,
+                timeout=8,
+            )
+            if not content:
+                return ""
+            encoded = base64.b64encode(content).decode("ascii")
+            return f"data:image/png;base64,{encoded}"
+
+        tasks = [
+            build_jacket_uri(entry.assetbundle_name)
+            for entry in result.entries
+        ]
+        if not tasks:
+            return 0
+        jacket_uris = await asyncio.gather(*tasks, return_exceptions=True)
+        missing_count = 0
+        for entry, jacket_uri in zip(result.entries, jacket_uris, strict=True):
+            if isinstance(jacket_uri, str) and jacket_uri:
+                entry.jacket_uri = jacket_uri
+            else:
+                missing_count += 1
+        return missing_count
 
     async def handle_update(
         self,

@@ -13,6 +13,7 @@ import pytest
 nonebot.init()
 
 from zhenxun.plugins.moesekai.constants import SCOPE_GLOBAL
+from zhenxun.plugins.moesekai.providers import suite as suite_module
 from zhenxun.plugins.moesekai.providers.aliases import AliasProvider
 from zhenxun.plugins.moesekai.providers.asset_cache import (
     AssetCacheProvider as CompatAssetCacheProvider,
@@ -31,6 +32,7 @@ from zhenxun.plugins.moesekai.providers.profile import (
     ProfileStaticAssetProvider,
 )
 from zhenxun.plugins.moesekai.providers.story_cache import StoryCacheProvider
+from zhenxun.plugins.moesekai.providers.suite import SuiteProvider
 from zhenxun.plugins.moesekai.storage import BinaryFileCacheStore, PathBinaryFileStore
 from zhenxun.plugins.moesekai.storage.state import JsonStateStore
 import zhenxun.services.sekai_resource.asset_cache as service_asset_cache_module
@@ -39,6 +41,77 @@ from zhenxun.services.sekai_resource.asset_fetcher import asset_fetcher
 from zhenxun.services.sekai_resource.assets import AssetProvider
 from zhenxun.services.sekai_resource.master_data import MasterDataProvider
 from zhenxun.utils.exception import AllURIsFailedError
+
+
+def test_suite_provider_build_url_adds_field_filter():
+    url = SuiteProvider.build_url(
+        "https://suite-api.haruki.seiunx.com/public/{server}/suite/{game_id}",
+        "jp",
+        "6540035398873094",
+    )
+
+    assert url == (
+        "https://suite-api.haruki.seiunx.com/public/jp/suite/6540035398873094"
+        "?key=upload_time%2CuserGamedata%2CuserMusicResults%2CuserDecks%2CuserCards"
+    )
+
+
+@pytest.mark.asyncio
+async def test_suite_provider_get_b30_data_parses_raw_json_response(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeResponse:
+        def json(self):
+            return {
+                "upload_time": 1779774627,
+                "userGamedata": {
+                    "userId": 6540035398873094,
+                    "name": "<#f90>kiyu",
+                    "rank": 494,
+                    "deck": 10,
+                },
+                "userMusicResults": [{"musicId": 1, "playResult": "full_perfect"}],
+                "userDecks": [{"deckId": 10, "leader": 1182}],
+                "userCards": [{"cardId": 1182, "defaultImage": "original"}],
+            }
+
+    async def fake_get(url: str, *, timeout: float):
+        assert (
+            "key=upload_time%2CuserGamedata%2CuserMusicResults%2CuserDecks%2CuserCards"
+            in url
+        )
+        assert timeout == 20.0
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        suite_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            suite_api_url_pattern=(
+                "https://suite-api.haruki.seiunx.com/public/{server}/suite/{game_id}"
+            ),
+            suite_api_timeout_seconds=20.0,
+        ),
+    )
+    monkeypatch.setattr(suite_module.AsyncHttpx, "get", fake_get)
+
+    data = await SuiteProvider().get_b30_data("jp", "6540035398873094")
+
+    assert data.profile.user_id == "6540035398873094"
+    assert data.profile.name == "kiyu"
+    assert data.profile.name_color == "#ff9900"
+    assert data.profile.rank == 494
+    assert data.music_results == [{"musicId": 1, "playResult": "full_perfect"}]
+    assert data.user_decks == [{"deckId": 10, "leader": 1182}]
+    assert data.user_cards == [{"cardId": 1182, "defaultImage": "original"}]
+    assert data.default_deck_id == 10
+
+
+def test_suite_profile_name_without_color_keeps_empty_name_color():
+    name, color = suite_module._parse_colored_name("kiyu")
+
+    assert name == "kiyu"
+    assert color == ""
 
 
 def test_moesekai_resource_provider_compat_exports():
