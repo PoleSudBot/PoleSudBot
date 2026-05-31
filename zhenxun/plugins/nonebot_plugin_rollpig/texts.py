@@ -59,6 +59,7 @@ FOOD_PIG_IDS = [
     "suckling-pig",
     "burger-pig",
     "lard-pig",
+    "salmon-sushi-pig",
 ]
 
 # --- 人类形态 ID ---

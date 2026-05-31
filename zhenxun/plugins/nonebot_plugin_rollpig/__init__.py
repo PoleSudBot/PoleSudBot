@@ -107,7 +107,7 @@ __plugin_meta__ = PluginMetadata(
     config=Config,
     extra={
         "author": "Felis2026",
-        "version": "0.5.1",
+        "version": "0.5.2",
         "configs": [
             {
                 "module": MODULE_NAME,
