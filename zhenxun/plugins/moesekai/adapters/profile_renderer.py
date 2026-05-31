@@ -4,12 +4,12 @@ import asyncio
 import base64
 import json
 from pathlib import Path
+import re
 from typing import Any
 from urllib.parse import quote
 
 from zhenxun.utils.exception import RenderingError
 
-from .runtime import AsyncHttpx, logger
 from ..config import get_settings
 from ..constants import MODULE_NAME
 from ..providers import asset_provider, master_data_provider
@@ -21,8 +21,11 @@ from ..providers.profile import (
     profile_provider,
     profile_static_asset_provider,
 )
+from .runtime import AsyncHttpx, logger
 
-_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "templates" / "profile" / "index.html"
+_TEMPLATE_PATH = (
+    Path(__file__).resolve().parent.parent / "templates" / "profile" / "index.html"
+)
 _PROFILE_DATA_DIR = _TEMPLATE_PATH.parent / "data"
 _PROFILE_ATTR_ICON_DIR = _PROFILE_DATA_DIR / "attr"
 _PROFILE_UNIT_ICON_DIR = _PROFILE_DATA_DIR / "icon"
@@ -101,6 +104,7 @@ _CHAR_COLORS = {
     "25": "#DD4444",
     "26": "#3366CC",
 }
+_NAME_COLOR_RE = re.compile(r"^<#(?P<color>[0-9a-fA-F]{3}|[0-9a-fA-F]{6})>")
 
 
 def _shade_color(color: str, percent: int) -> str:
@@ -164,7 +168,23 @@ def _normalize_star_view(rarity: str) -> tuple[int, bool]:
     return 1, False
 
 
-def _build_credits_list(deck: dict[str, Any], credits_data: dict[str, Any]) -> list[dict[str, str]]:
+def _split_display_name_color(value: Any) -> tuple[str, str]:
+    # Suite 昵称可能带前置颜色标签，模板需要把颜色和实际昵称分开渲染。
+    text = str(value or "").strip() or "Unknown"
+    match = _NAME_COLOR_RE.match(text)
+    if not match:
+        return text, ""
+    color = match.group("color")
+    if len(color) == 3:
+        color = "".join(part * 2 for part in color)
+    name = text[match.end() :] or text
+    return name, f"#{color.lower()}"
+
+
+def _build_credits_list(
+    deck: dict[str, Any],
+    credits_data: dict[str, Any],
+) -> list[dict[str, str]]:
     members = deck.get("members") if isinstance(deck, dict) else []
     if not isinstance(members, list) or not isinstance(credits_data, dict):
         return []
@@ -261,13 +281,18 @@ async def _ensure_chibi_uri(member: dict[str, Any]) -> str:
         )
     relative_fallbacks.extend(["base_chibis/1.webp", "base_chibis/1.png"])
 
-    local_path = await profile_static_asset_provider.ensure_local_path(relative_fallbacks)
+    local_path = await profile_static_asset_provider.ensure_local_path(
+        relative_fallbacks
+    )
     if local_path is None:
         raise ProfileAssetError(f"小人资源缺失: {card_id}")
     return local_path.absolute().as_uri()
 
 
-async def _build_honor_view_model(honor: dict[str, Any], theme_color: str) -> dict[str, Any]:
+async def _build_honor_view_model(
+    honor: dict[str, Any],
+    theme_color: str,
+) -> dict[str, Any]:
     rarity = str(honor.get("rarity") or "low").strip() or "low"
     deco_uri = None
     middle_uri = None
@@ -279,7 +304,9 @@ async def _build_honor_view_model(honor: dict[str, Any], theme_color: str) -> di
         if svg_content:
             deco_uri = _svg_data_uri(svg_content, theme_color)
     if middle_file:
-        svg_content = await profile_static_asset_provider.get_honor_asset_svg(middle_file)
+        svg_content = await profile_static_asset_provider.get_honor_asset_svg(
+            middle_file
+        )
         if svg_content:
             middle_uri = _svg_data_uri(svg_content, theme_color)
 
@@ -296,7 +323,10 @@ async def _build_honor_view_model(honor: dict[str, Any], theme_color: str) -> di
     style = {}
     if not deco_file:
         style = {
-            "background": f"linear-gradient(90deg, {theme_color}18, {theme_color}08, {theme_color}18)",
+            "background": (
+                f"linear-gradient(90deg, {theme_color}18, "
+                f"{theme_color}08, {theme_color}18)"
+            ),
             "border": f"2px solid {theme_color}44",
         }
     elif middle_uri:
@@ -309,7 +339,9 @@ async def _build_honor_view_model(honor: dict[str, Any], theme_color: str) -> di
         "middleUri": middle_uri,
         "capsuleClasses": " ".join(capsule_classes),
         "capsuleStyle": "; ".join(f"{key}: {value}" for key, value in style.items()),
-        "isRankingHonor": str(honor.get("assetbundleName") or "").startswith("honor_top_"),
+        "isRankingHonor": str(honor.get("assetbundleName") or "").startswith(
+            "honor_top_"
+        ),
         "displayTag": str(honor.get("levelDisplay") or f"Lv.{honor.get('level') or 1}"),
     }
 
@@ -425,12 +457,19 @@ async def _build_render_payload(server: str, game_id: str) -> dict[str, Any]:
 
     challenge_live = processed.get("challengeLive")
     challenge_info = None
-    if isinstance(challenge_live, dict) and int(challenge_live.get("displayCharacterId") or 0) > 0:
+    if (
+        isinstance(challenge_live, dict)
+        and int(challenge_live.get("displayCharacterId") or 0) > 0
+    ):
         challenge_character_id = int(challenge_live.get("displayCharacterId") or 0)
         challenge_info = {
             "charName": _CHAR_NAMES.get(challenge_character_id, "挑战演出"),
             "score": f"{int(challenge_live.get('displayHighScore') or 0):,}",
         }
+
+    display_name, display_name_color = _split_display_name_color(
+        processed.get("name") or "Unknown"
+    )
 
     return {
         "server": server,
@@ -441,7 +480,8 @@ async def _build_render_payload(server: str, game_id: str) -> dict[str, Any]:
         "themeDark": theme_dark,
         "avatarUri": avatar_uri,
         "processed": processed,
-        "displayName": str(processed.get("name") or "Unknown"),
+        "displayName": display_name,
+        "displayNameColor": display_name_color,
         "displayRank": int(processed.get("rank") or 0),
         "displayPower": f"{int(processed.get('totalPower') or 0):,}",
         "displayWord": str(processed.get("word") or "这个人很懒，什么都没写~"),

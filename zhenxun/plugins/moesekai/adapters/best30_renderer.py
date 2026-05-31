@@ -15,7 +15,6 @@ from ..providers.suite import SuiteProfile
 _TEMPLATE_PATH = (
     Path(__file__).resolve().parent.parent / "templates" / "best30" / "index.html"
 )
-_FONT_DIR = Path(__file__).resolve().parents[4] / "resources" / "font"
 
 
 class Best30RenderError(RuntimeError):
@@ -28,11 +27,6 @@ def _format_time(timestamp: int) -> str:
     if timestamp > 10_000_000_000:
         timestamp = int(timestamp / 1000)
     return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _font_uri(filename: str) -> str:
-    path = _FONT_DIR / filename
-    return path.absolute().as_uri() if path.exists() else ""
 
 
 async def render_best30_image(
@@ -57,11 +51,6 @@ async def render_best30_image(
         "totalResultCount": result.total_result_count,
         "sources": sources,
         "warnings": warnings,
-        "fontUris": {
-            "regular": _font_uri("HarmonyOS_Sans_SC_Regular.ttf"),
-            "medium": _font_uri("HarmonyOS_Sans_SC_Medium.ttf"),
-            "bold": _font_uri("HarmonyOS_Sans_SC_Bold.ttf"),
-        },
     }
     try:
         from zhenxun import ui

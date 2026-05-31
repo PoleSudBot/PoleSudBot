@@ -14,10 +14,13 @@
     --red: rgba(255, 93, 143, 0.84);
     --purple: rgba(139, 92, 246, 0.84);
     --ap-blue: #1898ff;
+    --font-main: "HarmonyOS Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif;
+    --font-header: var(--font-main);
 }
 
 * {
     box-sizing: border-box;
+    font-synthesis: none;
 }
 
 body {
@@ -25,7 +28,7 @@ body {
     min-height: 100vh;
     background: #fff7fb;
     color: var(--text);
-    font-family: "HarmonyOS Sans SC", "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+    font-family: var(--font-main);
 }
 
 .page {
@@ -71,7 +74,7 @@ body {
     background: var(--primary-soft);
     color: var(--primary-dark);
     font-size: 38px;
-    font-weight: 900;
+    font-weight: 700;
 }
 
 .avatar img {
@@ -94,7 +97,7 @@ body {
     flex: 0 0 auto;
     flex-direction: column;
     justify-content: center;
-    gap: 5px;
+    gap: 3px;
     padding: 10px 12px;
     border-left: 1px solid var(--border);
 }
@@ -104,16 +107,17 @@ body {
     min-width: 0;
     align-items: center;
     gap: 8px;
+    padding-block: 2px;
 }
 
 h1 {
     margin: 0;
     min-width: 0;
-    overflow: hidden;
+    overflow: visible;
     color: var(--text);
-    font-size: 32px;
-    line-height: 1.15;
-    font-weight: 900;
+    font-size: 26px;
+    line-height: 1.25;
+    font-weight: 700;
     text-overflow: ellipsis;
     text-shadow: 0 2px 5px rgba(213, 90, 133, 0.16);
     white-space: nowrap;
@@ -123,19 +127,20 @@ h1 {
     display: inline-flex;
     flex: 0 0 auto;
     align-items: center;
-    padding: 3px 8px;
+    padding: 2px 7px;
     border: 1px solid rgba(223, 63, 128, 0.12);
     border-radius: 999px;
     background: rgba(244, 91, 148, 0.86);
     color: #ffffff;
-    font-size: 13px;
-    font-weight: 900;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.25;
 }
 
 .profile-line {
     color: var(--muted);
     font-size: 14px;
-    font-weight: 700;
+    font-weight: 500;
 }
 
 .avg-panel {
@@ -149,7 +154,7 @@ h1 {
 .avg-label {
     color: var(--muted);
     font-size: 11px;
-    font-weight: 900;
+    font-weight: 700;
 }
 
 .avg-value {
@@ -157,19 +162,19 @@ h1 {
     color: var(--primary-dark);
     font-size: 44px;
     line-height: 1;
-    font-weight: 900;
+    font-weight: 700;
 }
 
 .formula-panel span {
     color: var(--primary-dark);
     font-size: 14px;
-    font-weight: 900;
+    font-weight: 700;
 }
 
 .formula-panel small {
     color: var(--muted);
     font-size: 11px;
-    font-weight: 800;
+    font-weight: 600;
     line-height: 1.45;
 }
 
@@ -200,7 +205,7 @@ h1 {
     background: var(--primary-soft);
     color: var(--primary-dark);
     font-size: 11px;
-    font-weight: 900;
+    font-weight: 700;
 }
 
 .jacket img {
@@ -218,7 +223,7 @@ h1 {
     border-radius: 0 6px 0 6px;
     color: #ffffff;
     font-size: 12px;
-    font-weight: 900;
+    font-weight: 700;
     line-height: 1;
     text-align: center;
 }
@@ -269,29 +274,34 @@ h1 {
     min-width: 0;
     overflow: hidden;
     color: var(--text);
+    font-family: var(--font-header);
     font-size: 14.5px;
+    font-kerning: none;
     line-height: 1.25;
-    font-weight: 900;
+    font-weight: 700;
+    letter-spacing: 0;
     text-overflow: ellipsis;
+    text-rendering: geometricPrecision;
     white-space: nowrap;
+    word-spacing: 0;
 }
 
 .constant-raw {
     flex: 0 0 auto;
     color: #4f4654;
     font-size: 14px;
-    font-weight: 900;
+    font-weight: 700;
 }
 
 .rating-value {
     color: var(--primary-dark);
     font-size: 18px;
-    font-weight: 900;
+    font-weight: 700;
 }
 
 .play-result {
     font-size: 16px;
-    font-weight: 900;
+    font-weight: 700;
     letter-spacing: 0;
     text-shadow: 0 2px 5px rgba(213, 90, 133, 0.18);
 }
@@ -319,9 +329,20 @@ h1 {
     padding: 0 12px;
     background: transparent;
     color: #9f929c;
+    font-family: var(--font-main);
     font-size: 9px;
     line-height: 1.25;
-    font-weight: 700;
+    font-weight: 500;
+    font-kerning: none;
+    letter-spacing: 0;
     text-align: center;
+    text-rendering: geometricPrecision;
+    white-space: nowrap;
+    word-spacing: 0;
+}
+
+.footer div {
+    display: block;
+    margin: 0;
     white-space: nowrap;
 }

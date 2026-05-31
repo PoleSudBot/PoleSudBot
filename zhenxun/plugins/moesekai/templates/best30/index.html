@@ -5,21 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>MoeSekai B30</title>
     <style>
-        @font-face {
-            font-family: "HarmonyOS Sans SC";
-            src: url("{{ fontUris.regular }}") format("truetype");
-            font-weight: 400;
-        }
-        @font-face {
-            font-family: "HarmonyOS Sans SC";
-            src: url("{{ fontUris.medium }}") format("truetype");
-            font-weight: 700;
-        }
-        @font-face {
-            font-family: "HarmonyOS Sans SC";
-            src: url("{{ fontUris.bold }}") format("truetype");
-            font-weight: 900;
-        }
+        {% include "assets/css/base/_fonts.css" %}
     </style>
     <link rel="stylesheet" href="./style.css">
 </head>
@@ -48,7 +34,8 @@
                 </div>
                 <div class="formula-panel">
                     <span>社区定数，仅供娱乐</span>
-                    <small>AP = 定数(C) · FC = C - 1 (C ≥ 33) / C - 1.5 (C &lt; 33)</small>
+                    <small>AP = 定数(C)</small>
+                    <small>FC = C - 1 (C ≥ 33) / C - 1.5 (C &lt; 33)</small>
                 </div>
             </div>
             <div class="avg-panel">

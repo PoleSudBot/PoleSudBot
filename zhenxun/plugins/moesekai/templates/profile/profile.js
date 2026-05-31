@@ -2,6 +2,9 @@
   const page = window.__PROFILE_PAGE__ || {};
   const characterRanks = page.characterRanks || {};
   const themeColor = page.themeColor || "#33ccbb";
+  const fontFamily =
+    window.getComputedStyle(document.body).fontFamily ||
+    '"HarmonyOS Sans SC", sans-serif';
   const CHAR_NAMES = {
     1: "一歌",
     2: "咲希",
@@ -142,7 +145,11 @@
           datalabels: {
             display: true,
             color: "#333",
-            font: { weight: "bold", size: dataLabelFontSize },
+            font: {
+              family: fontFamily,
+              weight: "700",
+              size: dataLabelFontSize,
+            },
             align: function (context) {
               const value = context.dataset.data[context.dataIndex];
               const scaleMax = context.chart.scales.r.max || suggestedMax;
@@ -164,7 +171,7 @@
             pointLabels: {
               display: true,
               padding: 5,
-              font: { size: labelFontSize, weight: "600" },
+              font: { family: fontFamily, size: labelFontSize, weight: "700" },
               color: "#666",
             },
             grid: { color: "rgba(0,0,0,0.05)" },

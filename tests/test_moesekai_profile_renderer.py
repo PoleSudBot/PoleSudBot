@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from jinja2 import Environment, FileSystemLoader
+from jinja2 import ChoiceLoader, Environment, FileSystemLoader
 import nonebot
 import pytest
 
@@ -11,6 +11,9 @@ nonebot.init()
 
 from zhenxun import ui
 from zhenxun.plugins.moesekai.adapters import profile_renderer
+
+_ROOT_DIR = Path(__file__).resolve().parents[1]
+_PSB_THEME_DIR = _ROOT_DIR / "resources" / "themes" / "psb"
 
 
 class _FakeSettings:
@@ -38,18 +41,29 @@ class _FakeResponse:
 def _render_profile_template(
     theme_color: str,
     *,
+    display_name: str = "测试玩家",
+    display_name_color: str = "",
     theme_light: str | None = None,
     theme_dark: str | None = None,
 ) -> str:
     template_dir = Path(profile_renderer._TEMPLATE_PATH).parent
-    env = Environment(loader=FileSystemLoader(str(template_dir)))
+    env = Environment(
+        loader=ChoiceLoader(
+            [
+                FileSystemLoader(str(template_dir)),
+                FileSystemLoader(str(_PSB_THEME_DIR)),
+            ]
+        )
+    )
+    env.globals["asset"] = lambda path: f"file:///{path}"
     template = env.get_template("index.html")
     return template.render(
         themeColor=theme_color,
         themeLight=theme_light or f"{theme_color}22",
         themeDark=theme_dark or theme_color,
         avatarUri="file:///tmp/avatar.png",
-        displayName="测试玩家",
+        displayName=display_name,
+        displayNameColor=display_name_color,
         displayRank=88,
         displayPower="350,000",
         displayWord="测试签名",
@@ -128,7 +142,7 @@ async def test_build_render_payload_prefers_leader_character_for_theme_and_foote
 
     def fake_process(*args, **kwargs):
         return {
-            "name": "测试玩家",
+            "name": "<#f90>测试玩家",
             "rank": 88,
             "word": "",
             "totalPower": 350000,
@@ -171,8 +185,16 @@ async def test_build_render_payload_prefers_leader_character_for_theme_and_foote
         "get_raw_profile",
         fake_get_raw_profile,
     )
-    monkeypatch.setattr(profile_renderer.master_data_provider, "get_cards", fake_get_cards)
-    monkeypatch.setattr(profile_renderer.master_data_provider, "get_honors", fake_get_honors)
+    monkeypatch.setattr(
+        profile_renderer.master_data_provider,
+        "get_cards",
+        fake_get_cards,
+    )
+    monkeypatch.setattr(
+        profile_renderer.master_data_provider,
+        "get_honors",
+        fake_get_honors,
+    )
     monkeypatch.setattr(
         profile_renderer.master_data_provider,
         "get_honor_groups",
@@ -186,13 +208,20 @@ async def test_build_render_payload_prefers_leader_character_for_theme_and_foote
         "get_credits",
         fake_get_credits,
     )
-    monkeypatch.setattr(profile_renderer, "_load_announcement_html", fake_load_announcement)
+    monkeypatch.setattr(
+        profile_renderer,
+        "_load_announcement_html",
+        fake_load_announcement,
+    )
 
     payload = await profile_renderer._build_render_payload("jp", "123")
 
     assert payload["themeColor"] == "#ee6666"
     assert payload["footerCharacterName"] == "穗波"
     assert payload["avatarUri"] == "file:///tmp/1001.png"
+    assert payload["displayName"] == "测试玩家"
+    assert payload["displayNameColor"] == "#ff9900"
+    assert "fontUris" not in payload
 
 
 @pytest.mark.asyncio
@@ -237,7 +266,12 @@ async def test_load_announcement_html_parses_json_payload(
 
 
 def test_profile_template_applies_runtime_theme_variables_after_stylesheet():
-    html = _render_profile_template("#ee6666", theme_dark="#d95a5a")
+    html = _render_profile_template(
+        "#ee6666",
+        display_name="kiyu",
+        display_name_color="#ff9900",
+        theme_dark="#d95a5a",
+    )
 
     stylesheet_index = html.index('<link rel="stylesheet" href="./style.css">')
     theme_style_index = html.index("<style>", stylesheet_index)
@@ -246,7 +280,27 @@ def test_profile_template_applies_runtime_theme_variables_after_stylesheet():
     assert "--theme-color: #ee6666;" in html
     assert "--theme-light: #ee666622;" in html
     assert "--theme-dark: #d95a5a;" in html
-    assert "主题色 <span style=\"color: #ee6666; font-weight: bold;\">#ee6666</span>" in html
+    assert "@font/HarmonyOS_Sans_SC/HarmonyOS_SansSC_Regular.ttf" in html
+    assert 'style="color: #ff9900 !important;"' in html
+    assert (
+        '<span class="footer-highlight" style="color: #ee6666;">#ee6666</span>'
+        in html
+    )
+
+
+def test_profile_template_uses_theme_font_for_profile_text_and_chart():
+    template_dir = Path(profile_renderer._TEMPLATE_PATH).parent
+    stylesheet = (template_dir / "style.css").read_text(encoding="utf-8")
+    script = (template_dir / "profile.js").read_text(encoding="utf-8")
+
+    assert ".user-id" in stylesheet
+    assert ".credit-card-id" in stylesheet
+    assert "font-family: var(--font-main);" in stylesheet
+    assert "font-family: monospace" not in stylesheet
+    assert "SF Mono" not in stylesheet
+    assert "const fontFamily =" in script
+    assert "family: fontFamily" in script
+    assert 'weight: "700"' in script
 
 
 def test_profile_template_keeps_default_theme_fallback_values_renderable():

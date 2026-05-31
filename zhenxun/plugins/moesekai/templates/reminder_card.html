@@ -4,6 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <style>
+    {% include "assets/css/base/_fonts.css" %}
+
     :root {
       --primary: {{ data.theme_config.primary }};
       --primary-dark: {{ data.theme_config.primary_dark }};
@@ -14,11 +16,12 @@
       --bg-card: {{ data.theme_config.bg_card }};
       --border-light: {{ data.theme_config.border_light }};
       --shadow-soft: 0 12px 32px -4px rgba(0, 0, 0, 0.04), 0 4px 12px -2px rgba(0, 0, 0, 0.02);
-      --font-main: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      --font-main: "HarmonyOS Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif;
     }
 
     * {
       box-sizing: border-box;
+      font-synthesis: none;
       margin: 0;
       padding: 0;
     }

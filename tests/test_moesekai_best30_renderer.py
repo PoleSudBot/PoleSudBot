@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from jinja2 import Environment, FileSystemLoader
+from jinja2 import ChoiceLoader, Environment, FileSystemLoader, PrefixLoader
 import nonebot
 import pytest
 
@@ -12,6 +12,11 @@ from zhenxun import ui
 from zhenxun.plugins.moesekai.adapters import best30_renderer
 from zhenxun.plugins.moesekai.b30 import B30Entry, B30Result
 from zhenxun.plugins.moesekai.providers.suite import SuiteProfile
+from zhenxun.services.renderer.theme import ThemeManager
+
+_ROOT_DIR = Path(__file__).resolve().parents[1]
+_PSB_THEME_DIR = _ROOT_DIR / "resources" / "themes" / "psb"
+_FONT_DIR = _ROOT_DIR / "resources" / "font"
 
 
 class _FakeSettings:
@@ -51,9 +56,7 @@ async def test_render_best30_image_uses_ui_template_with_sources(
     async def fake_render_template(path, data, **kwargs):
         assert path == best30_renderer._TEMPLATE_PATH
         assert data["sources"] == ["Suite", "Constants"]
-        assert data["fontUris"]["regular"].endswith(
-            "resources/font/HarmonyOS_Sans_SC_Regular.ttf"
-        )
+        assert "fontUris" not in data
         assert kwargs["viewport"] == {"width": 980, "height": 10}
         assert kwargs["is_page"] is True
         return b"best30-image"
@@ -83,7 +86,15 @@ async def test_render_best30_image_uses_ui_template_with_sources(
 
 def test_best30_template_renders_footer_sources():
     template_dir = Path(best30_renderer._TEMPLATE_PATH).parent
-    env = Environment(loader=FileSystemLoader(str(template_dir)))
+    env = Environment(
+        loader=ChoiceLoader(
+            [
+                FileSystemLoader(str(template_dir)),
+                FileSystemLoader(str(_PSB_THEME_DIR)),
+            ]
+        )
+    )
+    env.globals["asset"] = lambda path: f"file:///{path}"
     template = env.get_template("index.html")
 
     html = template.render(
@@ -97,11 +108,6 @@ def test_best30_template_renders_footer_sources():
         },
         updatedText="2026-05-28 12:00",
         averageText="30.00",
-        fontUris={
-            "regular": "file:///resources/font/HarmonyOS_Sans_SC_Regular.ttf",
-            "medium": "file:///resources/font/HarmonyOS_Sans_SC_Medium.ttf",
-            "bold": "file:///resources/font/HarmonyOS_Sans_SC_Bold.ttf",
-        },
         entries=[
             {
                 "title": "测试歌曲",
@@ -127,6 +133,7 @@ def test_best30_template_renders_footer_sources():
     )
 
     assert "HarmonyOS Sans SC" in html
+    assert "@font/HarmonyOS_Sans_SC/HarmonyOS_SansSC_Regular.ttf" in html
     assert "社区定数，仅供娱乐" in html
     assert "AP = 定数" in html
     assert 'style="color: #ff9900 !important;"' in html
@@ -149,3 +156,24 @@ def test_best30_template_renders_footer_sources():
     assert "#05" not in html
     assert "Lv.30" not in html
     assert "notes" not in html.lower()
+
+
+def test_standalone_asset_loader_resolves_shared_font_namespace():
+    manager = ThemeManager()
+    manager.jinja_env = Environment(
+        loader=ChoiceLoader(
+            [
+                PrefixLoader({"@font": FileSystemLoader(str(_FONT_DIR))}),
+                FileSystemLoader(str(_PSB_THEME_DIR)),
+            ]
+        )
+    )
+    loader = manager._create_standalone_asset_loader(
+        Path(best30_renderer._TEMPLATE_PATH).parent
+    )
+
+    uri = loader("@font/HarmonyOS_Sans_SC/HarmonyOS_SansSC_Regular.ttf")
+
+    assert uri.endswith(
+        "/resources/font/HarmonyOS_Sans_SC/HarmonyOS_SansSC_Regular.ttf"
+    )

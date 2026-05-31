@@ -3,6 +3,8 @@
     --theme-light: #33ccbb22;
     --theme-dark: #2ab3a3;
     --p-teal: #33ccbb;
+    --font-main: "HarmonyOS Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif;
+    --font-header: var(--font-main);
 
     /* Immersive Background Gradient */
     --bg-gradient: linear-gradient(135deg, #f5f7fa 0%, var(--theme-light) 100%);
@@ -42,12 +44,13 @@
 
 * {
     box-sizing: border-box;
+    font-synthesis: none;
     margin: 0;
     padding: 0;
 }
 
 body {
-    font-family: "Microsoft YaHei", "PingFang SC", -apple-system, sans-serif;
+    font-family: var(--font-main);
     background: var(--bg-gradient);
     min-height: 100vh;
     color: var(--text-primary);
@@ -333,7 +336,7 @@ body {
 
 .user-name {
     font-size: 24px;
-    font-weight: 800;
+    font-weight: 700;
     color: var(--text-primary);
     margin-bottom: 8px;
 }
@@ -371,9 +374,12 @@ body {
 }
 
 .user-id {
+    font-family: var(--font-main);
     font-size: 11px;
     color: var(--text-muted);
-    font-family: monospace;
+    font-kerning: none;
+    letter-spacing: 0;
+    word-spacing: 0;
 }
 
 /* User Word */
@@ -421,7 +427,7 @@ body {
 
 .capsule-value {
     color: var(--text-primary);
-    font-weight: 800;
+    font-weight: 700;
 }
 
 .mvp-capsule .capsule-value {
@@ -542,7 +548,7 @@ body {
 .bot-tag {
     display: inline-block;
     font-size: 8px;
-    font-weight: 800;
+    font-weight: 700;
     color: #fff;
     background: linear-gradient(135deg, #6366f1, #8b5cf6);
     padding: 1px 4px;
@@ -581,7 +587,7 @@ body {
 
 .section-title {
     font-size: 16px;
-    font-weight: 800;
+    font-weight: 700;
     color: var(--text-primary);
 }
 
@@ -633,7 +639,7 @@ body {
     background: var(--theme-color);
     color: #fff;
     font-size: 9px;
-    font-weight: 800;
+    font-weight: 700;
     text-align: center;
     padding: 2px;
     z-index: 10;
@@ -771,10 +777,13 @@ body {
 }
 
 .credit-card-id {
-    font-family: 'SF Mono', 'Monaco', 'Consolas', monospace;
+    font-family: var(--font-main);
     font-size: 10px;
     font-weight: 600;
     color: var(--theme-color);
+    font-kerning: none;
+    letter-spacing: 0;
+    word-spacing: 0;
 }
 
 .credit-type {
@@ -811,7 +820,7 @@ body {
 
 .music-diff {
     width: 60px;
-    font-weight: 800;
+    font-weight: 700;
     text-transform: uppercase;
 }
 
@@ -1003,14 +1012,22 @@ body {
 
 /* Footer */
 .footer-info {
+    font-family: var(--font-main);
     text-align: center;
     padding: 20px;
     font-size: 11px;
     color: var(--text-muted);
+    font-kerning: none;
+    letter-spacing: 0;
+    word-spacing: 0;
 }
 
 .footer-line {
     margin-bottom: 5px;
+}
+
+.footer-highlight {
+    font-weight: 700;
 }
 
 .footer-line.subtle {

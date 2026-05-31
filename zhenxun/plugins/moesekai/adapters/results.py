@@ -11,7 +11,8 @@ from PIL import ImageDraw, ImageFont
 
 from .runtime import MessageUtils
 
-_FONT_PATH = Path("resources/font/msyh.ttf")
+# 原先使用 resources/font/msyh.ttf。
+_FONT_PATH = Path("resources/font/HarmonyOS_Sans_SC/HarmonyOS_SansSC_Regular.ttf")
 
 
 MoeSendable: TypeAlias = str | bytes | UniMessage | list[str | bytes | UniMessage]

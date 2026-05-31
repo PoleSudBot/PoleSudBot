@@ -486,6 +486,7 @@ class ThemeManager:
 
         def asset_loader(asset_path: str) -> str:
             clean_path = asset_path[2:] if asset_path.startswith("./") else asset_path
+            # 独立模板优先解析模板目录资源，避免改变已有本地图片/CSS 引用语义。
             candidate_paths = [
                 local_base_path / asset_path,
                 local_base_path / clean_path,
@@ -494,7 +495,8 @@ class ThemeManager:
             for full_path in candidate_paths:
                 if full_path.exists():
                     return full_path.absolute().as_uri()
-            return ""
+            # 若本地资源不存在，则回退到主题资源解析，支持 @font 等共享命名空间。
+            return self.asset_service.resolve_asset_uri(asset_path, asset_path)
 
         return asset_loader
 
