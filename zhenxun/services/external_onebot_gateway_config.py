@@ -57,9 +57,23 @@ DEFAULT_ACTION_ALLOWLIST = [
     "get_version_info",
 ]
 DEFAULT_HELP_IMAGE_PATH = "zhenxun/plugins/pjsk/assets/help.png"
-DEFAULT_HELP_URLS = (
+LEGACY_HELP_URLS = (
     "使用帮助: https://neo.haruki.seiunx.com\n"
     "Haruki工具箱：https://haruki.seiunx.com"
+)
+DEFAULT_HELP_URLS = (
+    "【主要入口】\n"
+    "帮助文档: https://neo.haruki.seiunx.com/bot-help/\n"
+    "Haruki工具箱: https://haruki.seiunx.com\n"
+    "\n"
+    "【账号与数据教程】\n"
+    "快速验证: https://neo.haruki.seiunx.com/toolbox-tutorial/verify-guide\n"
+    "suite上传: https://haruki.seiunx.com/upload_suite\n"
+    "MySekai上传: https://haruki.seiunx.com/upload_mysekai\n"
+    "\n"
+    "【代理与设备教程】\n"
+    "HarukiProxy: https://neo.haruki.seiunx.com/haruki-proxy/\n"
+    "iOS模块: https://neo.haruki.seiunx.com/toolbox-tutorial/ios-module"
 )
 
 BOOL_TRUE_VALUES = {

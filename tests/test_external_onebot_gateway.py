@@ -119,6 +119,94 @@ def _pjsk_plugin():
     return importlib.import_module("zhenxun.plugins.pjsk")
 
 
+class _FakeForwardBot:
+    self_id = "111"
+
+    def __init__(self):
+        self.sent: list[tuple[str, dict]] = []
+
+    async def send_group_forward_msg(self, **kwargs):
+        self.sent.append(("group", kwargs))
+
+    async def send_private_forward_msg(self, **kwargs):
+        self.sent.append(("private", kwargs))
+
+
+def test_pjsk_help_message_upgrades_legacy_default_urls(monkeypatch, tmp_path):
+    pjsk_plugin = _pjsk_plugin()
+
+    # 旧环境里已落盘的默认 HELP_URLS 需要展示为新的教程链接清单。
+    monkeypatch.setattr(
+        pjsk_plugin.Config,
+        "get",
+        lambda module: {
+            "HELP_IMAGE_PATH": str(tmp_path / "missing-help.png"),
+            "HELP_URLS": pjsk_plugin.LEGACY_HELP_URLS,
+        },
+    )
+
+    assert pjsk_plugin._build_help_message_items() == [pjsk_plugin.DEFAULT_HELP_URLS]
+
+
+def test_pjsk_default_help_urls_are_grouped():
+    pjsk_plugin = _pjsk_plugin()
+    help_urls = pjsk_plugin.DEFAULT_HELP_URLS
+
+    main_index = help_urls.index("【主要入口】")
+    data_index = help_urls.index("【账号与数据教程】")
+    device_index = help_urls.index("【代理与设备教程】")
+
+    assert main_index < data_index < device_index
+    assert "帮助文档: https://neo.haruki.seiunx.com/bot-help/" in help_urls
+    assert "Haruki工具箱: https://haruki.seiunx.com" in help_urls
+    assert (
+        "快速验证: https://neo.haruki.seiunx.com/toolbox-tutorial/verify-guide"
+        in help_urls
+    )
+
+
+def test_pjsk_help_forward_nodes_split_image_and_text(tmp_path):
+    pjsk_plugin = _pjsk_plugin()
+    help_image = tmp_path / "help.png"
+    help_image.write_bytes(b"fake image")
+
+    nodes = pjsk_plugin._build_help_forward_nodes(
+        _FakeForwardBot(), [help_image, "links"]
+    )
+
+    assert len(nodes) == 2
+    assert nodes[0]["data"]["content"][0].type == "image"
+    assert nodes[1]["data"]["content"].extract_plain_text() == "links"
+
+
+@pytest.mark.asyncio
+async def test_pjsk_help_forward_sends_text_only_as_forward(monkeypatch):
+    pjsk_plugin = _pjsk_plugin()
+    bot = _FakeForwardBot()
+    monkeypatch.setattr(pjsk_plugin, "_build_help_message_items", lambda: ["links"])
+
+    await pjsk_plugin._send_help_forward(bot, _private_event("skhelp"))
+
+    assert bot.sent == [
+        (
+            "private",
+            {
+                "user_id": 222,
+                "messages": [
+                    {
+                        "type": "node",
+                        "data": {
+                            "name": pjsk_plugin.BotConfig.self_nickname or "PJSK",
+                            "uin": "111",
+                            "content": Message("links"),
+                        },
+                    }
+                ],
+            },
+        )
+    ]
+
+
 def _group_event(
     text: str,
     *,

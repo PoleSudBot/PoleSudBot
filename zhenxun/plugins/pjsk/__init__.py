@@ -11,7 +11,9 @@ from nonebot.adapters import Event
 from nonebot.adapters.onebot.v11 import Bot as OneBotV11Bot
 from nonebot.adapters.onebot.v11 import (
     GroupMessageEvent,
+    Message,
     MessageEvent,
+    MessageSegment,
     PrivateMessageEvent,
 )
 from nonebot.matcher import Matcher
@@ -20,7 +22,7 @@ from nonebot.plugin import PluginMetadata
 from nonebot.rule import Rule
 from nonebot.typing import T_State
 
-from zhenxun.configs.config import Config
+from zhenxun.configs.config import BotConfig, Config
 from zhenxun.configs.utils import Command, PluginExtraData, PluginSetting
 from zhenxun.services.external_onebot_gateway import (
     ExternalOneBotAppSpec,
@@ -32,6 +34,7 @@ from zhenxun.services.external_onebot_gateway_config import (
     DEFAULT_ENABLE_AUTO_SLASH,
     DEFAULT_HELP_IMAGE_PATH,
     DEFAULT_HELP_URLS,
+    LEGACY_HELP_URLS,
     REGISTER_CONFIGS,
     get_pjsk_app_settings,
     parse_config_bool,
@@ -285,14 +288,51 @@ def _build_help_message_items() -> list[Path | str]:
         str(config_group.get("HELP_IMAGE_PATH", DEFAULT_HELP_IMAGE_PATH) or "")
     )
     help_urls = str(config_group.get("HELP_URLS", DEFAULT_HELP_URLS) or "").strip()
+    # 旧配置文件里可能已经持久化了旧默认值，这里只把旧默认值升级为新的链接清单。
+    if help_urls == LEGACY_HELP_URLS:
+        help_urls = DEFAULT_HELP_URLS
     message_items: list[Path | str] = []
 
     # 帮助图是可选静态资源；缺失时只发网址，避免给普通用户暴露部署路径。
     if image_path.is_file():
         message_items.append(image_path)
     if help_urls:
-        message_items.append(f"\n{help_urls}")
+        message_items.append(help_urls)
     return message_items
+
+
+def _build_help_forward_nodes(
+    bot: OneBotV11Bot, message_items: list[Path | str]
+) -> list[dict]:
+    node_name = BotConfig.self_nickname or "PJSK"
+    node_list = []
+    for item in message_items:
+        # 每个帮助项单独作为一个节点，确保图片和文字在合并转发里分开发送。
+        content = (
+            Message(MessageSegment.image(item))
+            if isinstance(item, Path)
+            else Message(str(item))
+        )
+        node_list.append(
+            {
+                "type": "node",
+                "data": {
+                    "name": node_name,
+                    "uin": str(bot.self_id),
+                    "content": content,
+                },
+            }
+        )
+    return node_list
+
+
+async def _send_help_forward(bot: OneBotV11Bot, event: MessageEvent) -> None:
+    nodes = _build_help_forward_nodes(bot, _build_help_message_items())
+    # PJSK 帮助固定以合并转发发送，避免图片帮助和教程链接混在同一条消息里。
+    if isinstance(event, GroupMessageEvent):
+        await bot.send_group_forward_msg(group_id=event.group_id, messages=nodes)
+    elif isinstance(event, PrivateMessageEvent):
+        await bot.send_private_forward_msg(user_id=event.user_id, messages=nodes)
 
 
 __plugin_meta__ = PluginMetadata(
@@ -311,17 +351,13 @@ __plugin_meta__ = PluginMetadata(
 > - `pjsk宽松模式 关闭`
 > - `pjsk宽松模式 状态`
 >
-> 超级用户也可在任意群聊或私聊指定群号：`pjsk宽松模式 开启 <群号>`。
-> 开启后可能误触发，并且与其他分布式 HarukiBot 同群时存在互相回响风险，请谨慎使用。
+> 开启后可能误触发，并且与其他 PJSK Bot 同群时存在互相回响风险，请谨慎使用。
 
 ---
 
 > **📌 网页版帮助与工具箱指路**
 >
-> - **使用帮助**：https://neo.haruki.seiunx.com
-> - **Haruki工具箱**：https://haruki.seiunx.com
->
-> 💡 *提示：图片内的链接无法直接点击，您可以随时发送指令 **`sk帮助`** 直接获取可点击的网址链接！*
+> 图片帮助中的链接无法直接点击；发送 **`sk帮助`** 可获取完整文档、工具箱和常用教程网址。
 
 ---
 
@@ -341,6 +377,7 @@ __plugin_meta__ = PluginMetadata(
 > 账号验证功能仅支持 `Haruki工具箱快速验证`
 > 请确保您在工具箱中有已通过验证的绑定账号再使用此功能
 > 上传个人信息背景需要验证账号，请确保你已验证账号再使用
+> 快速验证教程网址可发送 `sk帮助` 获取
 
 | 指令 | 功能 |
 | :--- | :--- |
@@ -351,6 +388,7 @@ __plugin_meta__ = PluginMetadata(
 | `/设置主账号` `/pjsk set main` `/pjsk主账号` `/设置默认绑定` | 通过游戏uid设置默认查询的账号，如/设置主账号 114514。 |
 | `/清除默认绑定` `/取消默认绑定` `/取消主账号` `/清除主账号` | 无uid时会清除全局默认绑定，有uid时会清除对应账号的区服默认绑定。 |
 | `/解绑` `/pjsk unbind` `/取消绑定` | 通过游戏uid解绑你的账号，如/解绑 114514。 |
+| `/逮捕` `/pjsk逮捕` `/pjsk arrest` | 查询指定账号乐曲clear/fc/ap进度，不指定uid会查询默认账号。 |
 | `/隐藏抓包` `/pjsk hide suite` `/pjsk隐藏抓包` | 隐藏suite抓包功能内的详细数据显示。 |
 | `/展示抓包` `/pjsk show suite` | 展示suite抓包功能内的详细数据显示。 |
 | `/隐藏烤森抓包` `/pjsk hide mysekai` | 隐藏烤森抓包功能内的详细数据显示。 |
@@ -377,7 +415,7 @@ __plugin_meta__ = PluginMetadata(
 
 > **💡 卡牌相关的可选参数及示例：**
 >
-> - **团名**：`ln` `vbs` `ws` `mmj` `25`
+> - **团名**：`ln` `vbs` `ws` `mmj` `25h`
 > - **对应团oc/纯vs**：`mmjoc` `25oc` `纯v`
 > - **对应团vs**：`mmjv` `25v`
 > - **角色昵称**：`miku` `mnr`
@@ -391,6 +429,8 @@ __plugin_meta__ = PluginMetadata(
 > **以上参数可以混合使用，用空格分隔。查询单张卡牌的可用参数格式：**
 > - 卡牌id：`123`
 > - 角色昵称+负数索引，表示角色的倒数第几张卡：`miku-1`
+>
+> 纯数字 `4` 在 `/查卡` 和 `/查卡面` 中会按卡牌id解析，在 `/卡牌列表` 和 `/卡牌一览` 中会按4星解析。`/查卡` 命中多张时会自动转为卡牌列表，结果过多时会自动转为卡牌一览。
 
 ## 音乐/乐曲
 
@@ -402,9 +442,11 @@ __plugin_meta__ = PluginMetadata(
 | `/谱面样式` `/谱面底色` `/设置谱面样式` `/设置谱面底色` `/pjsk chart style` | 指定查询谱面预览时对应的色调（可选white/black） |
 | `/打歌奖励` `/曲目奖励` `/歌曲奖励` `/music rewards` `/music-rewards` `/pjsk music rewards` `/歌曲挖矿` `/打歌挖矿` | 查询指定账号剩余的 打歌奖励/挖矿奖励（⚠️需要上传suite数据） |
 | `/pjsk进度` `/打歌进度` `/歌曲进度` `/打歌信息` `/progress` `/music-progress` `/pjsk music progress` `/pjsk progress` | 查询指定账号指定难度clear/fc/ap完成度（⚠️需要上传suite数据） |
-| `/查物量` `/pjsk note num` `/pjsk note count` `/物量` | 查询指定物量下有哪些歌曲 |
+| `/查物量` `/pjsk note num` `/pjsk note count` `/物量` | 查询指定物量下有哪些歌曲，如果只有一首曲目会返回谱面预览 |
 | `/查bpm` `/pjsk bpm` `/查BPM` | 查询指定BPM下有哪些歌曲 |
 | `/查曲绘` `/pjsk music cover` `/曲绘` | 查询指定歌曲的曲绘原图 |
+| `/歌曲排行` | 查询指定顺序下的歌曲排行 |
+| `/歌曲meta` | 查询指定歌曲的各项数据指标 |
 
 > **💡 乐曲相关的可选参数及示例：**
 >
@@ -424,6 +466,10 @@ __plugin_meta__ = PluginMetadata(
 > - 某个难度全部歌曲：`expert`
 > - 某个难度单个等级歌曲：`expert 27`
 > - 某个难度 闭区间等级范围 的歌曲：`expert 25 37`
+>
+> **歌曲排行参数：**
+> - 模式：`单人` `多人` `AUTO`
+> - 排序条件：`分数` `PT` `时速`
 
 ## 活动
 
@@ -442,6 +488,7 @@ __plugin_meta__ = PluginMetadata(
 >
 > **查询多个活动的筛选方式：**
 > - 团名英文缩写：`mmj` `vs`
+> - 仅团名缩写：`仅mmj` `仅25h`
 > - 查询某个角色有出场的活动，可以用空格分隔多个角色：`miku` `miku ick`
 > - 查询角色箱活：`ick箱` `ickban`
 > - 查询混活：`混活`
@@ -450,6 +497,8 @@ __plugin_meta__ = PluginMetadata(
 > - 活动类型：`普活` `5v5` `wl`
 >
 > *以上参数可以混合使用，用空格分隔*
+>
+> `仅+团名` 和普通团名是不同参数：前者只检索该团队箱活，后者检索全局有该团队成员参与的活动。
 
 ## 榜线/SK
 
@@ -476,6 +525,7 @@ __plugin_meta__ = PluginMetadata(
 ## suite相关查询
 
 + 这部分功能需要抓包上传suite后才能使用，如果使用中遇到问题请先用 `/抓包数据` 检查自己的suite上传是否成功。
++ suite上传、HarukiProxy 与 iOS 模块教程网址可发送 `sk帮助` 获取。
 
 ### 组卡
 
@@ -550,12 +600,24 @@ __plugin_meta__ = PluginMetadata(
 | `/羁绊` `/pjsk bonds` `/羁绊等级` `/角色羁绊` `/牵绊` | 查询账号的羁绊等级 |
 | `/队长统计` `队长次数` `/领队统计` `/角色领队` `/pjsk leader count` | 查询队长次数 |
 
+> **💡 区域道具可选参数：**
+>
+> | 参数类型 | 可用参数 | 说明 |
+> | :--- | :--- | :--- |
+> | 团队名 | `mmj` `25h` `ln` | 查询指定团队的区域道具 |
+> | 角色名 | `mnr` `hrk` `airi` `szk` | 查询指定角色的区域道具 |
+> | 属性 | `蓝` `橙` `红` | 查询指定加成属性的区域道具 |
+> | 植物类型 | `树` `花` | 查询校园里的属性加成道具 |
+> | 全部 | `full` | 查询所有区域道具 |
+>
+> 已经升级完毕的区域道具不会显示升级需求。
+
 ## MySekai相关查询
 
 > **ℹ️ 提示**
-> - Android 用户建议使用[Haruki工具箱-上传MySekai数据](https://haruki.seiunx.com/upload_mysekai) 的`继承码上传`
-> - 台服/韩服 Android用户教程参考：[Haruki工具箱-HarukiProxy使用教程](/haruki-proxy/)
-> - iOS / iPadOS 用户建议使用代理工具MitM模块更新，教程参考：[Haruki工具箱-iOS模块上传数据教程](/toolbox-tutorial/ios-module)
+> - Android 用户建议使用 Haruki工具箱的 MySekai `继承码上传`
+> - 台服/韩服 Android 用户参考 HarukiProxy 教程，iOS / iPadOS 用户参考 iOS 模块教程
+> - 相关教程网址可发送 `sk帮助` 获取
 
 > **⚠️ 注意**
 > - **所有 MySekai 指令需用户绑定 Haruki工具箱 账号**
@@ -564,15 +626,15 @@ __plugin_meta__ = PluginMetadata(
 | 指令 | 功能 |
 | :--- | :--- |
 | `/msa` `/pjsk mysekai res` `/mysekai-resource` `/mysekai资源` `/烤森资源` | 查询烤森信息 （资源 天气 来访角色等） |
-| `/msm` `/pjsk mysekai map` `/mysekai-map` `/mysekai地图` `/烤森地图` `/msmap` | 查询烤森地图 |
+| `/msm` `/pjsk mysekai map` `/mysekai-map` `/mysekai地图` `/烤森地图` `/msmap` | 查询烤森地图，`/msm <id>` 可以单独输出某张地图 |
 | `/msam` | 同时输出`msa`和`msm`对应的统计信息以及四张烤森地图 |
 | `/烤森对话列表` `/mysekai-talk-list` `/mysekai对话列表` | 查询烤森角色对话列表 |
-| `/烤森家具列表` `/mysekai-fixture-list` `/mysekai家具列表` | 查询账号已获得家具列表 |
-| `/家具列表` `/pjsk mysekai furniture` `/pjsk mysekai fixture` `/msf` `/mysekai 家具` | 查询所有家具列表 |
-| `/msg` `/pjsk mysekai gate` `/mysekai-door-upgrade` `/mysekai大门升级` `/烤森大门升级` `/msgate` | 查询烤森大门升级所需材料 |
+| `/烤森家具列表` `/mysekai-fixture-list` `/mysekai家具列表` | 查询所有家具列表 |
+| `/家具列表` `/pjsk mysekai furniture` `/pjsk mysekai fixture` `/msf` `/mysekai 家具` | 查询账号已获得家具列表 |
+| `/msg` `/pjsk mysekai gate` `/mysekai-door-upgrade` `/mysekai大门升级` `/烤森大门升级` `/msgate` | 查询烤森大门升级所需材料，不指定团队时显示距离满级最近的团队大门 |
 | `/msr` `/pjsk mysekai musicrecord` `/mysekai-music-record` `/mysekai唱片` `/烤森唱片` `/mss` `/mssong` | 查询烤森音乐唱片收集 |
 | `/msb` `/pjsk mysekai blueprint` `/mysekai blueprint` `/mysekai 蓝图` | 查询烤森蓝图列表 |
-| `/msp` `/pjsk mysekai photo` `/pjsk mysekai picture` `/mysekai 照片` | 展示烤森内拍摄的照片 |
+| `/msp` `/pjsk mysekai photo` `/pjsk mysekai picture` `/mysekai 照片` | 展示烤森内拍摄的照片，需要指定从1开始的图片编号 |
 
 ## 昵称设置
 
@@ -600,9 +662,20 @@ __plugin_meta__ = PluginMetadata(
 | `/生日` `/pjsk chara birthday` `/角色生日` `/查生日` | 查询角色生日 |
 | `/贴纸` `/查贴纸` `/pjsk贴纸` `/pjsk表情` `/pjsk stamp` `/stamp` | 查询贴纸 |
 | `/pjsk live` `/虚拟live` `/pjsk vlive` `/vlive` | 查询虚拟 Live 信息 |
-| `/逮捕` `/pjsk逮捕` `/pjsk arrest` | 查询指定账号乐曲clear/fc/ap进度，不指定uid会查询默认账号 |
 | `/查卡池` `/pjsk gacha` `/卡池列表` `/卡池一览` `/卡池` | 查询卡池列表 |
 | `/pjsktz` | 设置你所在的时区，HarukiBot NEO一切和时间有关的信息都会以你设置的时区渲染 |
+| `/倍率` `/实效` | 输入全队的技能倍率计算实效值 |
+
+> **💡 卡池可选参数：**
+>
+> | 参数类型 | 可用参数 | 说明 |
+> | :--- | :--- | :--- |
+> | 卡池id | `63` | 查询指定卡池 |
+> | 负数索引 | `-1` | 表示倒数第几个卡池 |
+> | 活动id | `event17` | 查询指定活动关联的当期卡池 |
+> | 页码 | `p3` | 指定第几页卡池，默认显示最新一页 |
+> | 年份 | `25年` | 查询指定年份推出的卡池 |
+> | 类型 | `复刻` `常驻` `限定` | 查询指定类型的卡池 |
 """.strip(),
     extra=PluginExtraData(
         author="Team-Haruki",
@@ -674,10 +747,8 @@ async def _handle_pjsk_loose_mode(
 
 
 @help_matcher.handle()
-async def _handle_pjsk_help():
-    await MessageUtils.build_message(_build_help_message_items()).finish(
-        reply_to=True
-    )
+async def _handle_pjsk_help(bot: OneBotV11Bot, event: MessageEvent):
+    await _send_help_forward(bot, event)
 
 
 @matcher.handle()
