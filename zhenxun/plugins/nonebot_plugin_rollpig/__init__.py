@@ -80,7 +80,7 @@ __plugin_meta__ = PluginMetadata(
     description="抽取属于自己的小猪",
     usage="""
     🐷 基础指令：
-    今日小猪 / 今天是什么小猪 - 抽取今天的命运之猪
+    今日小猪 / 今天是什么小猪 / jrxz - 抽取今天的命运之猪
     随机小猪 - 随机看一张猪图
     找猪 -  从 PigHub 模糊搜索猪猪图
     
@@ -107,7 +107,7 @@ __plugin_meta__ = PluginMetadata(
     config=Config,
     extra={
         "author": "Felis2026",
-        "version": "0.5.2",
+        "version": "0.5.3",
         "configs": [
             {
                 "module": MODULE_NAME,
@@ -911,7 +911,7 @@ async def send_rendered_pig(
 # ================= 指令处理区域 =================
 
 # 1. 今日小猪
-cmd_today = on_command("今天是什么小猪", aliases={"今日小猪"}, block=True)
+cmd_today = on_command("今天是什么小猪", aliases={"今日小猪", "jrxz"}, block=True)
 
 @cmd_today.handle()
 @guard_group_enabled(cmd_today)
