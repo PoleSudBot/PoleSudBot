@@ -44,6 +44,7 @@ from ._avatar import (
     get_avatar_history_items,
     import_existing_avatar_cache,
     persist_refreshed_avatar,
+    refresh_avatar_history_on_query,
 )
 
 MODULE = "name_history"
@@ -68,7 +69,7 @@ __plugin_meta__ = PluginMetadata(
     """.strip(),
     extra=PluginExtraData(
         author="k1yuyu",
-        version="0.1",
+        version="0.2",
         plugin_type=PluginType.NORMAL,
         menu_type="数据统计",
         commands=[
@@ -375,6 +376,7 @@ async def _send_history(
     )
     logger.info("查看历史昵称", MODULE, target=target.user_id)
     try:
+        await refresh_avatar_history_on_query("qq", target.user_id)
         avatar_uri = await _get_avatar_uri(target.user_id)
         picture = await _build_history_picture(
             target_user_id=target.user_id,

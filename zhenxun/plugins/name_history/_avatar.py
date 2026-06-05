@@ -139,6 +139,26 @@ async def persist_refreshed_avatar(
     )
 
 
+async def refresh_avatar_history_on_query(platform: str, user_id: str) -> None:
+    """历史查询时强制刷新目标头像，让头像栏展示最新采样。"""
+    if platform != "qq" or not str(user_id).isdigit():
+        return
+    try:
+        avatar_path = await avatar_service.get_avatar_path(
+            platform, user_id, force_refresh=True
+        )
+        if not avatar_path:
+            return
+        await persist_avatar_snapshot(
+            platform=platform,
+            user_id=str(user_id),
+            avatar_path=avatar_path,
+            source="history_query",
+        )
+    except Exception as e:
+        logger.warning("历史头像查询刷新失败", MODULE, target=user_id, e=e)
+
+
 async def force_refresh_and_bind_avatar(
     *,
     platform: str,
