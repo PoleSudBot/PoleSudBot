@@ -10,7 +10,7 @@ from nonebot.utils import is_coroutine_callable
 import ujson as json
 
 from zhenxun.configs.config import Config
-from zhenxun.configs.path_config import UI_CACHE_PATH
+from zhenxun.configs.path_config import FONT_PATH, UI_CACHE_PATH
 from zhenxun.services.log import logger
 from zhenxun.services.renderer.template import (
     ComponentRenderStrategy,
@@ -57,8 +57,17 @@ class RendererService:
         self._custom_filters: dict[str, Callable] = {}
         self._custom_globals: dict[str, Callable] = {}
 
+        self._register_builtin_template_namespaces()
         self.filter("dump_json")(self._pydantic_tojson_filter)
         self.global_function("inline_asset")(self._inline_asset_global)
+
+    def _register_builtin_template_namespaces(self) -> None:
+        """注册渲染服务内置的共享资源命名空间。"""
+        # 全局字体资源通过 @font 暴露，避免主题模板复制大体积字体文件。
+        if not FONT_PATH.is_dir():
+            logger.warning(f"字体资源目录不存在，跳过 @font 命名空间: {FONT_PATH}")
+            return
+        self._plugin_template_paths.setdefault("@font", FONT_PATH)
 
     def register_template_namespace(self, namespace: str, path: Path):
         """
