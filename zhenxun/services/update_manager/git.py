@@ -106,8 +106,11 @@ class AsyncCommandRunner:
         check: bool = True,
     ) -> CommandResult:
         """执行 git 子命令。"""
+        safe_directory = cwd.resolve(strict=False).as_posix()
         return await self.run(
-            ["git", *args],
+            # 生产部署常见 bind mount / root 解包会触发 Git ownership 保护；
+            # 只对当前受管仓库临时声明 safe.directory，避免写全局 git 配置。
+            ["git", "-c", f"safe.directory={safe_directory}", *args],
             cwd,
             timeout=timeout or self.git_timeout,
             check=check,

@@ -12,7 +12,11 @@ from zhenxun.services.update_manager.config import (
     load_settings,
     save_runtime_settings,
 )
-from zhenxun.services.update_manager.git import CommandError, CommandResult
+from zhenxun.services.update_manager.git import (
+    AsyncCommandRunner,
+    CommandError,
+    CommandResult,
+)
 from zhenxun.services.update_manager.jobs import JobStore
 from zhenxun.services.update_manager.manager import UpdateManagerService
 from zhenxun.services.update_manager.models import (
@@ -624,22 +628,33 @@ async def test_resolve_default_branch_falls_back_ls_remote():
     """symbolic-ref 和 remote show 都失败时，用 ls-remote 探测 main/master。"""
 
     class BranchProbeRunner:
-        call_order: list[str] = []
-        ls_remote_responses: dict[str, bool] = {}
+        def __init__(self):
+            self.call_order: list[str] = []
+            self.ls_remote_responses: dict[str, bool] = {}
 
         async def git(self, cwd, *args, check=True):
             self.call_order.append(" ".join(args))
             if args[0] == "symbolic-ref":
-                return CommandResult(("git",) + args, 128, "", "not found")
+                return CommandResult(("git", *args), 128, "", "not found")
             if args[:2] == ("remote", "show"):
-                return CommandResult(("git",) + args, 128, "", "no remote show")
+                return CommandResult(("git", *args), 128, "", "no remote show")
             if args[0] == "ls-remote" and args[1] == "--heads":
                 target = args[3] if len(args) > 3 else ""
                 if target == "refs/heads/main" and self.ls_remote_responses.get("main"):
-                    return CommandResult(("git",) + args, 0, "abc123\trefs/heads/main")
-                if target == "refs/heads/master" and self.ls_remote_responses.get("master"):
-                    return CommandResult(("git",) + args, 0, "abc123\trefs/heads/master")
-                return CommandResult(("git",) + args, 0, "")
+                    return CommandResult(
+                        ("git", *args),
+                        0,
+                        "abc123\trefs/heads/main",
+                    )
+                if target == "refs/heads/master" and self.ls_remote_responses.get(
+                    "master"
+                ):
+                    return CommandResult(
+                        ("git", *args),
+                        0,
+                        "abc123\trefs/heads/master",
+                    )
+                return CommandResult(("git", *args), 0, "")
             raise AssertionError(f"unexpected: {args}")
 
     runner = BranchProbeRunner()
@@ -685,3 +700,58 @@ def test_session_valid_still_works_with_fresh_entry():
     token = store.create(ip)
     assert store.valid(ip, token)
     assert not store.valid(ip, "wrong-token")
+
+
+@pytest.mark.asyncio
+async def test_git_runner_marks_cwd_as_safe_directory(tmp_path: Path):
+    """update_manager 执行 git 时应临时信任当前受管仓库目录。"""
+    runner = AsyncCommandRunner()
+    calls = []
+
+    async def fake_run(args, cwd, *, timeout=None, check=True):
+        calls.append((args, cwd, timeout, check))
+        return CommandResult(tuple(args), 0)
+
+    runner.run = fake_run  # type: ignore[method-assign]
+
+    await runner.git(tmp_path, "fetch", "origin", "--prune")
+
+    assert calls == [
+        (
+            [
+                "git",
+                "-c",
+                f"safe.directory={tmp_path.resolve(strict=False).as_posix()}",
+                "fetch",
+                "origin",
+                "--prune",
+            ],
+            tmp_path,
+            runner.git_timeout,
+            True,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gh_runner_does_not_inject_git_safe_directory(tmp_path: Path):
+    """safe.directory 是 Git 专用兼容参数，不能注入 gh CLI 调用。"""
+    runner = AsyncCommandRunner()
+    calls = []
+
+    async def fake_run(args, cwd, *, timeout=None, check=True):
+        calls.append((args, cwd, timeout, check))
+        return CommandResult(tuple(args), 0)
+
+    runner.run = fake_run  # type: ignore[method-assign]
+
+    await runner.gh(tmp_path, "repo", "view", "owner/repo")
+
+    assert calls == [
+        (
+            ["gh", "repo", "view", "owner/repo"],
+            tmp_path,
+            runner.git_timeout,
+            True,
+        )
+    ]
