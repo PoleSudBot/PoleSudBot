@@ -457,7 +457,7 @@ async def build_group_pig_rankings(bot: Bot, group_id: str) -> list[PigKingEntry
         if not member_id:
             continue
         unique_members[member_id] = sanitize_display_name(
-            member.card or member.name or "",
+            member.name or member.card or "",
             member_id,
         )
 
@@ -527,7 +527,7 @@ async def build_global_pig_rankings(
             if not member_id:
                 continue
             recent_names[member_id] = sanitize_display_name(
-                member.card or member.name or "",
+                member.name or member.card or "",
                 member_id,
             )
 
