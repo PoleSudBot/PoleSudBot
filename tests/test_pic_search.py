@@ -1052,10 +1052,17 @@ def test_forward_fallback_only_allows_small_message_count():
 
 
 def test_result_template_renders_dataclass_items_without_method_collision():
+    # 模板会引用主题共享字体 CSS，测试 loader 需要模拟真实渲染器的主题搜索路径。
     env = Environment(
-        loader=FileSystemLoader(str(renderer_module.TEMPLATE_PATH.parent)),
+        loader=FileSystemLoader(
+            [
+                str(renderer_module.TEMPLATE_PATH.parent),
+                str(Path(__file__).parents[1] / "resources" / "themes" / "psb"),
+            ]
+        ),
         autoescape=True,
     )
+    env.globals["asset"] = lambda path: path
     template = env.get_template(renderer_module.TEMPLATE_PATH.name)
     presentation = SearchPresentation(
         title="搜图结果",

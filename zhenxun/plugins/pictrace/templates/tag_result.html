@@ -3,8 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <style>
+    {% include "assets/css/base/_fonts.css" %}
+
     * {
       box-sizing: border-box;
+      font-synthesis: none;
     }
 
     :root {
@@ -19,30 +22,8 @@
       --color-text-dark: #4a2c36;
       --color-text-muted: #9b7582;
       --shadow-soft: 0 10px 24px rgba(209, 71, 117, 0.08);
-    }
-
-    @font-face {
-      font-family: "HarmonyOS Sans SC";
-      src: url("../../../../resources/font/HarmonyOS_Sans_SC_Regular.ttf") format("truetype");
-      font-weight: 400;
-      font-style: normal;
-      font-display: swap;
-    }
-
-    @font-face {
-      font-family: "HarmonyOS Sans SC";
-      src: url("../../../../resources/font/HarmonyOS_Sans_SC_Medium.ttf") format("truetype");
-      font-weight: 500;
-      font-style: normal;
-      font-display: swap;
-    }
-
-    @font-face {
-      font-family: "HarmonyOS Sans SC";
-      src: url("../../../../resources/font/HarmonyOS_Sans_SC_Bold.ttf") format("truetype");
-      font-weight: 600 900;
-      font-style: normal;
-      font-display: swap;
+      --font-main: "HarmonyOS Sans SC", "HarmonyOS Sans", "Microsoft YaHei", sans-serif;
+      --font-header: var(--font-main);
     }
 
     body {
@@ -50,7 +31,7 @@
       margin: 0;
       padding: 0;
       background-color: transparent;
-      font-family: "HarmonyOS Sans SC", sans-serif;
+      font-family: var(--font-main);
     }
 
     .page {
@@ -131,9 +112,10 @@
     .title {
       margin: 0 0 7px;
       color: var(--color-primary-dark);
+      font-family: var(--font-header);
       font-size: 28px;
       line-height: 1.15;
-      font-weight: 800;
+      font-weight: 700;
       letter-spacing: 0;
       overflow-wrap: anywhere;
     }
@@ -143,7 +125,7 @@
       color: var(--color-text-muted);
       font-size: 12px;
       line-height: 1.35;
-      font-weight: 700;
+      font-weight: 500;
       letter-spacing: 0;
     }
 
@@ -189,7 +171,7 @@
       color: var(--color-text-muted);
       font-size: 11px;
       line-height: 1;
-      font-weight: 700;
+      font-weight: 500;
       white-space: nowrap;
     }
 
@@ -198,7 +180,7 @@
       color: var(--color-primary-dark);
       font-size: 16px;
       line-height: 1.15;
-      font-weight: 900;
+      font-weight: 700;
       letter-spacing: 0;
       overflow-wrap: anywhere;
     }
@@ -229,7 +211,7 @@
       color: var(--color-text-dark);
       font-size: 17px;
       line-height: 1.25;
-      font-weight: 800;
+      font-weight: 700;
       letter-spacing: 0;
     }
 
@@ -241,7 +223,7 @@
       border: 1px solid var(--color-border);
       border-radius: 999px;
       font-size: 11px;
-      font-weight: 800;
+      font-weight: 600;
       line-height: 1;
       white-space: nowrap;
     }
@@ -265,7 +247,7 @@
       border-radius: 10px;
       font-size: 12px;
       line-height: 1.3;
-      font-weight: 800;
+      font-weight: 600;
       overflow-wrap: anywhere;
     }
 
@@ -277,7 +259,7 @@
     .rating-score {
       flex: 0 0 auto;
       color: var(--color-primary-dark);
-      font-weight: 900;
+      font-weight: 700;
       white-space: nowrap;
     }
 
@@ -303,7 +285,7 @@
       margin-bottom: 7px;
       color: var(--color-text-muted);
       font-size: 12px;
-      font-weight: 700;
+      font-weight: 500;
     }
 
     .tag-name {
@@ -311,7 +293,7 @@
       color: var(--color-text-dark);
       font-size: 14px;
       line-height: 1.3;
-      font-weight: 900;
+      font-weight: 700;
       overflow-wrap: anywhere;
     }
 
@@ -320,7 +302,7 @@
       color: var(--color-primary-dark);
       font-size: 13px;
       line-height: 1.3;
-      font-weight: 900;
+      font-weight: 700;
       text-align: right;
       white-space: nowrap;
     }

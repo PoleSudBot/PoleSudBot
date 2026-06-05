@@ -58,7 +58,7 @@ __plugin_meta__ = PluginMetadata(
     """.strip(),
     extra=PluginExtraData(
         author="k1yuyu",
-        version="0.1.1",
+        version="0.1.2",
         menu_type="一些工具",
         configs=REGISTER_CONFIGS,
         commands=[
