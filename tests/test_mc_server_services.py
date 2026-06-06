@@ -32,6 +32,7 @@ sys.modules.setdefault("zhenxun.services.log", SimpleNamespace(logger=_LoggerStu
 # 服务层测试只覆盖 toggle 行为，避免导入运行时平台/权限依赖时拉起完整 Bot。
 config_module = ModuleType("zhenxun.plugins.mc_server.config")
 config_module.get_settings = lambda: SimpleNamespace()
+config_module.McServerPreset = SimpleNamespace
 sys.modules.setdefault("zhenxun.plugins.mc_server.config", config_module)
 
 models_module = ModuleType("zhenxun.plugins.mc_server.models")
@@ -85,6 +86,12 @@ class _FakeServer(SimpleNamespace):
             join_notify_enabled=False,
             conn_notify_enabled=True,
             chat_bridge_enabled=False,
+            rcon_host="",
+            rcon_port=25575,
+            rcon_password="",
+            log_path="",
+            bluemap_base_url="",
+            bluemap_map_ids=[],
             saved_fields=None,
         )
 
@@ -117,6 +124,115 @@ async def test_toggle_all_updates_three_switches(monkeypatch: pytest.MonkeyPatch
         "chat_bridge_enabled",
         "updated_at",
     ]
+
+
+@pytest.mark.asyncio
+async def test_bind_group_server_preset_copies_config_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    server = _FakeServer()
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    latest_log = log_dir / "latest.log"
+    latest_log.write_text("[Server thread/INFO]: Done\n", encoding="utf-8")
+    preset = SimpleNamespace(
+        name="1",
+        host="mc.example.com",
+        port=25566,
+        rcon_host="",
+        rcon_port=25576,
+        rcon_password="secret",
+        log_path=str(log_dir),
+        bluemap_base_url="map.example.com",
+        bluemap_map_ids=["world", "nether"],
+    )
+
+    async def fake_bind_server(group_id: str, *, host: str, port: int):
+        server.group_id = group_id
+        server.host = host
+        server.port = port
+        return server
+
+    async def fake_probe_server_status(*_args, **_kwargs):
+        return SimpleNamespace(online=True)
+
+    async def fake_render_status(_status):
+        return mc_services.RenderedMessage(image=None, fallback_text="status ok")
+
+    monkeypatch.setattr(
+        mc_services,
+        "get_settings",
+        lambda: SimpleNamespace(
+            request_timeout_seconds=8,
+            server_presets={"1": preset},
+        ),
+    )
+    monkeypatch.setattr(mc_services, "bind_server", fake_bind_server)
+    monkeypatch.setattr(mc_services, "probe_server_status", fake_probe_server_status)
+    monkeypatch.setattr(mc_services, "render_status", fake_render_status)
+
+    rendered = await McServerService().bind_group_server_preset("123456", "1")
+
+    assert rendered.lead_text.startswith("已绑定预设 1：mc.example.com:25566")
+    assert server.host == "mc.example.com"
+    assert server.port == 25566
+    assert server.rcon_host == "mc.example.com"
+    assert server.rcon_port == 25576
+    assert server.rcon_password == "secret"
+    assert server.log_path == str(latest_log)
+    assert server.bluemap_base_url == "http://map.example.com"
+    assert server.bluemap_map_ids == ["world", "nether"]
+    assert server.saved_fields == [
+        "rcon_host",
+        "rcon_port",
+        "rcon_password",
+        "log_path",
+        "bluemap_base_url",
+        "bluemap_map_ids",
+        "updated_at",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bind_group_server_with_rcon_uses_same_host_for_rcon(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    server = _FakeServer()
+
+    async def fake_bind_server(_group_id: str, *, host: str, port: int):
+        server.host = host
+        server.port = port
+        return server
+
+    async def fake_probe_server_status(*_args, **_kwargs):
+        return SimpleNamespace(online=True)
+
+    async def fake_render_status(_status):
+        return mc_services.RenderedMessage(image=None, fallback_text="status ok")
+
+    monkeypatch.setattr(
+        mc_services,
+        "get_settings",
+        lambda: SimpleNamespace(request_timeout_seconds=8),
+    )
+    monkeypatch.setattr(mc_services, "bind_server", fake_bind_server)
+    monkeypatch.setattr(mc_services, "probe_server_status", fake_probe_server_status)
+    monkeypatch.setattr(mc_services, "render_status", fake_render_status)
+
+    rendered = await McServerService().bind_group_server_with_rcon(
+        "123456",
+        host="mc.example.com",
+        server_port=25566,
+        rcon_port=25576,
+    )
+
+    assert "已设置RCON地址：mc.example.com:25576" in rendered.lead_text
+    assert server.host == "mc.example.com"
+    assert server.port == 25566
+    assert server.rcon_host == "mc.example.com"
+    assert server.rcon_port == 25576
+    assert server.saved_fields == ["rcon_host", "rcon_port", "updated_at"]
 
 
 def test_should_reset_log_cursor_on_inode_change_or_truncate():

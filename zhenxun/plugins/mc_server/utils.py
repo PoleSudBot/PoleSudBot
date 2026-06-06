@@ -44,6 +44,17 @@ DONE_BIND_FLOW_WORDS = {"done", "完成"}
 T = TypeVar("T")
 
 
+def parse_bind_private_setup(raw: str) -> tuple[str, str | None]:
+    lines = [line.strip() for line in raw.splitlines()]
+    password = lines[0] if lines else ""
+    if not password:
+        raise ValueError("RCON密码不能为空")
+    log_path = lines[1] if len(lines) > 1 else ""
+    if not log_path or is_bind_flow_skip(log_path):
+        return password, None
+    return password, log_path
+
+
 def parse_server_address(
     raw: str,
     default_port: int = DEFAULT_MC_PORT,
@@ -65,6 +76,16 @@ def parse_server_address(
     if not host or not _HOST_PATTERN.match(host):
         raise ValueError("服务器地址只能包含字母、数字、点、横线和下划线")
     return ParsedAddress(host=host, port=_parse_port(port_text or None, default_port))
+
+
+def parse_port(raw: str, label: str = "端口") -> int:
+    try:
+        return _parse_port(raw.strip(), DEFAULT_MC_PORT)
+    except ValueError as exc:
+        message = str(exc)
+        if message.startswith("端口"):
+            message = message.removeprefix("端口")
+        raise ValueError(f"{label}{message}") from exc
 
 
 def format_server_address(host: str, port: int) -> str:

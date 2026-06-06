@@ -26,7 +26,7 @@ from .command_schema import (
 from .config import get_settings
 from .services import mc_server_service
 from .types import RenderedMessage
-from .utils import is_bind_flow_done, is_bind_flow_exit, is_bind_flow_skip
+from .utils import is_bind_flow_exit, parse_bind_private_setup, parse_port
 
 
 async def _finish_rendered(rendered: RenderedMessage) -> None:
@@ -84,11 +84,32 @@ async def _send_text(message: str) -> None:
     await MessageUtils.build_message(message).send(reply_to=True)
 
 
+async def _send_private_text(bot: Bot, user_id: str, message: str) -> None:
+    await bot.send_private_msg(user_id=int(user_id), message=message)
+
+
 def _bind_timeout_text(timeout: int) -> str:
     return f"绑定流程已超时（{timeout} 秒未收到回复），已结束。"
 
 
-async def _run_bind_flow(group_event: GroupMessageEvent) -> None:
+def _mcbind_usage_text() -> str:
+    return (
+        "用法：mcbind / mcbind <预设名> / mcbind <地址[:端口]> / "
+        "mcbind <地址> <服务器端口> <RCON端口>"
+    )
+
+
+def _parse_compact_bind_words(words: list[str]) -> tuple[str, int, int]:
+    if len(words) != 3:
+        raise ValueError("请按格式发送：地址 服务器端口 RCON端口")
+    return (
+        words[0],
+        parse_port(words[1], "服务器端口"),
+        parse_port(words[2], "RCON端口"),
+    )
+
+
+async def _run_bind_flow(bot: Bot, group_event: GroupMessageEvent) -> None:
     group_id = str(group_event.group_id)
     user_id = str(group_event.user_id)
     timeout = get_settings().bind_flow_timeout_seconds
@@ -105,118 +126,124 @@ async def _run_bind_flow(group_event: GroupMessageEvent) -> None:
             return None
         return event.get_plaintext().strip()
 
-    async def ask(prompt: str) -> str | None:
-        reply = await wait_reply.wait(prompt, timeout=timeout)
+    @waiter(waits=["message"], keep_session=False)
+    async def wait_private_reply(event: Event) -> str | None:
+        if not isinstance(event, PrivateMessageEvent):
+            return None
+        if str(event.user_id) != user_id:
+            return None
+        return event.get_plaintext().strip()
+
+    async def wait_group_reply() -> str | None:
+        reply = await wait_reply.wait(timeout=timeout)
         if reply is None:
             await _send_text(_bind_timeout_text(timeout))
         return reply
 
-    await _send_text(
-        "MC绑定向导已开始。\n"
-        "流程会依次配置：服务器地址 -> 日志路径 -> RCON。\n"
-        "任意步骤输入 q / quit / 退出 / 取消 可结束流程。"
-    )
+    async def wait_private_setup() -> str | None:
+        reply = await wait_private_reply.wait(timeout=timeout)
+        if reply is None:
+            await _send_private_text(bot, user_id, _bind_timeout_text(timeout))
+        return reply
 
-    # 地址是唯一必填项，探测成功前不写入数据库，避免把可用绑定覆盖成坏地址。
+    # 地址与 RCON 端口一次写入，探测成功前不覆盖旧绑定，避免坏地址破坏现有配置。
     while True:
-        reply = await ask("请发送 MC 服务器地址，格式为 host[:port]，端口默认 25565。")
+        await _send_text(
+            "MC绑定：请发送 地址 服务器端口 RCON端口\n"
+            "例：mc.example.com 25565 25575\n"
+            "取消：q / quit / 退出 / 取消"
+        )
+        reply = await wait_group_reply()
         if reply is None:
             return
         if is_bind_flow_exit(reply):
             await _send_text("已取消MC绑定流程。")
             return
         if not reply:
-            await _send_text("服务器地址不能为空，请重新输入。")
+            await _send_text("绑定信息不能为空，请重新输入。")
             continue
-        await _send_text("正在探测服务器状态，请稍候。")
         try:
-            rendered = await mc_server_service.bind_group_server_with_status(
+            host, server_port, rcon_port = _parse_compact_bind_words(reply.split())
+            rendered = await mc_server_service.bind_group_server_with_rcon(
                 group_id,
-                reply,
+                host=host,
+                server_port=server_port,
+                rcon_port=rcon_port,
             )
         except ValueError as exc:
-            await _send_text(f"{exc}\n请重新输入服务器地址，或输入 q 结束流程。")
-            continue
-        await _send_rendered(rendered)
-        break
-
-    # 日志是可选事件源；skip 只跳过本次配置，不清空可能已有的旧日志路径。
-    while True:
-        reply = await ask(
-            "请发送 Paper latest.log 文件路径，或 logs 目录路径。\n"
-            "输入 skip 跳过日志配置。"
-        )
-        if reply is None:
-            return
-        if is_bind_flow_exit(reply):
-            await _send_text("已取消MC绑定流程。")
-            return
-        if is_bind_flow_skip(reply):
-            await _send_text("已跳过日志配置；如已有旧配置会继续保留。")
-            break
-        if not reply:
-            await _send_text("日志路径不能为空，请重新输入，或输入 skip 跳过。")
-            continue
-        log_path = mc_server_service.resolve_log_path(reply)
-        if not log_path:
             await _send_text(
-                "日志文件不存在或不可读，请重新输入 latest.log 或 logs 目录。"
+                f"{exc}\n请重新按格式输入，或输入 q 结束流程。"
             )
-            continue
-        await _send_text(await mc_server_service.set_log_path(group_id, str(log_path)))
-        break
-
-    # RCON 地址可以先保存，但必须等私聊密码写入后再用 list 命令验证闭环。
-    while True:
-        reply = await ask(
-            "请发送 RCON 地址，格式为 host[:port]，端口默认 25575。\n"
-            "输入 skip 跳过 RCON 配置。"
-        )
-        if reply is None:
-            return
-        if is_bind_flow_exit(reply):
-            await _send_text("已取消MC绑定流程。")
-            return
-        if is_bind_flow_skip(reply):
-            await _send_text(
-                "已跳过RCON配置。绑定流程完成，可用 mclist / mcinfo 检查。"
-            )
-            return
-        if not reply:
-            await _send_text("RCON地址不能为空，请重新输入，或输入 skip 跳过。")
-            continue
-        try:
-            message = await mc_server_service.set_rcon_address(group_id, reply)
-        except ValueError as exc:
-            await _send_text(f"{exc}\n请重新输入RCON地址，或输入 skip 跳过。")
             continue
         await _send_text(
-            f"{message}\n"
-            f"请私聊Bot发送：mcrcon passwd {group_id} <RCON密码>\n"
-            "设置完成后回本群输入 done，向导会执行 mcrcon list 验证。"
+            f"{rendered.lead_text or '服务器地址已保存'}\n"
+            "后续配置已转入私聊。"
         )
         break
 
-    # 密码只能私聊超级用户设置；群里只等待 done，防止 RCON 密码被误发到群内。
+    try:
+        await _send_private_text(
+            bot,
+            user_id,
+            "MC绑定继续：请回复两行\n"
+            "第1行：RCON密码\n"
+            "第2行：latest.log路径或logs目录，可写 skip\n"
+            "取消：q / quit / 退出 / 取消",
+        )
+    except Exception:
+        await _send_text(
+            "私聊发送失败。地址已保存，请主动私聊 Bot 使用 "
+            f"`mcrcon passwd {group_id} <密码>`，日志用 `mclog <路径>` 设置。"
+        )
+        return
+
+    # 密码和日志路径都转入私聊，避免 RCON 密码或本地路径出现在群聊里。
     while True:
-        reply = await ask("私聊设置密码后请输入 done；输入 q 可结束流程。")
+        reply = await wait_private_setup()
         if reply is None:
             return
         if is_bind_flow_exit(reply):
-            await _send_text("已结束MC绑定流程。RCON密码可稍后继续私聊配置。")
+            await _send_private_text(bot, user_id, "已结束MC绑定私聊配置。")
             return
-        if not is_bind_flow_done(reply):
-            await _send_text("这里请只输入 done 触发验证，或输入 q 结束流程。")
-            continue
         try:
-            message = await mc_server_service.verify_group_rcon(group_id)
+            password, log_path = parse_bind_private_setup(reply)
         except ValueError as exc:
-            await _send_text(
-                f"RCON验证失败：{exc}\n"
-                "请私聊修正密码后再次输入 done，或输入 q 结束流程。"
+            await _send_private_text(
+                bot,
+                user_id,
+                f"{exc}\n请重新回复两行：RCON密码 / 日志路径或 skip。",
             )
             continue
-        await _send_text(f"{message}\n绑定流程完成，可用 mclist / mcinfo 检查。")
+        try:
+            password_message = await mc_server_service.set_rcon_password(
+                group_id,
+                password,
+            )
+            log_message = ""
+            if log_path:
+                log_message = await mc_server_service.set_log_path(group_id, log_path)
+                if log_message.startswith("日志文件不存在或不可读"):
+                    await _send_private_text(
+                        bot,
+                        user_id,
+                        f"{log_message}\n请重发：RCON密码 / 日志路径或 skip。",
+                    )
+                    continue
+            verify_message = await mc_server_service.verify_group_rcon(group_id)
+        except ValueError as exc:
+            await _send_private_text(
+                bot,
+                user_id,
+                f"RCON验证失败：{exc}\n"
+                "请重发：RCON密码 / 日志路径或 skip，或输入 q 结束。"
+            )
+            continue
+        messages = [password_message]
+        if log_message:
+            messages.append(log_message)
+        messages.append(verify_message)
+        messages.append("绑定完成，可在群内用 mclist / mcinfo 检查。")
+        await _send_private_text(bot, user_id, "\n".join(messages))
         return
 
 
@@ -289,16 +316,30 @@ async def _(bot: Bot, event: Event, parts: Match[tuple[str, ...]]):
         await _finish_text("需要群管理员或MC管理权限。")
     words = _match_words(parts)
     if not words:
-        await _run_bind_flow(group_event)
+        await _run_bind_flow(bot, group_event)
         return
-    if len(words) != 1:
-        await _finish_text("用法：mcbind 或 mcbind <地址[:端口]>")
-    address = words[0]
     try:
-        rendered = await mc_server_service.bind_group_server_with_status(
-            str(group_event.group_id),
-            address,
-        )
+        if len(words) == 1:
+            preset_name = words[0]
+            if preset_name in get_settings().server_presets:
+                rendered = await mc_server_service.bind_group_server_preset(
+                    str(group_event.group_id),
+                    preset_name,
+                )
+            else:
+                rendered = await mc_server_service.bind_group_server_with_status(
+                    str(group_event.group_id),
+                    preset_name,
+                )
+        elif len(words) == 3:
+            rendered = await mc_server_service.bind_group_server_with_rcon(
+                str(group_event.group_id),
+                host=words[0],
+                server_port=parse_port(words[1], "服务器端口"),
+                rcon_port=parse_port(words[2], "RCON端口"),
+            )
+        else:
+            await _finish_text(_mcbind_usage_text())
     except ValueError as exc:
         await _finish_text(str(exc))
     await _finish_rendered(rendered)

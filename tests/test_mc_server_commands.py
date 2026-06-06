@@ -36,11 +36,17 @@ def test_mc_commands_accept_common_short_aliases():
 def test_mcbind_keeps_empty_and_address_modes():
     empty = mcbind_command().parse("mcbind")
     address = mcbind_command().parse("mcbind mc.example.com:25565")
+    preset = mcbind_command().parse("mcbind 1")
+    compact = mcbind_command().parse("mcbind mc.example.com 25565 25575")
 
     assert empty.matched
     assert empty.query("parts") == ()
     assert address.matched
     assert address.query("parts") == ("mc.example.com:25565",)
+    assert preset.matched
+    assert preset.query("parts") == ("1",)
+    assert compact.matched
+    assert compact.query("parts") == ("mc.example.com", "25565", "25575")
 
 
 def test_mcrcon_keeps_rcon_command_body_flat():

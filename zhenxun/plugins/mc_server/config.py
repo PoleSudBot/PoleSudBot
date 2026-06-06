@@ -5,7 +5,20 @@ from dataclasses import dataclass
 from zhenxun.configs.config import Config
 from zhenxun.configs.utils import RegisterConfig
 
-from .constants import MODULE_NAME
+from .constants import DEFAULT_MC_PORT, DEFAULT_RCON_PORT, MODULE_NAME
+
+
+@dataclass(frozen=True)
+class McServerPreset:
+    name: str
+    host: str
+    port: int
+    rcon_host: str
+    rcon_port: int
+    rcon_password: str
+    log_path: str
+    bluemap_base_url: str
+    bluemap_map_ids: list[str]
 
 
 @dataclass(frozen=True)
@@ -20,6 +33,7 @@ class McServerSettings:
     chat_format: str
     render_enabled: bool
     max_chart_points: int
+    server_presets: dict[str, McServerPreset]
 
 
 REGISTER_CONFIGS = [
@@ -103,6 +117,18 @@ REGISTER_CONFIGS = [
         help="人数图最多渲染的数据点数量",
         type=int,
     ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MC_SERVER_PRESETS",
+        value={},
+        default_value={},
+        help=(
+            "MC服务器预设，格式为 "
+            "{name: {host, port, rcon_host, rcon_port, rcon_password, "
+            "log_path, bluemap_base_url, bluemap_map_ids}}"
+        ),
+        type=dict,
+    ),
 ]
 
 
@@ -111,6 +137,16 @@ def _as_int(value: object, default: int, minimum: int) -> int:
         return max(minimum, int(value))
     except (TypeError, ValueError):
         return default
+
+
+def _as_port(value: object, default: int) -> int:
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return default
+    if not 1 <= port <= 65535:
+        return default
+    return port
 
 
 def _as_bool(value: object, default: bool) -> bool:
@@ -123,6 +159,49 @@ def _as_bool(value: object, default: bool) -> bool:
         if normalized in {"0", "false", "no", "off"}:
             return False
     return default if value is None else bool(value)
+
+
+def _as_text(value: object, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value).strip()
+
+
+def _as_text_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, list | tuple | set):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def _parse_server_presets(value: object) -> dict[str, McServerPreset]:
+    if not isinstance(value, dict):
+        return {}
+    presets: dict[str, McServerPreset] = {}
+    for raw_name, raw_config in value.items():
+        if not isinstance(raw_config, dict):
+            continue
+        name = str(raw_name).strip()
+        host = _as_text(raw_config.get("host"))
+        if not name or not host:
+            continue
+        # 预设只负责把配置归一化，地址格式与连通性仍在绑定时统一验证。
+        presets[name] = McServerPreset(
+            name=name,
+            host=host,
+            port=_as_port(raw_config.get("port", DEFAULT_MC_PORT), DEFAULT_MC_PORT),
+            rcon_host=_as_text(raw_config.get("rcon_host")),
+            rcon_port=_as_port(
+                raw_config.get("rcon_port", DEFAULT_RCON_PORT),
+                DEFAULT_RCON_PORT,
+            ),
+            rcon_password=_as_text(raw_config.get("rcon_password")),
+            log_path=_as_text(raw_config.get("log_path")),
+            bluemap_base_url=_as_text(raw_config.get("bluemap_base_url")),
+            bluemap_map_ids=_as_text_list(raw_config.get("bluemap_map_ids")),
+        )
+    return presets
 
 
 def get_settings() -> McServerSettings:
@@ -144,4 +223,5 @@ def get_settings() -> McServerSettings:
         chat_format=str(raw.get("MC_CHAT_FORMAT", "[{sender}] {message}")),
         render_enabled=_as_bool(raw.get("MC_RENDER_ENABLED", True), True),
         max_chart_points=_as_int(raw.get("MC_MAX_CHART_POINTS", 96), 96, 12),
+        server_presets=_parse_server_presets(raw.get("MC_SERVER_PRESETS", {})),
     )

@@ -13,7 +13,7 @@ from zhenxun.models.level_user import LevelUser
 from zhenxun.services.log import logger
 from zhenxun.utils.platform import PlatformUtils
 
-from .config import get_settings
+from .config import McServerPreset, get_settings
 from .constants import (
     MODULE_NAME,
     SWITCH_ALL,
@@ -98,21 +98,130 @@ class McServerService:
         address: str,
     ) -> RenderedMessage:
         parsed = parse_server_address(address)
-        status = await probe_server_status(
+        status = await self._probe_bindable_server(parsed.host, parsed.port)
+        await bind_server(str(group_id), host=parsed.host, port=parsed.port)
+        return await self._render_bind_result(
+            status,
+            lead_text=f"已成功绑定：{parsed.display}",
+        )
+
+    async def bind_group_server_with_rcon(
+        self,
+        group_id: str,
+        *,
+        host: str,
+        server_port: int,
+        rcon_port: int,
+    ) -> RenderedMessage:
+        parsed = parse_server_address(host, default_port=server_port)
+        status = await self._probe_bindable_server(parsed.host, parsed.port)
+        server = await bind_server(str(group_id), host=parsed.host, port=parsed.port)
+        server.rcon_host = parsed.host
+        server.rcon_port = rcon_port
+        await server.save(update_fields=["rcon_host", "rcon_port", "updated_at"])
+        return await self._render_bind_result(
+            status,
+            lead_text=(
+                f"已成功绑定：{parsed.display}\n"
+                f"已设置RCON地址：{format_server_address(parsed.host, rcon_port)}"
+            ),
+        )
+
+    async def bind_group_server_preset(
+        self,
+        group_id: str,
+        preset_name: str,
+    ) -> RenderedMessage:
+        preset = get_settings().server_presets.get(preset_name)
+        if not preset:
+            raise ValueError(f"未找到MC服务器预设：{preset_name}")
+
+        parsed = parse_server_address(preset.host, default_port=preset.port)
+        rcon_address = preset.rcon_host or format_server_address(
             parsed.host,
-            parsed.port,
+            preset.rcon_port,
+        )
+        rcon = parse_server_address(rcon_address, default_port=preset.rcon_port)
+        status = await self._probe_bindable_server(parsed.host, parsed.port)
+        server = await bind_server(str(group_id), host=parsed.host, port=parsed.port)
+        warning = await self._apply_preset_fields(
+            server,
+            preset,
+            rcon_host=rcon.host,
+            rcon_port=rcon.port,
+        )
+        address_lines = [
+            f"已绑定预设 {preset.name}：{parsed.display}",
+            f"已设置RCON地址：{rcon.display}",
+        ]
+        if warning:
+            address_lines.append(warning)
+        return await self._render_bind_result(
+            status,
+            lead_text="\n".join(address_lines),
+        )
+
+    async def _probe_bindable_server(self, host: str, port: int):
+        status = await probe_server_status(
+            host,
+            port,
             timeout=get_settings().request_timeout_seconds,
         )
         if not status.online:
             raise ValueError(f"服务器探测失败：{status.error or '无法连接'}")
-        await bind_server(str(group_id), host=parsed.host, port=parsed.port)
+        return status
+
+    async def _render_bind_result(
+        self,
+        status,
+        *,
+        lead_text: str,
+    ) -> RenderedMessage:
         rendered = await render_status(status)
-        fallback = f"已成功绑定：{parsed.display}\n\n{rendered.fallback_text}"
+        fallback = f"{lead_text}\n\n{rendered.fallback_text}"
         return RenderedMessage(
             image=rendered.image,
             fallback_text=fallback,
-            lead_text=f"已成功绑定：{parsed.display}",
+            lead_text=lead_text,
         )
+
+    async def _apply_preset_fields(
+        self,
+        server: McServer,
+        preset: McServerPreset,
+        *,
+        rcon_host: str,
+        rcon_port: int,
+    ) -> str:
+        update_fields = [
+            "rcon_host",
+            "rcon_port",
+            "rcon_password",
+            "log_path",
+            "bluemap_base_url",
+            "bluemap_map_ids",
+            "updated_at",
+        ]
+        server.rcon_host = rcon_host
+        server.rcon_port = rcon_port
+        server.rcon_password = preset.rcon_password
+        server.bluemap_base_url = _normalize_bluemap_base_url(preset.bluemap_base_url)
+        server.bluemap_map_ids = list(preset.bluemap_map_ids)
+
+        # 预设日志路径只有在可读时才覆盖旧值，避免一次路径填错破坏已有日志监听。
+        warning = ""
+        if preset.log_path:
+            log_path = self.resolve_log_path(preset.log_path)
+            if log_path:
+                server.log_path = str(log_path)
+            else:
+                update_fields.remove("log_path")
+                warning = f"日志路径不可读，已保留旧配置：{preset.log_path}"
+        else:
+            server.log_path = ""
+
+        await server.save(update_fields=update_fields)
+        return warning
 
     async def set_log_path(self, group_id: str, path: str) -> str:
         server = await self._require_server(group_id)
@@ -572,6 +681,15 @@ class McServerService:
 def _first_available_bot() -> Bot | None:
     bots = list(nonebot.get_bots().values())
     return bots[0] if bots else None
+
+
+def _normalize_bluemap_base_url(base_url: str) -> str:
+    text = base_url.strip()
+    if not text:
+        return ""
+    if not text.startswith(("http://", "https://")):
+        text = "http://" + text
+    return text.rstrip("/")
 
 
 def _rcon_label(server: McServer) -> str:

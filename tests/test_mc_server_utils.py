@@ -17,6 +17,8 @@ from zhenxun.plugins.mc_server.utils import (
     is_bind_flow_skip,
     normalize_datetime,
     now_local,
+    parse_bind_private_setup,
+    parse_port,
     parse_rcon_list_online_count,
     parse_server_address,
     parse_time_range,
@@ -47,6 +49,23 @@ def test_parse_server_address_rejects_invalid_port_and_unbracketed_ipv6():
 
     with pytest.raises(ValueError, match="IPv6"):
         parse_server_address("::1:25565")
+
+
+def test_parse_port_uses_custom_label_for_errors():
+    assert parse_port("25575", "RCON端口") == 25575
+    with pytest.raises(ValueError, match="RCON端口必须是数字"):
+        parse_port("abc", "RCON端口")
+
+
+def test_parse_bind_private_setup_accepts_password_and_optional_log_path():
+    assert parse_bind_private_setup("secret") == ("secret", None)
+    assert parse_bind_private_setup("secret\nskip") == ("secret", None)
+    assert parse_bind_private_setup("secret\n/path/to/logs") == (
+        "secret",
+        "/path/to/logs",
+    )
+    with pytest.raises(ValueError, match="RCON密码不能为空"):
+        parse_bind_private_setup("")
 
 
 def test_format_server_address_brackets_ipv6_hosts():

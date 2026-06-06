@@ -56,7 +56,39 @@ rcon.password=你的强密码
 
 ## 快速配置
 
-推荐使用绑定向导完成首次配置。它会一步步询问服务器地址、日志路径和 RCON，并在关键步骤做验证。
+如果大多数群都绑定同一批服务器，推荐先在配置文件中写好服务器预设，再让群管理员用 `mcbind <预设名>` 绑定。预设会复制成当前群自己的绑定，后续这个群仍可用 `mclog`、`mcbluemap`、`mcrcon set/passwd` 等命令单独覆盖配置。
+
+### 0. 可选：配置服务器预设
+
+配置项位于 `mc_server.MC_SERVER_PRESETS`，键名就是绑定时使用的预设名：
+
+```yaml
+mc_server:
+  MC_SERVER_PRESETS:
+    "1":
+      host: "mc.example.com"
+      port: 25565
+      rcon_host: ""
+      rcon_port: 25575
+      rcon_password: "your-rcon-password"
+      log_path: "/path/to/server/logs"
+      bluemap_base_url: "https://map.example.com"
+      bluemap_map_ids:
+        - "world"
+        - "world_nether"
+```
+
+`rcon_host` 为空时默认使用 `host`，因此同一台机器只需要写 `host`、`port` 和 `rcon_port`。`bluemap_base_url` 不带协议时会自动补 `http://`。
+
+在目标群内发送：
+
+```text
+mcbind 1
+```
+
+插件会先探测预设中的 MC 地址，探测成功后保存当前群绑定，并复制 RCON、日志和 BlueMap 配置。预设中的 RCON 密码会明文进入配置文件和数据库，请只使用 Bot 专用低权限密码，并限制 RCON 端口访问来源。
+
+也可以使用绑定向导完成首次配置。群内只填写 MC/RCON 地址，RCON 密码和日志路径会转到私聊中继续配置。
 
 ### 1. 启动绑定向导
 
@@ -66,78 +98,39 @@ rcon.password=你的强密码
 mcbind
 ```
 
-向导会先让你输入 MC 服务器地址。端口不写时默认 `25565`：
+向导会让你一次输入 MC 地址、MC 端口和 RCON 端口：
 
 ```text
-mc.example.com
-mc.example.com:25565
+mc.example.com 25565 25575
 ```
 
 IPv6 地址需要用方括号：
 
 ```text
-[::1]:25565
+[::1] 25565 25575
 ```
 
-地址填写后插件会先用 Java status ping 探测服务器。探测成功才会保存绑定，并返回版本、延迟、在线人数和可见玩家；探测失败不会覆盖旧绑定。
+地址填写后插件会先用 Java status ping 探测服务器。探测成功才会保存 MC 地址和同 host 的 RCON 地址；探测失败不会覆盖旧绑定。
 
-### 2. 按提示填写日志路径
+### 2. 私聊配置 RCON 密码和日志
 
-向导第二步会询问 Paper 日志。可以填写 `latest.log` 文件，也可以填写 `logs` 目录；如果是目录，插件会自动尝试 `<目录>/latest.log`。
+地址和端口保存后，Bot 会私聊发起人。按两行回复：
 
 ```text
-/path/to/server/logs/latest.log
-/path/to/server/logs
+RCON密码
+latest.log路径或logs目录
 ```
 
-日志路径必须是 Bot 进程能读取到的本地路径。第一次设置日志路径时，插件会从文件末尾开始读，不会把历史日志刷屏。后续只处理新增日志。
-
-如果暂时不配置日志，输入：
+如果暂时不配置日志，第二行写 `skip` 或省略：
 
 ```text
+my-rcon-password
 skip
 ```
 
-`skip` 不会清空旧日志路径，只是跳过本次配置。
+密码不会在群内回显，但会按 MVP 方案明文存入数据库。数据库管理员、数据库备份或导出文件的读取者都可以看到该密码。建议为 Bot 单独设置低权限 RCON 密码，并通过防火墙或内网限制 RCON 访问来源。私聊保存后会自动执行 `mcrcon list` 验证，失败时按私聊提示重发即可。
 
-### 3. 按提示配置 RCON
-
-向导第三步会询问 RCON 地址。端口不写时默认 `25575`：
-
-```text
-mc.example.com:25575
-mc.example.com
-```
-
-如果暂时不使用 RCON，输入：
-
-```text
-skip
-```
-
-输入 RCON 地址后，向导会提示超级用户私聊 Bot 设置密码：
-
-```text
-mcrcon passwd <群号> <RCON密码>
-```
-
-例如：
-
-```text
-mcrcon passwd 123456789 my-rcon-password
-```
-
-密码不会在群内回显，但会按 MVP 方案明文存入数据库。数据库管理员、数据库备份或导出文件的读取者都可以看到该密码。建议为 Bot 单独设置低权限 RCON 密码，并通过防火墙或内网限制 RCON 访问来源。
-
-私聊设置完成后，回到群里输入：
-
-```text
-done
-```
-
-向导会执行 `mcrcon list` 做 RCON 验证。验证失败时可以继续私聊修正密码，再回群输入 `done` 重试。
-
-### 4. 中途退出
+### 3. 中途退出
 
 向导任意步骤都可以输入以下任一内容结束：
 
@@ -150,17 +143,18 @@ quit
 
 单步等待超时时间由 `MC_BIND_FLOW_TIMEOUT_SECONDS` 控制，默认 `120` 秒。
 
-### 5. 单步/修正配置
+### 4. 单步/修正配置
 
 如果你只想快速改服务器地址，也可以继续使用单步命令：
 
 ```text
 mcbind mc.example.com:25565
+mcbind mc.example.com 25565 25575
 ```
 
-单步 `mcbind <地址>` 同样会先探测服务器，探测成功后才保存。
+单步 `mcbind <地址>` 同样会先探测服务器，探测成功后才保存。`mcbind <地址> <服务器端口> <RCON端口>` 会把 MC 地址和同 host 的 RCON 地址一起保存，适合 MC 端口和 RCON 端口不同但 IP 相同的服务器。
 
-日志、BlueMap、RCON 地址和 RCON 密码也保留单步命令，适合后续修正：
+日志、BlueMap、RCON 地址和 RCON 密码也保留单步命令，适合后续修正。日志路径必须是 Bot 进程能读取到的本地路径；第一次设置日志路径时，插件会从文件末尾开始读，不会把历史日志刷屏。
 
 ```text
 mclog /path/to/server/logs
@@ -169,7 +163,7 @@ mcrcon set mc.example.com:25575
 mcrcon passwd <群号> <RCON密码>
 ```
 
-### 6. 开启需要的播报或互通
+### 5. 开启需要的播报或互通
 
 三类开关默认都是关闭：
 
@@ -191,7 +185,7 @@ mctoggle chat on
 mclist
 ```
 
-### 7. 验证是否可用
+### 6. 验证是否可用
 
 查询状态：
 
@@ -317,12 +311,14 @@ mcc 今日
 
 ```text
 mcbind
+mcbind <预设名>
 mcbind <地址[:端口]>
+mcbind <地址> <服务器端口> <RCON端口>
 ```
 
-不带参数时进入绑定向导，依次配置 MC 地址、日志路径和 RCON。向导中可用 `q` / `quit` / `退出` / `取消` 结束；日志和 RCON 步骤可用 `skip` 跳过；RCON 密码私聊设置后回群输入 `done` 验证。
+不带参数时进入绑定向导：群内一次填写 MC 地址、MC 端口和 RCON 端口，RCON 密码和日志路径转到私聊保存并自动验证。向导中可用 `q` / `quit` / `退出` / `取消` 结束。
 
-带地址时走单步绑定。每群只保留一个服务器，重复执行会覆盖绑定地址。无论向导还是单步模式，都会先用 Java status ping 探测成功后才保存。
+带预设名时会把 `MC_SERVER_PRESETS` 中同名预设复制到当前群绑定。带地址时走单步绑定；三参数模式会同时保存 MC 地址和同 host 的 RCON 地址。每群只保留一个服务器，重复执行会覆盖绑定地址。无论向导、预设还是单步模式，都会先用 Java status ping 探测成功后才保存。
 
 ```text
 mclog <latest.log路径或logs目录>
@@ -438,6 +434,7 @@ mcw PlayerName @用户
 | `MC_CHAT_FORMAT` | `[{sender}] {message}` | 群消息同步到游戏内的显示格式。 |
 | `MC_RENDER_ENABLED` | `True` | 是否优先使用 htmlrender 渲染图片。 |
 | `MC_MAX_CHART_POINTS` | `96` | 人数图最多渲染的数据点数量。 |
+| `MC_SERVER_PRESETS` | `{}` | 服务器预设表，供 `mcbind <预设名>` 复制到当前群绑定。 |
 
 `MC_CHAT_FORMAT` 支持两个占位符：
 
@@ -451,6 +448,19 @@ mcw PlayerName @用户
 ```text
 [QQ/{sender}] {message}
 ```
+
+`MC_SERVER_PRESETS` 的每个预设支持以下字段：
+
+| 字段 | 默认值 | 说明 |
+| --- | --- | --- |
+| `host` | 必填 | MC Java 服务器地址。 |
+| `port` | `25565` | MC Java 服务器端口。 |
+| `rcon_host` | 同 `host` | RCON 地址；为空时使用 MC 地址。 |
+| `rcon_port` | `25575` | RCON 端口。 |
+| `rcon_password` | `""` | RCON 密码，会明文保存到配置和群绑定数据库。 |
+| `log_path` | `""` | `latest.log` 文件或 `logs` 目录；不可读时绑定成功但保留旧日志配置。 |
+| `bluemap_base_url` | `""` | BlueMap Web 根地址。 |
+| `bluemap_map_ids` | `[]` | BlueMap 地图 ID 列表。 |
 
 ## 数据口径
 

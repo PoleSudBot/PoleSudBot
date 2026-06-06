@@ -9,7 +9,7 @@ _USAGE = """
 ## MC 服务器助手
 
 每个群可以绑定一个 MC 服务器。普通用户主要使用查询、统计、白名单和群服互通功能。
-服务器管理者可发送 `mcbind` 进入绑定向导；完整配置教程见插件 README。
+服务器管理者可发送 `mcbind` 进入绑定向导，或发送 `mcbind <预设名>` 使用配置里的服务器预设；完整配置教程见插件 README。
 
 ### 常用查询
 
@@ -53,6 +53,10 @@ _USAGE = """
 
 - `mcbind`
   进入服务器绑定向导。
+- `mcbind <预设名>`
+  使用配置里的服务器预设绑定当前群。
+- `mcbind <地址> <服务器端口> <RCON端口>`
+  用同一个地址快速配置 MC 与 RCON 端口。
 - `mctoggle all on` / `mctoggle all off`
   一键开启或关闭进退服、连接、聊天互通开关。
 - `mcrcon <命令>` / `mcr <命令>`
@@ -93,14 +97,14 @@ if _nonebot_ready():
         usage=_USAGE,
         extra=PluginExtraData(
             author="k1yuyu",
-            version="0.1.0",
+            version="0.2.0",
             menu_type="游戏相关",
             configs=REGISTER_CONFIGS,
             commands=[
                 Command(
                     command="mcbind",
-                    params=["地址?"],
-                    description="进入绑定向导或验证绑定当前群MC服务器",
+                    params=["预设名|地址?"],
+                    description="进入向导、使用预设或验证绑定当前群MC服务器",
                 ),
                 Command(command="mcinfo/mci", description="查询当前群MC服务器状态"),
                 Command(command="mclist", description="查看当前群MC绑定与开关状态"),
