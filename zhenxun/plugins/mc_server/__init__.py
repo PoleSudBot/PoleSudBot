@@ -14,24 +14,26 @@ _USAGE = """
 ### 常用查询
 
 - `mcinfo` / `mcstatus` / `mci`
-  查看服务器状态、延迟、版本、在线人数和可见玩家。
+  查看服务器状态、延迟、版本、在线人数、可见玩家和在线时长。
 - `mclist`
   查看本群绑定状态、日志、BlueMap、RCON 和开关状态。
 
 ### 在线时长与图表
 
 - `mctime` / `mct`
-  查看本周目玩家在线时长排行。
+  查看本周目玩家在线时长排行，包含每位玩家日平均在线。
 - `mctime [范围]` / `mct [范围]`
   查看指定范围的玩家在线时长排行。
 - `mctime 我` / `mctime me` / `mctime 自己`
-  查看自己本周目的个人在线情况图。
+  查看自己本周的个人在线情况图。
 - `mctime @用户 [范围]` / `mct @用户 [范围]`
   查看指定 QQ 绑定玩家的个人在线情况图。
+- `mctime <玩家名> [范围]` / `mct <玩家名> [范围]`
+  按 MC 玩家名查看个人在线情况图，不要求先绑定 QQ。
 - `mctime 我 今日` / `mctime me 本周` / `mctime 自己 本月`
   查看自己指定范围的个人在线情况图。
 - `mcchart [范围]` / `mcc [范围]`
-  查看服务器在线人数变化图。
+  查看服务器在线人数变化图；直接使用 `mcc` 时默认查询 06:00 分界的本日。
 
 ### 群服消息互通
 
@@ -66,7 +68,9 @@ _USAGE = """
 
 统计类指令的 `[范围]` 支持：
 
-- 不写范围时默认 `本周目`
+- `mctime/mct` 排行不写范围时默认 `本周目`
+- `mctime/mct` 个人查询不写范围时默认 `本周`
+- `mcchart/mcc` 不写范围时默认 06:00 分界的 `本日`
 - `今日` / `本周` / `本月` / `本周目`
 - `YYYY-MM-DD`
 - `YYYY-MM-DD..YYYY-MM-DD`
@@ -97,7 +101,7 @@ if _nonebot_ready():
         usage=_USAGE,
         extra=PluginExtraData(
             author="k1yuyu",
-            version="0.2.1",
+            version="0.3.0",
             menu_type="游戏相关",
             configs=REGISTER_CONFIGS,
             commands=[
@@ -115,7 +119,7 @@ if _nonebot_ready():
                 ),
                 Command(
                     command="mctime/mct",
-                    params=["@用户|me|范围"],
+                    params=["玩家名|@用户|me|范围"],
                     description="查询在线时长排行或个人在线情况图",
                 ),
                 Command(

@@ -8,6 +8,8 @@ import pytest
 
 from zhenxun.plugins.mc_server.utils import (
     MC_TIMEZONE,
+    business_day_count,
+    business_today_range,
     build_tellraw_command,
     classify_tellraw_response,
     downsample_points,
@@ -96,6 +98,28 @@ def test_parse_time_range_accepts_single_day_and_range():
 def test_parse_time_range_rejects_reversed_range():
     with pytest.raises(ValueError, match="结束日期"):
         parse_time_range("2026-05-03..2026-05-01")
+
+
+def test_business_today_range_uses_six_oclock_boundary():
+    early = datetime(2026, 5, 16, 5, 30, 0, tzinfo=MC_TIMEZONE)
+    daytime = datetime(2026, 5, 16, 12, 0, 0, tzinfo=MC_TIMEZONE)
+
+    early_range = business_today_range(early)
+    daytime_range = business_today_range(daytime)
+
+    assert early_range.label == "本日"
+    assert early_range.start == datetime(2026, 5, 15, 6, 0, 0, tzinfo=MC_TIMEZONE)
+    assert early_range.end == early
+    assert daytime_range.start == datetime(2026, 5, 16, 6, 0, 0, tzinfo=MC_TIMEZONE)
+
+
+def test_business_day_count_uses_six_oclock_days():
+    start = datetime(2026, 5, 15, 6, 0, 0, tzinfo=MC_TIMEZONE)
+    same_day_end = datetime(2026, 5, 16, 5, 59, 0, tzinfo=MC_TIMEZONE)
+    next_day_end = datetime(2026, 5, 16, 6, 1, 0, tzinfo=MC_TIMEZONE)
+
+    assert business_day_count(start, same_day_end) == 1
+    assert business_day_count(start, next_day_end) == 2
 
 
 def test_build_tellraw_command_escapes_json_payload():

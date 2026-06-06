@@ -54,12 +54,19 @@ async def _query_status(server: McServer, *, timeout: int) -> ServerStatus:
     for key, player in bluemap_players.items():
         if key not in known_names:
             players.append(PlayerStatus(name=player.name, uuid=player.uuid))
-    from .repositories import list_active_sessions
+    from .repositories import (
+        get_total_online_seconds_by_player_names,
+        list_active_sessions,
+    )
 
     active_sessions = {
         session.player_name.lower(): session
         for session in await list_active_sessions(server)
     }
+    total_seconds = await get_total_online_seconds_by_player_names(
+        server,
+        [player.name for player in players],
+    )
 
     enriched: list[PlayerStatus] = []
     for player in players:
@@ -76,6 +83,7 @@ async def _query_status(server: McServer, *, timeout: int) -> ServerStatus:
                 name=player.name,
                 uuid=player.uuid,
                 online_seconds=online_seconds,
+                total_seconds=total_seconds.get(player.name.lower(), 0),
                 position=position,
             )
         )

@@ -15,9 +15,20 @@ from .models import (
     McSeason,
     McServer,
 )
-from .stats import aggregate_playtime, clip_online_segment
-from .types import PersonalOnlineData, PlaytimeEntry, PlaytimeRow, TimeRange
-from .utils import now_local
+from .stats import (
+    aggregate_daily_online_points,
+    aggregate_playtime,
+    clip_online_segment,
+    overlap_seconds,
+)
+from .types import (
+    PersonalOnlineData,
+    PersonalOnlineSegment,
+    PlaytimeEntry,
+    PlaytimeRow,
+    TimeRange,
+)
+from .utils import business_day_count, now_local
 
 
 async def get_server_for_group(group_id: str, platform: str = "qq") -> McServer | None:
@@ -186,8 +197,6 @@ async def get_playtime_entries(
 
     rows = []
     for session in await query.all():
-        from .stats import overlap_seconds
-
         # 将会话裁剪到查询窗口内，避免跨天/跨周目的长会话把范围外时长算进去。
         seconds = overlap_seconds(
             session.started_at,
@@ -202,7 +211,41 @@ async def get_playtime_entries(
                 seconds=seconds,
             )
         )
-    return aggregate_playtime(rows)
+    day_count = business_day_count(time_range.start, time_range.end)
+    return [
+        PlaytimeEntry(
+            player_name=entry.player_name,
+            qq_id=entry.qq_id,
+            seconds=entry.seconds,
+            average_seconds=entry.seconds // day_count,
+        )
+        for entry in aggregate_playtime(rows)
+    ]
+
+
+async def get_total_online_seconds_by_player_names(
+    server: McServer,
+    player_names: list[str],
+) -> dict[str, int]:
+    names = _unique_non_empty(player_names)
+    if not names:
+        return {}
+    query_filter = _player_name_filter(names)
+    totals = {name.lower(): 0 for name in names}
+    now = now_local()
+    for session in await (
+        McOnlineSession.filter(server=server).filter(query_filter).all()
+    ):
+        # 进行中的 session 按当前时间截断，状态卡才能展示实时累计在线。
+        seconds = overlap_seconds(
+            session.started_at,
+            session.ended_at,
+            session.started_at,
+            now,
+        )
+        key = session.player_name.lower()
+        totals[key] = totals.get(key, 0) + seconds
+    return totals
 
 
 async def get_personal_online_data(
@@ -223,10 +266,7 @@ async def get_personal_online_data(
         [binding.player.name for binding in bindings if binding.player]
     )
 
-    query = McOnlineSession.filter(
-        server=server,
-        started_at__lt=time_range.end,
-    ).filter(Q(ended_at__gte=time_range.start) | Q(ended_at__isnull=True))
+    query = _online_sessions_in_range(server, time_range)
 
     # 兼容“先游玩后绑定”：旧 session 的 qq_id 可能为空。
     # player 外键或名称仍能把历史在线段归到当前绑定用户。
@@ -234,21 +274,13 @@ async def get_personal_online_data(
     if player_ids:
         target_filter |= Q(player_id__in=player_ids)
     if player_names:
-        target_filter |= Q(player_name__in=player_names)
+        target_filter |= _player_name_filter(player_names)
 
     sessions = await query.filter(target_filter).order_by("started_at").all()
-    segments = []
+    segments = _segments_from_sessions(sessions, time_range)
     for session in sessions:
-        segment = clip_online_segment(
-            session.started_at,
-            session.ended_at,
-            time_range.start,
-            time_range.end,
-        )
-        if segment:
-            segments.append(segment)
-            if session.player_name:
-                player_names.append(session.player_name)
+        if session.player_name:
+            player_names.append(session.player_name)
 
     player_names = _unique_non_empty(player_names)
     return PersonalOnlineData(
@@ -259,6 +291,61 @@ async def get_personal_online_data(
         qq_id=target_qq,
         player_names=player_names,
         segments=segments,
+        daily_points=aggregate_daily_online_points(
+            segments,
+            time_range.start,
+            time_range.end,
+        ),
+        total_seconds=sum(segment.seconds for segment in segments),
+    )
+
+
+async def get_personal_online_data_by_player_name(
+    server: McServer,
+    time_range: TimeRange,
+    *,
+    player_name: str,
+    title: str,
+) -> PersonalOnlineData:
+    target_name = player_name.strip()
+    if not target_name:
+        raise ValueError("玩家名不能为空。")
+
+    player = await McPlayer.get_or_none(server=server, name__iexact=target_name)
+    name_filter = Q(player_name__iexact=target_name)
+    if player:
+        name_filter |= Q(player=player)
+    exists = player is not None or await McOnlineSession.exists(
+        server=server,
+        player_name__iexact=target_name,
+    )
+    if not exists:
+        raise ValueError(f"未找到玩家在线记录：{target_name}")
+
+    sessions = await (
+        _online_sessions_in_range(server, time_range)
+        .filter(name_filter)
+        .order_by("started_at")
+        .all()
+    )
+    player_names = _unique_non_empty(
+        [player.name if player else target_name]
+        + [session.player_name for session in sessions if session.player_name]
+    )
+    segments = _segments_from_sessions(sessions, time_range)
+    return PersonalOnlineData(
+        title=title,
+        range_label=time_range.label,
+        range_start=time_range.start,
+        range_end=time_range.end,
+        qq_id="",
+        player_names=player_names,
+        segments=segments,
+        daily_points=aggregate_daily_online_points(
+            segments,
+            time_range.start,
+            time_range.end,
+        ),
         total_seconds=sum(segment.seconds for segment in segments),
     )
 
@@ -276,6 +363,38 @@ async def get_count_samples(
         .order_by("captured_at")
         .all()
     )
+
+
+def _online_sessions_in_range(server: McServer, time_range: TimeRange):
+    return McOnlineSession.filter(
+        server=server,
+        started_at__lt=time_range.end,
+    ).filter(Q(ended_at__gte=time_range.start) | Q(ended_at__isnull=True))
+
+
+def _segments_from_sessions(
+    sessions: list[McOnlineSession],
+    time_range: TimeRange,
+) -> list[PersonalOnlineSegment]:
+    segments = []
+    for session in sessions:
+        segment = clip_online_segment(
+            session.started_at,
+            session.ended_at,
+            time_range.start,
+            time_range.end,
+        )
+        if segment:
+            segments.append(segment)
+    return segments
+
+
+def _player_name_filter(player_names: list[str]) -> Q:
+    names = _unique_non_empty(player_names)
+    query_filter = Q(player_name__iexact=names[0])
+    for name in names[1:]:
+        query_filter |= Q(player_name__iexact=name)
+    return query_filter
 
 
 async def get_or_init_cursor(server: McServer, path: str, *, size: int) -> McLogCursor:

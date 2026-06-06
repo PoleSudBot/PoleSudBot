@@ -11,15 +11,11 @@
       gap: 14px;
     }
 
-    .hero-card {
-      padding: 20px;
-    }
-
     .metric-row {
       display: grid;
-      grid-template-columns: 1.2fr 1fr 1.2fr 1.3fr;
+      grid-template-columns: 1.15fr 0.9fr 1.35fr 1.25fr;
       gap: 12px;
-      margin-top: 17px;
+      margin-top: 16px;
     }
 
     .player-list {
@@ -29,10 +25,10 @@
 
     .player-row {
       display: grid;
-      grid-template-columns: minmax(120px, 170px) 1fr minmax(88px, 116px);
+      grid-template-columns: minmax(120px, 170px) 1fr minmax(112px, 150px) minmax(112px, 150px);
       gap: 12px;
       align-items: center;
-      min-height: 44px;
+      min-height: 48px;
       padding: 10px 0;
       border-top: 1px solid var(--color-border);
     }
@@ -44,35 +40,51 @@
     .player-name {
       color: var(--color-text-dark);
       font-size: 15px;
-      line-height: 1.2;
-      font-weight: 900;
-      overflow-wrap: anywhere;
-    }
-
-    .player-detail,
-    .player-online {
-      color: var(--color-text-muted);
-      font-size: 12px;
-      line-height: 1.25;
+      line-height: 1.22;
       font-weight: 700;
       overflow-wrap: anywhere;
     }
 
-    .player-online {
+    .player-detail,
+    .player-time {
+      color: var(--color-text-muted);
+      font-size: 12px;
+      line-height: 1.25;
+      font-weight: 500;
+      overflow-wrap: anywhere;
+    }
+
+    .player-time {
       text-align: right;
       white-space: nowrap;
+    }
+
+    .time-label {
+      display: block;
+      margin-bottom: 3px;
+      color: var(--color-text-muted);
+      font-size: 10px;
+      line-height: 1;
+      font-weight: 500;
+    }
+
+    .time-value {
+      color: var(--color-primary-dark);
+      font-size: 13px;
+      line-height: 1.1;
+      font-weight: 700;
     }
   </style>
 </head>
 <body>
   <div class="mc-wrapper">
     <div class="status-layout">
-      <div class="mc-card hero-card">
+      <div class="mc-card">
         <div class="hero-head">
           <div class="title-group">
             <p class="eyebrow">MC 服务器状态</p>
-            <h1 class="page-title">{{ status.name }}</h1>
-            <div class="subtle">{{ status.address }}</div>
+            <h1 class="page-title">{{ display_title }}</h1>
+            <div class="subtle">{{ address }}</div>
           </div>
           <span class="status-badge {{ 'online' if status.online else 'offline' }}">{{ "在线" if status.online else "离线" }}</span>
         </div>
@@ -124,7 +136,14 @@
           <div class="player-row">
             <div class="player-name">{{ player.name }}</div>
             <div class="player-detail">{{ player.position or "无坐标数据" }}</div>
-            <div class="player-online">{{ player.online or "" }}</div>
+            <div class="player-time">
+              <span class="time-label">当前在线</span>
+              <span class="time-value">{{ player.online or "0分钟" }}</span>
+            </div>
+            <div class="player-time">
+              <span class="time-label">总在线</span>
+              <span class="time-value">{{ player.total or "0分钟" }}</span>
+            </div>
           </div>
           {% endfor %}
         </div>

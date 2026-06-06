@@ -423,21 +423,27 @@ async def _(event: Event, parts: Match[tuple[Text | At, ...]]):
     if not group_event:
         await _finish_text("请在群内查询在线时长。")
     arg_parts = _part_items(parts)
-    qq_id, range_text = resolve_mctime_query(
+    query = resolve_mctime_query(
         arg_parts,
         self_qq_id=str(group_event.user_id),
     )
     try:
-        if qq_id:
+        if query.target_type == "qq" and query.target:
             rendered = await mc_server_service.personal_online_message(
                 str(group_event.group_id),
-                range_text,
-                qq_id=qq_id,
+                query.range_text,
+                qq_id=query.target,
+            )
+        elif query.target_type == "player" and query.target:
+            rendered = await mc_server_service.personal_online_message_by_player_name(
+                str(group_event.group_id),
+                query.range_text,
+                player_name=query.target,
             )
         else:
             rendered = await mc_server_service.playtime_message(
                 str(group_event.group_id),
-                range_text,
+                query.range_text,
             )
         await _finish_rendered(rendered)
     except ValueError as exc:

@@ -7,13 +7,13 @@
     {% include './_mc_style.css' %}
     .player-panel {
       margin-top: 16px;
-      padding: 14px 16px;
+      padding: 13px 15px;
       display: flex;
       align-items: center;
       gap: 12px;
       background: var(--color-primary-pale);
       border: 1px solid var(--color-border);
-      border-radius: 12px;
+      border-radius: 10px;
     }
 
     .player-name {
@@ -21,7 +21,7 @@
       color: var(--color-text-dark);
       font-size: 16px;
       line-height: 1.25;
-      font-weight: 900;
+      font-weight: 700;
       overflow-wrap: anywhere;
     }
 
@@ -30,44 +30,7 @@
       color: var(--color-text-muted);
       font-size: 12px;
       line-height: 1.2;
-      font-weight: 700;
-    }
-
-    .timeline-shell {
-      margin-top: 16px;
-      padding: 18px 16px 14px;
-      background: var(--color-primary-pale);
-      border: 1px solid var(--color-border);
-      border-radius: 12px;
-    }
-
-    .timeline {
-      position: relative;
-      height: 54px;
-      border-radius: 12px;
-      background: var(--color-primary-soft);
-      border: 1px solid var(--color-border-strong);
-      overflow: hidden;
-    }
-
-    .segment {
-      position: absolute;
-      top: 9px;
-      height: 34px;
-      border-radius: 10px;
-      background: var(--color-primary);
-      box-shadow: inset 0 -9px 18px rgba(209, 71, 117, 0.2);
-    }
-
-    .axis {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      margin-top: 9px;
-      color: var(--color-text-muted);
-      font-size: 11px;
-      line-height: 1.2;
-      font-weight: 800;
+      font-weight: 500;
     }
 
     .segment-list {
@@ -89,7 +52,7 @@
       color: var(--color-text-dark);
       font-size: 13px;
       line-height: 1.25;
-      font-weight: 800;
+      font-weight: 500;
       overflow-wrap: anywhere;
     }
 
@@ -97,7 +60,7 @@
       color: var(--color-primary-dark);
       font-size: 13px;
       line-height: 1.2;
-      font-weight: 900;
+      font-weight: 700;
       text-align: right;
       white-space: nowrap;
     }
@@ -136,18 +99,13 @@
         {{ icons.icon_tile("user") }}
         <div>
           <div class="player-name">{{ player_label }}</div>
-          <div class="player-meta">按在线 session 裁剪统计</div>
+          <div class="player-meta">按 06:00 业务日汇总在线时长</div>
         </div>
       </div>
 
       {% if segments %}
-      <div class="timeline-shell">
-        <div class="timeline">
-          {% for segment in segments %}
-          <div class="segment" style="left: {{ segment.left }}%; width: {{ segment.width }}%;" title="{{ segment.start }} ~ {{ segment.end }} {{ segment.duration }}"></div>
-          {% endfor %}
-        </div>
-        <div class="axis"><span>{{ range_start }}</span><span>{{ range_end }}</span></div>
+      <div class="chart-shell">
+        <div id="personal-online-chart" class="chart-container"></div>
       </div>
 
       <div class="segment-list">
@@ -163,5 +121,76 @@
       {% endif %}
     </div>
   </div>
+
+  {% if segments %}
+  <script src="{{ asset('js/echarts.min.js') }}"></script>
+  <script>
+    const chartDom = document.getElementById("personal-online-chart");
+    if (chartDom) {
+      const chart = echarts.init(chartDom);
+      const rootStyle = getComputedStyle(document.documentElement);
+      const primaryColor = rootStyle.getPropertyValue("--color-primary-dark").trim() || "#d14775";
+      const mutedColor = rootStyle.getPropertyValue("--color-text-muted").trim() || "#9b7582";
+      const borderColor = rootStyle.getPropertyValue("--color-border").trim() || "#ffe0ea";
+      const durations = {{ chart_durations | dump_json | safe }};
+      const formatDuration = (seconds) => {
+        const value = Math.max(0, Number(seconds) || 0);
+        const hours = Math.floor(value / 3600);
+        const minutes = Math.floor((value % 3600) / 60);
+        return hours > 0 ? `${hours}小时${String(minutes).padStart(2, "0")}分` : `${minutes}分钟`;
+      };
+
+      chart.setOption({
+        backgroundColor: "transparent",
+        animation: false,
+        grid: { top: 28, bottom: 34, left: 54, right: 20 },
+        tooltip: {
+          trigger: "axis",
+          formatter: (params) => {
+            const item = Array.isArray(params) ? params[0] : params;
+            const index = item.dataIndex || 0;
+            return `${item.axisValue}<br/>在线时长：${durations[index] || formatDuration(item.value)}`;
+          },
+          axisPointer: {
+            type: "line",
+            lineStyle: { color: borderColor, width: 1 }
+          }
+        },
+        xAxis: {
+          type: "category",
+          boundaryGap: false,
+          data: {{ chart_labels | dump_json | safe }},
+          axisTick: { show: false },
+          axisLabel: { color: mutedColor, fontSize: 11, fontWeight: 500 },
+          axisLine: { lineStyle: { color: borderColor, width: 1 } }
+        },
+        yAxis: {
+          type: "value",
+          minInterval: 3600,
+          axisTick: { show: false },
+          axisLabel: {
+            color: mutedColor,
+            fontSize: 11,
+            formatter: (value) => `${Math.round(value / 3600)}h`
+          },
+          axisLine: { show: true, lineStyle: { color: borderColor, width: 1 } },
+          splitLine: { lineStyle: { color: "rgba(209, 71, 117, 0.12)", type: "dashed" } }
+        },
+        series: [{
+          name: "在线时长",
+          type: "line",
+          smooth: true,
+          symbol: "circle",
+          symbolSize: 7,
+          data: {{ chart_values | dump_json | safe }},
+          lineStyle: { color: primaryColor, width: 3 },
+          itemStyle: { color: primaryColor, borderColor: "#fff", borderWidth: 2 },
+          areaStyle: { color: "rgba(255, 102, 153, 0.14)" },
+          emphasis: { focus: "series" }
+        }]
+      });
+    }
+  </script>
+  {% endif %}
 </body>
 </html>

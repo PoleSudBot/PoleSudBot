@@ -2,8 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from .types import PersonalOnlineSegment, PlaytimeEntry, PlaytimeRow, SamplePoint
-from .utils import normalize_datetime
+from .types import (
+    OnlineDurationPoint,
+    PersonalOnlineSegment,
+    PlaytimeEntry,
+    PlaytimeRow,
+    SamplePoint,
+)
+from .utils import iter_business_days, normalize_datetime
 
 
 def overlap_seconds(
@@ -79,3 +85,24 @@ def aggregate_sample_points(rows: list[object]) -> list[SamplePoint]:
         )
         for row in rows
     ]
+
+
+def aggregate_daily_online_points(
+    segments: list[PersonalOnlineSegment],
+    range_start: datetime,
+    range_end: datetime,
+) -> list[OnlineDurationPoint]:
+    points = []
+    for day_range in iter_business_days(range_start, range_end):
+        # 日趋势按 06:00 业务日切分，避免跨午夜长会话被硬拆到自然日。
+        seconds = sum(
+            overlap_seconds(
+                segment.started_at,
+                segment.ended_at,
+                day_range.start,
+                day_range.end,
+            )
+            for segment in segments
+        )
+        points.append(OnlineDurationPoint(label=day_range.label, seconds=seconds))
+    return points

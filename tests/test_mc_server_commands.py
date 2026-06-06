@@ -3,6 +3,7 @@ from __future__ import annotations
 from nonebot_plugin_alconna import At, Text
 
 from zhenxun.plugins.mc_server.command_schema import (
+    MctimeQuery,
     mcbind_command,
     mcchart_command,
     mcinfo_command,
@@ -92,8 +93,7 @@ def test_mctime_target_parser_keeps_ranking_range_without_target():
 
     assert parsed.matched
     assert resolve_mctime_query(parsed.query("parts"), self_qq_id="10000") == (
-        None,
-        "今日",
+        MctimeQuery("ranking", None, "今日")
     )
 
 
@@ -102,8 +102,7 @@ def test_mctime_target_parser_uses_ranking_default_without_args():
 
     assert parsed.matched
     assert resolve_mctime_query(parsed.query("parts"), self_qq_id="10000") == (
-        None,
-        None,
+        MctimeQuery("ranking")
     )
 
 
@@ -113,6 +112,31 @@ def test_mctime_target_parser_supports_self_keywords():
 
         assert parsed.matched
         assert resolve_mctime_query(parsed.query("parts"), self_qq_id="10000") == (
-            "10000",
-            "本周",
+            MctimeQuery("qq", "10000", "本周")
         )
+
+
+def test_mctime_target_parser_supports_player_name():
+    parsed = mctime_command().parse("mct Letemps")
+
+    assert parsed.matched
+    assert resolve_mctime_query(parsed.query("parts"), self_qq_id="10000") == (
+        MctimeQuery("player", "Letemps")
+    )
+
+
+def test_mctime_target_parser_supports_player_name_with_range():
+    parsed = mctime_command().parse("mct Letemps 本周")
+
+    assert parsed.matched
+    assert resolve_mctime_query(parsed.query("parts"), self_qq_id="10000") == (
+        MctimeQuery("player", "Letemps", "本周")
+    )
+
+
+def test_mctime_target_parser_supports_at_with_range():
+    parts = (At("user", "20000"), Text("今日"))
+
+    assert resolve_mctime_query(parts, self_qq_id="10000") == (
+        MctimeQuery("qq", "20000", "今日")
+    )

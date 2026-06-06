@@ -30,9 +30,9 @@ def _get_settings():
 
 def format_status_text(status: ServerStatus) -> str:
     if not status.online:
-        return f"{status.name} 离线：{status.error or '无法连接'}"
+        return f"{_display_title(status.name)} 离线：{status.error or '无法连接'}"
     lines = [
-        f"{status.name} ({status.address})",
+        f"{_display_title(status.name)} ({status.address})",
         (
             f"状态：在线  延迟：{status.latency_ms:.0f}ms"
             if status.latency_ms is not None
@@ -49,7 +49,9 @@ def format_status_text(status: ServerStatus) -> str:
             if player.position:
                 detail += f"  {player.position}"
             if player.online_seconds:
-                detail += f"  在线{format_duration(player.online_seconds)}"
+                detail += f"  当前{format_duration(player.online_seconds)}"
+            if player.total_seconds:
+                detail += f"  总计{format_duration(player.total_seconds)}"
             lines.append(f"- {detail}")
     return "\n".join(lines)
 
@@ -59,18 +61,20 @@ def format_playtime_text(title: str, entries: list[PlaytimeEntry]) -> str:
         return f"{title}\n暂无在线时长记录。"
     lines = [title]
     for index, entry in enumerate(entries, 1):
-        lines.append(f"{index}. {entry.player_name}：{format_duration(entry.seconds)}")
+        lines.append(
+            f"{index}. {entry.player_name}：{format_duration(entry.seconds)}"
+            f"（日均 {format_duration(entry.average_seconds)}）"
+        )
     return "\n".join(lines)
 
 
 def format_chart_text(data: ChartData) -> str:
     if not data.points:
         return f"{data.title}\n{data.range_label} 暂无人数采样。"
-    peak, avg = chart_summary(data.points)
     return (
         f"{data.title}\n"
         f"范围：{data.range_label}\n"
-        f"采样：{len(data.points)} 个  峰值：{peak}  平均：{avg:.1f}"
+        f"采样：{len(data.points)} 个"
     )
 
 
@@ -88,6 +92,13 @@ def _format_point_label(index: int, total: int, label: str) -> str:
     if index == total // 2:
         return label
     return ""
+
+
+def _display_title(name: str) -> str:
+    text = str(name or "").strip()
+    if not text or text == "默认服务器":
+        return "MC 服务器"
+    return text
 
 
 def format_personal_online_text(data: PersonalOnlineData) -> str:
@@ -127,12 +138,17 @@ async def render_status(status: ServerStatus) -> RenderedMessage:
                 _STATUS_TEMPLATE,
                 {
                     "status": status,
+                    "display_title": _display_title(status.name),
+                    "address": status.address,
                     "players": [
                         {
                             "name": player.name,
                             "position": player.position,
                             "online": format_duration(player.online_seconds)
                             if player.online_seconds
+                            else "",
+                            "total": format_duration(player.total_seconds)
+                            if player.total_seconds
                             else "",
                         }
                         for player in status.players
@@ -162,6 +178,9 @@ async def render_playtime(title: str, entries: list[PlaytimeEntry]) -> RenderedM
                             "rank": index,
                             "name": entry.player_name,
                             "duration": format_duration(entry.seconds),
+                            "average_duration": format_duration(
+                                entry.average_seconds
+                            ),
                             "seconds": entry.seconds,
                         }
                         for index, entry in enumerate(entries[:20], 1)
@@ -183,8 +202,6 @@ async def render_chart(data: ChartData) -> RenderedMessage:
         return RenderedMessage(image=None, fallback_text=fallback)
     max_points = settings.max_chart_points
     points = downsample_points(data.points, max_points)
-    peak, avg = chart_summary(data.points)
-    point_count = len(points)
     try:
         return RenderedMessage(
             image=await _render_template(
@@ -192,25 +209,18 @@ async def render_chart(data: ChartData) -> RenderedMessage:
                 {
                     "title": data.title,
                     "range_label": data.range_label,
-                    "peak": peak,
-                    "avg": round(avg, 1),
+                    "sample_count": len(data.points),
+                    "labels": [
+                        point.captured_at.strftime("%m-%d %H:%M")
+                        for point in points
+                    ],
+                    "counts": [point.online_count for point in points],
                     "points": [
                         {
-                            "label": _format_point_label(
-                                index,
-                                point_count,
-                                point.captured_at.strftime("%m-%d %H:%M"),
-                            ),
                             "tooltip": point.captured_at.strftime("%m-%d %H:%M"),
                             "count": point.online_count,
-                            "height": int((point.online_count / peak) * 120)
-                            if peak
-                            else 2,
-                            "percent": int((point.online_count / peak) * 100)
-                            if peak
-                            else 0,
                         }
-                        for index, point in enumerate(points)
+                        for point in points
                     ],
                 },
                 viewport_width=820,
@@ -227,6 +237,7 @@ async def render_personal_online(data: PersonalOnlineData) -> RenderedMessage:
     if not _get_settings().render_enabled:
         return RenderedMessage(image=None, fallback_text=fallback)
     segments = _timeline_segments(data)
+    daily_seconds = [point.seconds for point in data.daily_points]
     try:
         return RenderedMessage(
             image=await _render_template(
@@ -239,6 +250,11 @@ async def render_personal_online(data: PersonalOnlineData) -> RenderedMessage:
                     else f"QQ {data.qq_id}",
                     "total_duration": format_duration(data.total_seconds),
                     "segment_count": len(data.segments),
+                    "chart_labels": [point.label for point in data.daily_points],
+                    "chart_values": daily_seconds,
+                    "chart_durations": [
+                        format_duration(seconds) for seconds in daily_seconds
+                    ],
                     "segments": segments,
                     "segment_rows": segments[:8],
                     "range_start": data.range_start.strftime("%m-%d %H:%M"),

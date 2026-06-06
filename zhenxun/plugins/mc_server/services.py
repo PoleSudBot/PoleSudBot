@@ -41,6 +41,7 @@ from .repositories import (
     get_count_samples,
     get_or_init_cursor,
     get_personal_online_data,
+    get_personal_online_data_by_player_name,
     get_playtime_entries,
     get_server_for_group,
     record_count_sample,
@@ -54,6 +55,7 @@ from .status import probe_server_status, query_server_status
 from .types import ChartData, RenderedMessage
 from .utils import (
     build_tellraw_command,
+    business_today_range,
     classify_tellraw_response,
     format_duration,
     format_server_address,
@@ -346,7 +348,7 @@ class McServerService:
         time_range = parse_time_range(range_text, season.started_at)
         entries = await get_playtime_entries(server, time_range)
         return await render_playtime(
-            f"{server.name} {time_range.label} 在线时长",
+            f"{_server_title(server)} {time_range.label} 在线时长",
             entries,
         )
 
@@ -359,12 +361,30 @@ class McServerService:
     ) -> RenderedMessage:
         server = await self._require_server(group_id)
         season = await get_active_season(server)
-        time_range = parse_time_range(range_text, season.started_at)
+        time_range = parse_time_range(range_text or "本周", season.started_at)
         data = await get_personal_online_data(
             server,
             time_range,
             qq_id=qq_id,
-            title=f"{server.name} {time_range.label} 个人在线情况",
+            title=f"{_server_title(server)} {time_range.label} 个人在线情况",
+        )
+        return await render_personal_online(data)
+
+    async def personal_online_message_by_player_name(
+        self,
+        group_id: str,
+        range_text: str | None,
+        *,
+        player_name: str,
+    ) -> RenderedMessage:
+        server = await self._require_server(group_id)
+        season = await get_active_season(server)
+        time_range = parse_time_range(range_text or "本周", season.started_at)
+        data = await get_personal_online_data_by_player_name(
+            server,
+            time_range,
+            player_name=player_name,
+            title=f"{_server_title(server)} {time_range.label} 个人在线情况",
         )
         return await render_personal_online(data)
 
@@ -373,10 +393,14 @@ class McServerService:
     ) -> RenderedMessage:
         server = await self._require_server(group_id)
         season = await get_active_season(server)
-        time_range = parse_time_range(range_text, season.started_at)
+        time_range = (
+            business_today_range()
+            if not (range_text or "").strip()
+            else parse_time_range(range_text, season.started_at)
+        )
         samples = await get_count_samples(server, time_range)
         data = ChartData(
-            title=f"{server.name} 在线人数变化",
+            title=f"{_server_title(server)} 在线人数变化",
             range_label=time_range.label,
             points=aggregate_sample_points(samples),
         )
@@ -758,6 +782,13 @@ def _normalize_bluemap_base_url(base_url: str) -> str:
     if not text.startswith(("http://", "https://")):
         text = "http://" + text
     return text.rstrip("/")
+
+
+def _server_title(server: McServer) -> str:
+    name = str(getattr(server, "name", "") or "").strip()
+    if not name or name == "默认服务器":
+        return "MC 服务器"
+    return name
 
 
 def _rcon_label(server: McServer) -> str:

@@ -38,13 +38,17 @@ exceptions = import_module("zhenxun.utils.exception")
 PlayerStatus = mc_types.PlayerStatus
 PersonalOnlineData = mc_types.PersonalOnlineData
 PersonalOnlineSegment = mc_types.PersonalOnlineSegment
+OnlineDurationPoint = mc_types.OnlineDurationPoint
 ServerStatus = mc_types.ServerStatus
 ChartData = mc_types.ChartData
 SamplePoint = mc_types.SamplePoint
+PlaytimeEntry = mc_types.PlaytimeEntry
 RenderingError = exceptions.RenderingError
 chart_summary = renderer.chart_summary
 format_personal_online_text = renderer.format_personal_online_text
 format_status_text = renderer.format_status_text
+format_playtime_text = renderer.format_playtime_text
+render_playtime = renderer.render_playtime
 render_chart = renderer.render_chart
 render_personal_online = renderer.render_personal_online
 render_status = renderer.render_status
@@ -63,6 +67,7 @@ def _status() -> ServerStatus:
             PlayerStatus(
                 name="Steve",
                 online_seconds=3660,
+                total_seconds=9000,
                 position="world (1.0, 64.0, 2.0)",
             )
         ],
@@ -85,6 +90,7 @@ def _personal_online_data() -> PersonalOnlineData:
         qq_id="10000",
         player_names=["Steve"],
         segments=[segment],
+        daily_points=[OnlineDurationPoint(label="05-16", seconds=segment.seconds)],
         total_seconds=segment.seconds,
     )
 
@@ -97,6 +103,8 @@ def test_format_status_text_contains_core_fields():
     assert "人数：1/20" in text
     assert "Steve" in text
     assert "world (1.0, 64.0, 2.0)" in text
+    assert "当前1小时01分" in text
+    assert "总计2小时30分" in text
 
 
 def test_format_personal_online_text_contains_core_fields():
@@ -133,6 +141,16 @@ def test_chart_summary_uses_all_points():
     ]
 
     assert chart_summary(points) == (9, 4)
+
+
+def test_format_playtime_text_contains_daily_average():
+    entries = [
+        PlaytimeEntry(player_name="Steve", seconds=7200, average_seconds=3600)
+    ]
+
+    text = format_playtime_text("主服 本周目 在线时长", entries)
+
+    assert "Steve：2小时00分（日均 1小时00分）" in text
 
 
 @pytest.mark.asyncio
@@ -210,8 +228,62 @@ async def test_render_chart_summary_uses_full_points_after_downsample(
     )
 
     assert result.image == b"image"
-    assert captured_payload["peak"] == 99
-    assert captured_payload["avg"] == 21.8
+    assert "peak" not in captured_payload
+    assert "avg" not in captured_payload
+    assert captured_payload["sample_count"] == 5
+    assert captured_payload["counts"][0] == 1
+    assert captured_payload["counts"][-1] == 4
     rendered_counts = [point["count"] for point in captured_payload["points"]]
     assert rendered_counts[0] == 1
     assert rendered_counts[-1] == 4
+
+
+@pytest.mark.asyncio
+async def test_render_playtime_includes_average_duration(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured_payload = {}
+
+    async def fake_render_template(_path, payload, **_kwargs):
+        captured_payload.update(payload)
+        return b"image"
+
+    monkeypatch.setattr(renderer, "_render_template", fake_render_template)
+    monkeypatch.setattr(
+        renderer,
+        "_get_settings",
+        lambda: SimpleNamespace(render_enabled=True),
+    )
+
+    result = await render_playtime(
+        "在线时长",
+        [PlaytimeEntry(player_name="Steve", seconds=7200, average_seconds=3600)],
+    )
+
+    assert result.image == b"image"
+    assert captured_payload["items"][0]["average_duration"] == "1小时00分"
+
+
+@pytest.mark.asyncio
+async def test_render_personal_online_passes_daily_chart_payload(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured_payload = {}
+
+    async def fake_render_template(_path, payload, **_kwargs):
+        captured_payload.update(payload)
+        return b"image"
+
+    monkeypatch.setattr(renderer, "_render_template", fake_render_template)
+    monkeypatch.setattr(
+        renderer,
+        "_get_settings",
+        lambda: SimpleNamespace(render_enabled=True),
+    )
+
+    result = await render_personal_online(_personal_online_data())
+
+    assert result.image == b"image"
+    assert captured_payload["chart_labels"] == ["05-16"]
+    assert captured_payload["chart_values"] == [5400]
+    assert captured_payload["chart_durations"] == ["1小时30分"]

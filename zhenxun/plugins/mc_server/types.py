@@ -65,6 +65,7 @@ class PlayerStatus:
     name: str
     uuid: str = ""
     online_seconds: int = 0
+    total_seconds: int = 0
     position: str = ""
 
 
@@ -87,6 +88,7 @@ class PlaytimeEntry:
     player_name: str
     seconds: int
     qq_id: str = ""
+    average_seconds: int = 0
 
 
 @dataclass(frozen=True)
@@ -100,6 +102,12 @@ class PlaytimeRow:
 class SamplePoint:
     captured_at: datetime
     online_count: int
+
+
+@dataclass(frozen=True)
+class OnlineDurationPoint:
+    label: str
+    seconds: int
 
 
 @dataclass(frozen=True)
@@ -118,6 +126,7 @@ class PersonalOnlineData:
     qq_id: str
     player_names: list[str] = field(default_factory=list)
     segments: list[PersonalOnlineSegment] = field(default_factory=list)
+    daily_points: list[OnlineDurationPoint] = field(default_factory=list)
     total_seconds: int = 0
 
 

@@ -11,6 +11,7 @@ from .constants import DEFAULT_MC_PORT
 from .types import ParsedAddress, TimeRange
 
 MC_TIMEZONE = ZoneInfo("Asia/Shanghai")
+BUSINESS_DAY_START_HOUR = 6
 _HOST_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+$")
 _IPV6_PATTERN = re.compile(r"^\[([0-9A-Fa-f:.]+)](?::(\d+))?$")
 _DATE_RANGE_PATTERN = re.compile(
@@ -146,6 +147,50 @@ def normalize_datetime(value: datetime | None) -> datetime | None:
 
 def combine_local(target_date: date, target_time: time) -> datetime:
     return datetime.combine(target_date, target_time, tzinfo=MC_TIMEZONE)
+
+
+def business_day_start(value: datetime | None = None) -> datetime:
+    current = normalize_datetime(value) or now_local()
+    boundary = combine_local(current.date(), time(BUSINESS_DAY_START_HOUR))
+    if current < boundary:
+        boundary -= timedelta(days=1)
+    return boundary
+
+
+def business_today_range(value: datetime | None = None) -> TimeRange:
+    start = business_day_start(value)
+    end = normalize_datetime(value) or now_local()
+    return TimeRange("本日", start, end)
+
+
+def business_day_count(range_start: datetime, range_end: datetime) -> int:
+    start = business_day_start(range_start)
+    end = normalize_datetime(range_end) or now_local()
+    if end <= start:
+        return 1
+    last_day_start = business_day_start(end - timedelta(microseconds=1))
+    return max(1, (last_day_start.date() - start.date()).days + 1)
+
+
+def iter_business_days(range_start: datetime, range_end: datetime) -> list[TimeRange]:
+    start = business_day_start(range_start)
+    end = normalize_datetime(range_end) or now_local()
+    days = []
+    cursor = start
+    while cursor < end:
+        next_cursor = cursor + timedelta(days=1)
+        clipped_start = max(cursor, normalize_datetime(range_start) or cursor)
+        clipped_end = min(next_cursor, end)
+        if clipped_end > clipped_start:
+            days.append(
+                TimeRange(
+                    cursor.strftime("%m-%d"),
+                    clipped_start,
+                    clipped_end,
+                )
+            )
+        cursor = next_cursor
+    return days or [TimeRange(start.strftime("%m-%d"), start, end)]
 
 
 def parse_time_range(

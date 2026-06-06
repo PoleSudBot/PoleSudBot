@@ -1,8 +1,35 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+import re
+from typing import Literal
+
 from nonebot_plugin_alconna import Alconna, Args, At, CommandMeta, MultiVar, Text
 
 MCTIME_SELF_WORDS = {"me", "我", "自己"}
+MCTIME_RANGE_WORDS = {
+    "今日",
+    "今天",
+    "day",
+    "today",
+    "本周",
+    "周",
+    "week",
+    "本月",
+    "月",
+    "month",
+    "本周目",
+    "周目",
+    "season",
+}
+_DATE_WORD_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}(?:\.\.\d{4}-\d{2}-\d{2})?$")
+
+
+@dataclass(frozen=True)
+class MctimeQuery:
+    target_type: Literal["ranking", "qq", "player"]
+    target: str | None = None
+    range_text: str | None = None
 
 
 def _command_meta() -> CommandMeta:
@@ -42,14 +69,40 @@ def resolve_mctime_query(
     parts: tuple[Text | At, ...],
     *,
     self_qq_id: str,
-) -> tuple[str | None, str | None]:
+) -> MctimeQuery:
     qq_id = first_at_from_parts(parts)
     words = text_words_from_parts(parts)
-    if not qq_id and words and words[0].lower() in MCTIME_SELF_WORDS:
+    if qq_id:
+        return MctimeQuery(
+            "qq",
+            qq_id,
+            " ".join(item for item in words if item).strip() or None,
+        )
+    if words and words[0].lower() in MCTIME_SELF_WORDS:
         # me/我/自己 是个人图的目标词，不应继续传给时间范围解析。
-        qq_id = self_qq_id
-        words = words[1:]
-    return qq_id, " ".join(item for item in words if item).strip() or None
+        return MctimeQuery(
+            "qq",
+            self_qq_id,
+            " ".join(item for item in words[1:] if item).strip() or None,
+        )
+    if words and not _is_range_start(words[0]):
+        return MctimeQuery(
+            "player",
+            words[0],
+            " ".join(item for item in words[1:] if item).strip() or None,
+        )
+    return MctimeQuery(
+        "ranking",
+        None,
+        " ".join(item for item in words if item).strip() or None,
+    )
+
+
+def _is_range_start(word: str) -> bool:
+    normalized = word.strip().lower()
+    return word.strip() in MCTIME_RANGE_WORDS or normalized in MCTIME_RANGE_WORDS or bool(
+        _DATE_WORD_PATTERN.match(normalized)
+    )
 
 
 def mcbind_command() -> Alconna:

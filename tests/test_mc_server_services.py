@@ -64,6 +64,7 @@ for name in [
     "get_count_samples",
     "get_or_init_cursor",
     "get_personal_online_data",
+    "get_personal_online_data_by_player_name",
     "get_playtime_entries",
     "record_count_sample",
     "start_session",
@@ -80,6 +81,7 @@ sys.modules.setdefault(
 
 from zhenxun.plugins.mc_server import services as mc_services
 from zhenxun.plugins.mc_server.services import McServerService, should_reset_log_cursor
+from zhenxun.plugins.mc_server.types import TimeRange
 
 
 class _FakeServer(SimpleNamespace):
@@ -235,6 +237,143 @@ async def test_bind_group_server_with_rcon_uses_same_host_for_rcon(
     assert server.rcon_host == "mc.example.com"
     assert server.rcon_port == 25576
     assert server.saved_fields == ["rcon_host", "rcon_port", "updated_at"]
+
+
+@pytest.mark.asyncio
+async def test_chart_message_defaults_to_business_today(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    server = _FakeServer()
+    server.name = "默认服务器"
+    captured = {}
+
+    async def fake_get_server_for_group(_group_id: str):
+        return server
+
+    async def fake_get_active_season(_server):
+        return SimpleNamespace(started_at=datetime(2026, 5, 1, 12, 0, 0))
+
+    async def fake_get_count_samples(_server, time_range):
+        captured["time_range"] = time_range
+        return []
+
+    async def fake_render_chart(data):
+        captured["chart"] = data
+        return mc_services.RenderedMessage(image=None, fallback_text="chart")
+
+    monkeypatch.setattr(mc_services, "get_server_for_group", fake_get_server_for_group)
+    monkeypatch.setattr(mc_services, "get_active_season", fake_get_active_season)
+    monkeypatch.setattr(mc_services, "get_count_samples", fake_get_count_samples)
+    monkeypatch.setattr(mc_services, "render_chart", fake_render_chart)
+    monkeypatch.setattr(
+        mc_services,
+        "business_today_range",
+        lambda: TimeRange(
+            "本日",
+            datetime(2026, 5, 16, 6, 0, 0),
+            datetime(2026, 5, 16, 12, 0, 0),
+        ),
+    )
+
+    rendered = await McServerService().chart_message("123456")
+
+    assert rendered.fallback_text == "chart"
+    assert captured["time_range"].label == "本日"
+    assert captured["chart"].title == "MC 服务器 在线人数变化"
+
+
+@pytest.mark.asyncio
+async def test_personal_online_messages_default_to_week(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    server = _FakeServer()
+    server.name = "主服"
+    captured = {}
+
+    async def fake_get_server_for_group(_group_id: str):
+        return server
+
+    async def fake_get_active_season(_server):
+        return SimpleNamespace(started_at=datetime(2026, 5, 1, 12, 0, 0))
+
+    async def fake_get_personal_online_data(_server, time_range, *, qq_id, title):
+        captured["qq"] = (time_range.label, qq_id, title)
+        return SimpleNamespace()
+
+    async def fake_get_personal_online_data_by_player_name(
+        _server,
+        time_range,
+        *,
+        player_name,
+        title,
+    ):
+        captured["player"] = (time_range.label, player_name, title)
+        return SimpleNamespace()
+
+    async def fake_render_personal_online(_data):
+        return mc_services.RenderedMessage(image=None, fallback_text="personal")
+
+    monkeypatch.setattr(mc_services, "get_server_for_group", fake_get_server_for_group)
+    monkeypatch.setattr(mc_services, "get_active_season", fake_get_active_season)
+    monkeypatch.setattr(
+        mc_services,
+        "get_personal_online_data",
+        fake_get_personal_online_data,
+    )
+    monkeypatch.setattr(
+        mc_services,
+        "get_personal_online_data_by_player_name",
+        fake_get_personal_online_data_by_player_name,
+    )
+    monkeypatch.setattr(
+        mc_services,
+        "render_personal_online",
+        fake_render_personal_online,
+    )
+
+    await McServerService().personal_online_message("123456", None, qq_id="10000")
+    await McServerService().personal_online_message_by_player_name(
+        "123456",
+        None,
+        player_name="Letemps",
+    )
+
+    assert captured["qq"] == ("本周", "10000", "主服 本周 个人在线情况")
+    assert captured["player"] == ("本周", "Letemps", "主服 本周 个人在线情况")
+
+
+@pytest.mark.asyncio
+async def test_playtime_message_keeps_season_default(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    server = _FakeServer()
+    server.name = "主服"
+    captured = {}
+
+    async def fake_get_server_for_group(_group_id: str):
+        return server
+
+    async def fake_get_active_season(_server):
+        return SimpleNamespace(started_at=datetime(2026, 5, 1, 12, 0, 0))
+
+    async def fake_get_playtime_entries(_server, time_range):
+        captured["range_label"] = time_range.label
+        return []
+
+    async def fake_render_playtime(title, entries):
+        captured["title"] = title
+        captured["entries"] = entries
+        return mc_services.RenderedMessage(image=None, fallback_text="time")
+
+    monkeypatch.setattr(mc_services, "get_server_for_group", fake_get_server_for_group)
+    monkeypatch.setattr(mc_services, "get_active_season", fake_get_active_season)
+    monkeypatch.setattr(mc_services, "get_playtime_entries", fake_get_playtime_entries)
+    monkeypatch.setattr(mc_services, "render_playtime", fake_render_playtime)
+
+    await McServerService().playtime_message("123456")
+
+    assert captured["range_label"] == "本周目"
+    assert captured["title"] == "主服 本周目 在线时长"
 
 
 def test_should_reset_log_cursor_on_inode_change_or_truncate():
