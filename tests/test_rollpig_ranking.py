@@ -69,6 +69,52 @@ class FakeScheduler:
         return decorator
 
 
+class FakePigProgress:
+    def __init__(self, copies: int = 0, first_obtained_at: str | None = None):
+        self.copies = copies
+        self.first_obtained_at = first_obtained_at
+
+
+class FakeDrawState:
+    def __init__(
+        self,
+        pig_ids: list[str],
+        progress: dict[str, FakePigProgress],
+        duplicate_streak: int = 0,
+    ):
+        self.pig_ids = pig_ids
+        self.progress = progress
+        self.duplicate_streak = duplicate_streak
+
+    def copies_of(self, pig_id: str) -> int:
+        item = self.progress.get(pig_id)
+        return int(item.copies) if item else 0
+
+
+class FakeDailyRollResult:
+    def __init__(
+        self,
+        pig_id: str,
+        created: bool,
+        is_new_pig: bool = False,
+        previous_copies: int = 0,
+        copies: int = 0,
+        previous_duplicate_streak: int = 0,
+        duplicate_streak: int = 0,
+    ):
+        self.pig_id = pig_id
+        self.created = created
+        self.is_new_pig = is_new_pig
+        self.previous_copies = previous_copies
+        self.copies = copies
+        self.previous_duplicate_streak = previous_duplicate_streak
+        self.duplicate_streak = duplicate_streak
+
+    def __iter__(self):
+        yield self.pig_id
+        yield self.created
+
+
 def load_module_from_path(module_name: str, module_path: Path):
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     assert spec is not None
@@ -119,9 +165,17 @@ def load_rollpig_data_manager_module(
     fake_package.__path__ = [str(ROLLPIG_DATA_MANAGER_PATH.parent)]
     fake_runtime = types.ModuleType(f"{package_name}.runtime")
     fake_runtime.resolve_roast_cooldown_seconds = lambda: 8 * 60 * 60
+    fake_store_package = types.ModuleType(f"{package_name}.store")
+    fake_store_package.__path__ = []
+    fake_store_models = types.ModuleType(f"{package_name}.store.models")
+    fake_store_models.DailyRollResult = FakeDailyRollResult
+    fake_store_models.DrawState = FakeDrawState
+    fake_store_models.PigProgress = FakePigProgress
 
     monkeypatch.setitem(sys.modules, package_name, fake_package)
     monkeypatch.setitem(sys.modules, f"{package_name}.runtime", fake_runtime)
+    monkeypatch.setitem(sys.modules, f"{package_name}.store", fake_store_package)
+    monkeypatch.setitem(sys.modules, f"{package_name}.store.models", fake_store_models)
 
     module = load_module_from_path(
         f"{package_name}.data_manager",
@@ -241,6 +295,9 @@ def load_rollpig_plugin_module(
     fake_config.MODULE_NAME = "nonebot_plugin_rollpig"
     fake_config.get_proxy = lambda: None
     fake_config.get_storage_backend = lambda: "local"
+    fake_config.get_growth_max_expert_level = lambda: 5
+    fake_config.get_growth_pity_weight_cap = lambda: 4.0
+    fake_config.get_growth_pity_weight_step = lambda: 0.5
 
     fake_roast_manager = types.ModuleType(f"{package_name}.roast_manager")
     fake_roast_manager.roast_manager = object()
@@ -258,6 +315,9 @@ def load_rollpig_plugin_module(
     fake_store_cloud.CloudStoreError = type("CloudStoreError", (Exception,), {})
 
     fake_store_models = types.ModuleType(f"{package_name}.store.models")
+    fake_store_models.DailyRollResult = FakeDailyRollResult
+    fake_store_models.DrawState = FakeDrawState
+    fake_store_models.PigProgress = FakePigProgress
     fake_store_models.RoastEvent = type("RoastEvent", (), {})
 
     fake_summary = types.ModuleType(f"{package_name}.summary_service")
@@ -265,6 +325,11 @@ def load_rollpig_plugin_module(
 
     fake_texts = types.ModuleType(f"{package_name}.texts")
     fake_texts.TOMORROW_TEXTS = [""]
+    fake_texts.DAILY_ROLL_NEW_PIG_TEXTS = ["new {pig} {level}"]
+    fake_texts.DAILY_ROLL_DUPLICATE_LEVEL_UP_TEXTS = [
+        "up {pig} {old_level} {new_level}"
+    ]
+    fake_texts.DAILY_ROLL_DUPLICATE_SAME_LEVEL_TEXTS = ["same {pig} {level}"]
     fake_texts.FOOD_PIG_IDS = set()
     fake_texts.HUMAN_PIG_ID = "human"
     fake_texts.EATEN_PIG_ID = "eaten"
@@ -361,6 +426,11 @@ def test_migrate_old_data_adds_collection_progress(monkeypatch, tmp_path):
     saved = json.loads(data_file.read_text("utf-8"))
     assert saved["collection_progress"]["10001"] == {"count": 2, "reached_at": None}
     assert saved["collection_progress"]["10002"] == {"count": 1, "reached_at": None}
+    assert saved["pig_progress"]["10001"] == {
+        "pig": {"copies": 1, "first_obtained_at": None},
+        "black-pig": {"copies": 1, "first_obtained_at": None},
+    }
+    assert saved["draw_state"]["10001"] == {"duplicate_streak": 0}
 
 
 @pytest.mark.asyncio
@@ -395,6 +465,9 @@ async def test_new_unique_pig_refreshes_collection_progress(monkeypatch, tmp_pat
         "count": 2,
         "reached_at": 1234.5,
     }
+    draw_state = manager.get_draw_state("10001")
+    assert draw_state.copies_of("black-pig") == 1
+    assert draw_state.duplicate_streak == 0
 
 
 @pytest.mark.asyncio
@@ -432,6 +505,46 @@ async def test_duplicate_pig_does_not_refresh_collection_progress(
         "count": 1,
         "reached_at": 10.0,
     }
+    draw_state = manager.get_draw_state("10001")
+    assert draw_state.copies_of("pig") == 2
+    assert draw_state.duplicate_streak == 1
+
+
+@pytest.mark.asyncio
+async def test_existing_daily_roll_does_not_increment_growth(monkeypatch, tmp_path):
+    module, _data_file = load_rollpig_data_manager_module(
+        monkeypatch,
+        tmp_path,
+        seed_data={
+            "history": {"2026-04-22": {"10001": "pig"}},
+            "group_rolls": {},
+            "collection": {"10001": ["pig"]},
+            "collection_progress": {"10001": {"count": 1, "reached_at": 10.0}},
+            "pig_progress": {
+                "10001": {"pig": {"copies": 3, "first_obtained_at": None}},
+            },
+            "draw_state": {"10001": {"duplicate_streak": 2}},
+            "usage": {},
+            "force_usage": {},
+            "daily_events": {},
+            "protected": {},
+        },
+    )
+    manager = module.PigDataManager()
+
+    result = await manager.get_or_create_today_pig(
+        "10001",
+        "black-pig",
+        date_str="2026-04-22",
+        group_id="20001",
+    )
+
+    assert result.pig_id == "pig"
+    assert result.created is False
+    assert result.copies == 3
+    assert result.duplicate_streak == 2
+    assert manager.get_draw_state("10001").copies_of("pig") == 3
+    assert manager.get_group_rolls("20001", "2026-04-22") == {"10001": "pig"}
 
 
 def test_sort_prefers_earlier_reached_at_for_same_count():
@@ -521,3 +634,28 @@ async def test_group_rankings_only_query_member_progress(monkeypatch):
 
     assert [entry.user_id for entry in rankings] == ["20002", "10001"]
     assert manager.progress_calls == ["10001", "20002"]
+
+
+def test_pigsty_growth_summary_keeps_repeat_and_streak_notes(monkeypatch):
+    module = load_rollpig_plugin_module(
+        monkeypatch,
+        fake_store=object(),
+        fake_data_manager=object(),
+        group_members=[],
+    )
+    draw_state = FakeDrawState(
+        pig_ids=["pig", "black-pig"],
+        progress={
+            "pig": FakePigProgress(copies=3, first_obtained_at="2026-04-20T00:00:00Z"),
+            "black-pig": FakePigProgress(copies=1, first_obtained_at=None),
+        },
+        duplicate_streak=2,
+    )
+
+    stats = module.build_pigsty_growth_stats(draw_state)
+    notes = module.build_pigsty_growth_notes(draw_state)
+
+    assert {"label": "最高等级", "value": "EX Lv. 2"} in stats
+    assert any("本命猪" in note and "EX Lv. 2" in note for note in notes)
+    assert any("高等级小猪" in note and "×3" in note for note in notes)
+    assert any("连续重复：2 次" in note for note in notes)

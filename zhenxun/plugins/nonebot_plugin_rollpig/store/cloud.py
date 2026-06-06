@@ -14,7 +14,13 @@ from ..config import (
     get_proxy,
 )
 from .base import RollpigStore
-from .models import CooldownConsumeResult, RoastEvent
+from .models import (
+    CooldownConsumeResult,
+    DailyRollResult,
+    DrawState,
+    PigProgress,
+    RoastEvent,
+)
 
 
 class CloudStoreError(RuntimeError):
@@ -99,7 +105,7 @@ class CloudStore(RollpigStore):
         proposed_pig_id: str,
         date_str: Optional[str] = None,
         group_id: str = "",
-    ) -> tuple[str, bool]:
+    ) -> DailyRollResult:
         payload = await self._request(
             "POST",
             "/v1/daily-rolls/get-or-create",
@@ -110,7 +116,43 @@ class CloudStore(RollpigStore):
                 "group_id": group_id,
             },
         )
-        return str(payload["pig_id"]), bool(payload.get("created"))
+        return DailyRollResult(
+            pig_id=str(payload["pig_id"]),
+            created=bool(payload.get("created")),
+            is_new_pig=bool(payload.get("is_new_pig")),
+            previous_copies=int(payload.get("previous_copies") or 0),
+            copies=int(payload.get("copies") or 0),
+            previous_duplicate_streak=int(
+                payload.get("previous_duplicate_streak") or 0,
+            ),
+            duplicate_streak=int(payload.get("duplicate_streak") or 0),
+        )
+
+    async def get_draw_state(self, user_id: str) -> DrawState:
+        payload = await self._request(
+            "GET",
+            "/v1/draw-state",
+            params={"user_id": user_id},
+            fallback={"pig_ids": [], "progress": {}, "duplicate_streak": 0},
+        )
+        progress_payload = payload.get("progress", {}) if payload else {}
+        progress: dict[str, PigProgress] = {}
+        if isinstance(progress_payload, dict):
+            for pig_id, item in progress_payload.items():
+                if not isinstance(item, dict):
+                    continue
+                progress[str(pig_id)] = PigProgress(
+                    copies=int(item.get("copies") or 0),
+                    first_obtained_at=item.get("first_obtained_at"),
+                )
+        pig_ids = [str(item) for item in payload.get("pig_ids", [])] if payload else []
+        return DrawState(
+            pig_ids=pig_ids,
+            progress=progress,
+            duplicate_streak=(
+                int(payload.get("duplicate_streak") or 0) if payload else 0
+            ),
+        )
 
     async def mark_group_roll_seen(
         self,

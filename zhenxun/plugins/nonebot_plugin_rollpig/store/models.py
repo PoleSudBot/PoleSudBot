@@ -1,6 +1,40 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
+
+
+@dataclass(frozen=True)
+class PigProgress:
+    copies: int = 0
+    first_obtained_at: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class DrawState:
+    pig_ids: list[str]
+    progress: dict[str, PigProgress]
+    duplicate_streak: int = 0
+
+    def copies_of(self, pig_id: str) -> int:
+        item = self.progress.get(pig_id)
+        return int(item.copies) if item else 0
+
+
+@dataclass(frozen=True)
+class DailyRollResult:
+    pig_id: str
+    created: bool
+    is_new_pig: bool = False
+    previous_copies: int = 0
+    copies: int = 0
+    previous_duplicate_streak: int = 0
+    duplicate_streak: int = 0
+
+    def __iter__(self):
+        # 兼容旧调用方的 `pig_id, created = await ...` 解包写法。
+        yield self.pig_id
+        yield self.created
 
 
 @dataclass(frozen=True)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Optional
 
-from .models import CooldownConsumeResult, RoastEvent
+from .models import CooldownConsumeResult, DailyRollResult, DrawState, RoastEvent
 
 
 class RollpigStore(ABC):
@@ -22,7 +22,11 @@ class RollpigStore(ABC):
         proposed_pig_id: str,
         date_str: Optional[str] = None,
         group_id: str = "",
-    ) -> tuple[str, bool]:
+    ) -> DailyRollResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_draw_state(self, user_id: str) -> DrawState:
         raise NotImplementedError
 
     @abstractmethod

@@ -47,6 +47,58 @@ TOMORROW_TEXTS = [
     "明天的你正在发送好友申请，是否通过？✅",
 ]
 
+# --- 今日小猪 成长提示文案 ---
+# 占位符：
+# - {pig}: 小猪名称
+# - {level}: 当前专家等级
+# - {old_level}: 升级前专家等级
+# - {new_level}: 升级后专家等级
+DAILY_ROLL_NEW_PIG_TEXTS = [
+    "✨ 新猪入圈！【{pig}】加入图鉴｜专家等级 EX Lv. {level}",
+    "🎉 抓到新猪【{pig}】！图鉴进度又往前拱了一步｜EX Lv. {level}",
+    "🐽 今天不是重复！【{pig}】正式住进你的猪圈｜EX Lv. {level}",
+    "📖 图鉴新增【{pig}】！这只小猪先从 EX Lv. {level} 开始营业",
+    "🌟 新面孔出现！【{pig}】被你收入猪圈｜EX Lv. {level}",
+    "🚪 猪圈开门迎新猪：【{pig}】｜EX Lv. {level}",
+    "🧺 成功捡到一只新猪【{pig}】！图鉴收藏 +1｜EX Lv. {level}",
+    "💫 不是旧朋友，是新小猪！【{pig}】加入你的今日命运｜EX Lv. {level}",
+    "🏷️ 新图鉴登记完成：【{pig}】｜专家等级 EX Lv. {level}",
+    "🐷 恭喜解锁【{pig}】！猪圈今天多了一位住户｜EX Lv. {level}",
+]
+
+DAILY_ROLL_DUPLICATE_LEVEL_UP_TEXTS = [
+    "你又抽到了【{pig}】｜专家等级 EX Lv. {old_level} → {new_level}"
+    "｜下次遇见新猪的机会悄悄升温。",
+    "重复命中【{pig}】｜EX Lv. {old_level} → {new_level}｜这只猪越来越熟练了。",
+    "【{pig}】今天又来报到｜专家等级 EX Lv. {old_level} → {new_level}"
+    "｜新猪气息也更近了一点。",
+    "又是【{pig}】！不过它变强了｜EX Lv. {old_level} → {new_level}｜下一抽更值得期待。",
+    "【{pig}】熟练度上升｜专家等级 EX Lv. {old_level} → {new_level}"
+    "｜猪圈的风向开始变化。",
+    "重复也不是白重复：【{pig}】EX Lv. {old_level} → {new_level}｜新猪概率正在抬头。",
+    "今天和【{pig}】很有缘｜专家等级 EX Lv. {old_level} → {new_level}"
+    "｜下一次或许会有新朋友。",
+    "【{pig}】再次出现，并且更会营业了｜EX Lv. {old_level} → {new_level}"
+    "｜保底小火苗点起来了。",
+    "抽到重复【{pig}】｜专家等级 EX Lv. {old_level} → {new_level}"
+    "｜猪圈正在帮你攒新猪运。",
+    "【{pig}】又被你拱出来了｜EX Lv. {old_level} → {new_level}"
+    "｜重复的怨念转化成了新猪加成。",
+]
+
+DAILY_ROLL_DUPLICATE_SAME_LEVEL_TEXTS = [
+    "你又抽到了【{pig}】｜专家等级 EX Lv. {level}｜下次遇见新猪的机会悄悄升温。",
+    "重复命中【{pig}】｜EX Lv. {level}｜猪圈正在暗中给新猪加热。",
+    "【{pig}】今天又来串门｜专家等级 EX Lv. {level}｜下一抽的新鲜感正在路上。",
+    "又是【{pig}】！｜EX Lv. {level}｜虽然没升级，但新猪概率更有盼头了。",
+    "【{pig}】再次出现｜专家等级 EX Lv. {level}｜重复次数正在变成新猪运。",
+    "今天还是【{pig}】｜EX Lv. {level}｜别急，猪圈已经开始偏心新面孔了。",
+    "重复抽到【{pig}】｜专家等级 EX Lv. {level}｜下一次或许就不一样了。",
+    "【{pig}】熟门熟路地回来了｜EX Lv. {level}｜新猪的门缝又开大了一点。",
+    "【{pig}】继续霸占今日席位｜专家等级 EX Lv. {level}｜新猪概率悄悄往上拱。",
+    "又见【{pig}】｜EX Lv. {level}｜这份重复会被猪圈记在小本本上。",
+]
+
 # --- 熟食形态 ID 列表（烧烤/烤群友相关拦截逻辑） ---
 # 新增资源中的熟食类形态也必须并入这里，否则会绕过“熟食禁止再烤”的统一拦截。
 FOOD_PIG_IDS = [

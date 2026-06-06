@@ -31,6 +31,9 @@ class Config(BaseModel):
     CLOUD_TIMEOUT: float = 3.0
     CLOUD_STRICT_MODE: bool = True
     PROXY: Optional[str] = None
+    GROWTH_MAX_EXPERT_LEVEL: int = 5
+    GROWTH_PITY_WEIGHT_STEP: float = 0.5
+    GROWTH_PITY_WEIGHT_CAP: float = 4.0
 
     # Legacy compatibility only. Runtime no longer uses these fields.
     rollpig_ai_enabled: Optional[bool] = None
@@ -44,6 +47,9 @@ class Config(BaseModel):
     rollpig_cloud_timeout: Optional[float] = None
     rollpig_cloud_strict_mode: Optional[bool] = None
     rollpig_proxy: Optional[str] = None
+    rollpig_growth_max_expert_level: Optional[int] = None
+    rollpig_growth_pity_weight_step: Optional[float] = None
+    rollpig_growth_pity_weight_cap: Optional[float] = None
 
 
 def _get_str(key: str, default: Optional[str] = None) -> Optional[str]:
@@ -58,6 +64,14 @@ def _get_float(key: str, default: float) -> float:
     raw_value = base_config.get(key, default)
     try:
         return float(raw_value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_int(key: str, default: int) -> int:
+    raw_value = base_config.get(key, default)
+    try:
+        return int(raw_value)
     except (TypeError, ValueError):
         return default
 
@@ -109,3 +123,15 @@ def get_cloud_strict_mode() -> bool:
 
 def get_proxy() -> Optional[str]:
     return _get_str("PROXY")
+
+
+def get_growth_max_expert_level() -> int:
+    return max(0, _get_int("GROWTH_MAX_EXPERT_LEVEL", 5))
+
+
+def get_growth_pity_weight_step() -> float:
+    return max(0.0, _get_float("GROWTH_PITY_WEIGHT_STEP", 0.5))
+
+
+def get_growth_pity_weight_cap() -> float:
+    return max(0.0, _get_float("GROWTH_PITY_WEIGHT_CAP", 4.0))

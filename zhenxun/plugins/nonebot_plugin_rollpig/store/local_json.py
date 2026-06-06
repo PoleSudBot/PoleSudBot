@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Callable, Optional
 
 from .base import RollpigStore
-from .models import CooldownConsumeResult, RoastEvent
+from .models import CooldownConsumeResult, DailyRollResult, DrawState, RoastEvent
 
 if TYPE_CHECKING:
     from ..data_manager import PigDataManager
@@ -29,13 +29,16 @@ class LocalJsonStore(RollpigStore):
         proposed_pig_id: str,
         date_str: Optional[str] = None,
         group_id: str = "",
-    ) -> tuple[str, bool]:
+    ) -> DailyRollResult:
         return await self.manager.get_or_create_today_pig(
             user_id=user_id,
             proposed_pig_id=proposed_pig_id,
             date_str=date_str,
             group_id=group_id,
         )
+
+    async def get_draw_state(self, user_id: str) -> DrawState:
+        return self.manager.get_draw_state(user_id)
 
     async def mark_group_roll_seen(
         self,

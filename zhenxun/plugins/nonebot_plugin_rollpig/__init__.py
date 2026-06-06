@@ -33,7 +33,16 @@ from .ranking import (
     sort_pig_king_rankings,
 )
 
-from .config import Config, GroupSettings, MODULE_NAME, get_proxy, get_storage_backend
+from .config import (
+    Config,
+    GroupSettings,
+    MODULE_NAME,
+    get_growth_max_expert_level,
+    get_growth_pity_weight_cap,
+    get_growth_pity_weight_step,
+    get_proxy,
+    get_storage_backend,
+)
 from .roast_manager import roast_manager
 from .runtime import (
     is_daily_summary_push_enabled,
@@ -42,11 +51,14 @@ from .runtime import (
 )
 from .store import store
 from .store.cloud import CloudStoreError
-from .store.models import RoastEvent
+from .store.models import DailyRollResult, DrawState, RoastEvent
 from .summary_service import build_daily_summary
 from .texts import (
     BACKFIRE_NO_PIG_TEXTS, BACKFIRE_GENERIC_TEXTS,
     BACKFIRE_HUMAN_TEXTS, BACKFIRE_EATEN_TEXTS, BACKFIRE_FOOD_TEXTS,
+    DAILY_ROLL_DUPLICATE_LEVEL_UP_TEXTS,
+    DAILY_ROLL_DUPLICATE_SAME_LEVEL_TEXTS,
+    DAILY_ROLL_NEW_PIG_TEXTS,
     DAILY_SUMMARY_EMPTY_TEXTS, DAILY_SUMMARY_HEADER, DAILY_SUMMARY_FOOTER,
     EATEN_PIG_ID,
     ESCAPE_TEXTS,
@@ -96,7 +108,7 @@ __plugin_meta__ = PluginMetadata(
     开启猪圈日报 / 关闭猪圈日报 - 开关当前群的猪圈日报推送
     
     📊 统计指令：
-    我的猪圈 / 我的小猪 - 查看解锁进度
+    我的猪圈 / 我的小猪 - 查看解锁进度、EX 等级与猪王排行
     猪王争霸榜 / 猪猪榜 / 猪猪排行 / 小猪榜 / 小猪排行 [数量] - 查看当前群图鉴排行
     猪猪总榜 / 猪猪总排行 [数量] - 查看全局图鉴排行
     本周小猪 - 生成本周猪猪总结长图
@@ -107,7 +119,7 @@ __plugin_meta__ = PluginMetadata(
     config=Config,
     extra={
         "author": "Felis2026",
-        "version": "0.5.3",
+        "version": "0.6.0",
         "configs": [
             {
                 "module": MODULE_NAME,
@@ -181,6 +193,30 @@ __plugin_meta__ = PluginMetadata(
                 "help": "rollpig 外部请求代理地址",
                 "type": str,
             },
+            {
+                "module": MODULE_NAME,
+                "key": "GROWTH_MAX_EXPERT_LEVEL",
+                "value": 5,
+                "default_value": 5,
+                "help": "抽猪成长系统 EX 等级上限",
+                "type": int,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "GROWTH_PITY_WEIGHT_STEP",
+                "value": 0.5,
+                "default_value": 0.5,
+                "help": "连续重复后未解锁小猪的单次权重加成",
+                "type": float,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "GROWTH_PITY_WEIGHT_CAP",
+                "value": 4.0,
+                "default_value": 4.0,
+                "help": "连续重复后未解锁小猪的最大权重加成",
+                "type": float,
+            },
         ],
         "group_config_model": GroupSettings,
     },
@@ -247,6 +283,113 @@ def is_human_pig(pig_data: Optional[dict]) -> bool:
 
 def is_eaten_pig(pig_data: Optional[dict]) -> bool:
     return bool(pig_data and pig_data.get("id") == EATEN_PIG_ID)
+
+
+def get_expert_level(copies: int) -> int:
+    return min(max(int(copies) - 1, 0), get_growth_max_expert_level())
+
+
+async def pick_daily_roll_candidate(user_id: str) -> dict:
+    """按用户成长状态选择今日候选猪，连续重复会提高未解锁猪的权重。"""
+    draw_state = await store.get_draw_state(user_id)
+    owned_pig_ids = set(draw_state.pig_ids)
+    duplicate_streak = max(0, int(draw_state.duplicate_streak or 0))
+    new_pig_bonus = min(
+        duplicate_streak * get_growth_pity_weight_step(),
+        get_growth_pity_weight_cap(),
+    )
+
+    weights: list[float] = []
+    for pig in PIG_LIST:
+        pig_id = str(pig.get("id", ""))
+        is_unowned = pig_id and pig_id not in owned_pig_ids
+        weights.append(1.0 + new_pig_bonus if is_unowned else 1.0)
+
+    # 使用标准库加权抽样，避免手写累计权重时遗漏空列表/边界；空列表由调用方拦截。
+    return random.choices(PIG_LIST, weights=weights, k=1)[0]
+
+
+def build_roll_growth_text(result: DailyRollResult, pig_data: dict) -> str:
+    """生成今日首次抽猪后的成长提示，重复查看当天结果不刷提示。"""
+    if not result.created:
+        return ""
+
+    pig_name = pig_data.get("name", "未知小猪")
+    current_level = get_expert_level(result.copies)
+    if result.is_new_pig:
+        return random.choice(DAILY_ROLL_NEW_PIG_TEXTS).format(
+            pig=pig_name,
+            level=current_level,
+        )
+
+    previous_level = get_expert_level(result.previous_copies)
+    if previous_level != current_level:
+        return random.choice(DAILY_ROLL_DUPLICATE_LEVEL_UP_TEXTS).format(
+            pig=pig_name,
+            old_level=previous_level,
+            new_level=current_level,
+        )
+    return random.choice(DAILY_ROLL_DUPLICATE_SAME_LEVEL_TEXTS).format(
+        pig=pig_name,
+        level=current_level,
+    )
+
+
+def build_pigsty_growth_notes(draw_state: DrawState) -> list[str]:
+    """把成长状态压缩成适合 PSB 面板展示的摘要行。"""
+    ranked_progress = sorted(
+        draw_state.progress.items(),
+        key=lambda item: (-item[1].copies, item[1].first_obtained_at or "", item[0]),
+    )
+    if not ranked_progress:
+        return []
+
+    favorite_id, favorite_progress = ranked_progress[0]
+    favorite = get_pig_by_id(favorite_id)
+    favorite_name = favorite.get("name", favorite_id) if favorite else favorite_id
+    favorite_level = get_expert_level(favorite_progress.copies)
+    notes = [
+        f"本命猪：【{favorite_name}】EX Lv. {favorite_level}"
+        f"（累计 {favorite_progress.copies} 次）"
+    ]
+
+    repeat_items = [
+        (pig_id, progress)
+        for pig_id, progress in ranked_progress
+        if progress.copies >= 2
+    ][:5]
+    if repeat_items:
+        parts = []
+        for pig_id, progress in repeat_items:
+            pig = get_pig_by_id(pig_id)
+            pig_name = pig.get("name", pig_id) if pig else pig_id
+            parts.append(
+                f"【{pig_name}】EX Lv.{get_expert_level(progress.copies)}"
+                f"×{progress.copies}"
+            )
+        notes.append("高等级小猪：" + "、".join(parts))
+
+    if draw_state.duplicate_streak > 0:
+        notes.append(f"连续重复：{draw_state.duplicate_streak} 次，新猪权重正在升温。")
+    else:
+        notes.append("连续重复：0 次，下一只从平常心开始。")
+    return notes
+
+
+def build_pigsty_growth_stats(draw_state: DrawState) -> list[dict[str, str]]:
+    """计算成长面板的等级统计，和图鉴数量统计分开维护。"""
+    levels = [
+        get_expert_level(progress.copies)
+        for progress in draw_state.progress.values()
+    ]
+    max_level = max(levels, default=0)
+    maxed_count = sum(
+        1 for level in levels if level >= get_growth_max_expert_level()
+    )
+    return [
+        {"label": "最高等级", "value": f"EX Lv. {max_level}"},
+        {"label": "满级小猪", "value": f"{maxed_count} 只"},
+    ]
 
 
 def is_superuser_user(user_id: str) -> bool:
@@ -921,25 +1064,27 @@ async def _(event: Event):
     group_id = get_event_group_id(event)
     pig_id = await store.get_daily_roll(user_id)
     pig = get_pig_by_id(pig_id)
+    extra_text = ""
     is_new = False
 
     if not pig:
         if not PIG_LIST:
             await cmd_today.finish("猪圈塌房了（数据缺失）")
             return
-        proposed_pig = random.choice(PIG_LIST)
+        proposed_pig = await pick_daily_roll_candidate(user_id)
         unlocked_before = set(await store.get_user_collection(user_id))
-        resolved_pig_id, created = await store.get_or_create_daily_roll(
+        roll_result = await store.get_or_create_daily_roll(
             user_id,
             proposed_pig["id"],
             group_id=group_id,
         )
-        is_new = created and resolved_pig_id not in unlocked_before
-        pig = get_pig_by_id(resolved_pig_id) or proposed_pig
+        is_new = roll_result.created and roll_result.pig_id not in unlocked_before
+        pig = get_pig_by_id(roll_result.pig_id) or proposed_pig
+        extra_text = build_roll_growth_text(roll_result, pig)
     elif group_id:
         await store.mark_group_roll_seen(user_id, pig["id"], group_id)
 
-    await send_rendered_pig(cmd_today, event, pig, is_new=is_new)
+    await send_rendered_pig(cmd_today, event, pig, extra_text=extra_text, is_new=is_new)
 
 
 # 2. 随机小猪
@@ -1765,9 +1910,9 @@ cmd_sty = on_command("我的猪圈", aliases={"我的小猪"}, block=True)
 @guard_store_errors(cmd_sty)
 async def _(bot: Bot, event: Event):
     user_id = str(event.user_id)
-    collection = await store.get_user_collection(user_id)
+    draw_state = await store.get_draw_state(user_id)
     total_pigs = len(PIG_LIST)
-    user_count = len(collection)
+    user_count = len(draw_state.pig_ids)
 
     if total_pigs <= 0:
         await cmd_sty.finish(MessageSegment.reply(event.message_id) + "猪图鉴为空，请先检查资源文件。")
@@ -1805,7 +1950,10 @@ async def _(bot: Bot, event: Event):
         {"label": "已收集", "value": f"{user_count} / {total_pigs}"},
         {"label": "收藏率", "value": f"{percent}%"},
     ]
-    notes = [ranking_note] if ranking_note else []
+    stats.extend(build_pigsty_growth_stats(draw_state))
+    notes = build_pigsty_growth_notes(draw_state)
+    if ranking_note:
+        notes.insert(0, ranking_note)
     footer = "继续加油，争取成为猪王！" if user_count > 0 else "今天先去抽一只小猪，猪圈就热闹起来了。"
     await send_rendered_panel(
         cmd_sty,

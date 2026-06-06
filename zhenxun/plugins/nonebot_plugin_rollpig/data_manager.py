@@ -10,6 +10,7 @@ from nonebot.log import logger
 import nonebot_plugin_localstore as store
 
 from .runtime import resolve_roast_cooldown_seconds
+from .store.models import DailyRollResult, DrawState, PigProgress
 
 ROAST_COOLDOWN_SECONDS = resolve_roast_cooldown_seconds()
 
@@ -29,6 +30,10 @@ class PigDataManager:
     - collection : {user_id: [pig_id, ...]}   ← 永久保留，图鉴数据
     - collection_progress: {user_id: {"count": int, "reached_at": float | null}}
                          ← 记录用户达到当前图鉴数量的时间，用于排行榜并列时判先后
+    - pig_progress: {user_id: {pig_id: {copies, first_obtained_at}}}
+                         ← 记录每只猪累计抽到次数，用于 EX 等级
+    - draw_state : {user_id: {"duplicate_streak": int}}
+                         ← 记录连续重复次数，用于新猪候选权重
     - usage      : {user_id: timestamp}        ← 烤群友普通模式 CD 时间戳
     - force_usage: {user_id: "YYYY-MM-DD"}    ← 后门口令每日计数
     - daily_events: {date: [event, ...]}      ← 群内烧烤事件（用于日报）
@@ -50,6 +55,8 @@ class PigDataManager:
                 "group_rolls": {},
                 "collection": {},
                 "collection_progress": {},
+                "pig_progress": {},
+                "draw_state": {},
                 "usage": {},
                 "force_usage": {},
                 "daily_events": {},
@@ -67,6 +74,8 @@ class PigDataManager:
                 "group_rolls": {},
                 "collection": {},
                 "collection_progress": {},
+                "pig_progress": {},
+                "draw_state": {},
                 "usage": {},
                 "force_usage": {},
                 "daily_events": {},
@@ -86,6 +95,8 @@ class PigDataManager:
             "group_rolls",
             "collection",
             "collection_progress",
+            "pig_progress",
+            "draw_state",
             "usage",
             "force_usage",
             "daily_events",
@@ -119,6 +130,39 @@ class PigDataManager:
         if normalized_progress != progress:
             data["collection_progress"] = normalized_progress
             migrated = True
+
+        # 旧账本只有“是否拥有过”，无法还原真实重复次数；迁移时只保守补 copies=1。
+        # 这样不会凭空制造 EX 等级，同时后续每日首次重复抽到才会继续累计。
+        pig_progress = data.setdefault("pig_progress", {})
+        draw_state = data.setdefault("draw_state", {})
+        for user_id, pig_ids in collection.items():
+            if not isinstance(pig_ids, list):
+                continue
+            normalized_user_id = str(user_id)
+            user_progress = pig_progress.setdefault(normalized_user_id, {})
+            if not isinstance(user_progress, dict):
+                user_progress = {}
+                pig_progress[normalized_user_id] = user_progress
+                migrated = True
+            for pig_id in pig_ids:
+                normalized_pig_id = str(pig_id)
+                item = user_progress.get(normalized_pig_id)
+                if not isinstance(item, dict):
+                    user_progress[normalized_pig_id] = {
+                        "copies": 1,
+                        "first_obtained_at": None,
+                    }
+                    migrated = True
+                elif _safe_int(item.get("copies"), 0) <= 0:
+                    item["copies"] = 1
+                    migrated = True
+            state = draw_state.get(normalized_user_id)
+            if not isinstance(state, dict):
+                draw_state[normalized_user_id] = {"duplicate_streak": 0}
+                migrated = True
+            elif _safe_int(state.get("duplicate_streak"), 0) < 0:
+                state["duplicate_streak"] = 0
+                migrated = True
 
         history = data.get("history", {})
         for date_str, records in history.items():
@@ -211,6 +255,132 @@ class PigDataManager:
             "reached_at": float(reached_at if reached_at is not None else time.time()),
         }
 
+    # ---- 抽猪成长状态 ----
+
+    def get_draw_state(self, user_id: str) -> DrawState:
+        """返回用户图鉴成长状态，旧 collection 数据会按 copies=1 兜底聚合。"""
+        normalized_user_id = str(user_id)
+        collection = self.data.setdefault("collection", {})
+        raw_collection = collection.get(normalized_user_id, [])
+        collection_ids = (
+            [str(pig_id) for pig_id in raw_collection]
+            if isinstance(raw_collection, list)
+            else []
+        )
+
+        raw_progress = self.data.setdefault("pig_progress", {}).get(
+            normalized_user_id,
+            {},
+        )
+        progress: dict[str, PigProgress] = {}
+        if isinstance(raw_progress, dict):
+            for pig_id, item in raw_progress.items():
+                if not isinstance(item, dict):
+                    continue
+                progress[str(pig_id)] = PigProgress(
+                    copies=max(0, _safe_int(item.get("copies"), 0)),
+                    first_obtained_at=item.get("first_obtained_at"),
+                )
+
+        for pig_id in collection_ids:
+            progress.setdefault(pig_id, PigProgress(copies=1, first_obtained_at=None))
+
+        raw_state = self.data.setdefault("draw_state", {}).get(normalized_user_id, {})
+        duplicate_streak = (
+            _safe_int(raw_state.get("duplicate_streak"), 0)
+            if isinstance(raw_state, dict)
+            else 0
+        )
+        return DrawState(
+            pig_ids=sorted(progress),
+            progress=dict(sorted(progress.items())),
+            duplicate_streak=max(0, duplicate_streak),
+        )
+
+    def _apply_created_roll_progress_locked(
+        self,
+        user_id: str,
+        pig_id: str,
+    ) -> DailyRollResult:
+        """在持有写锁时更新首次抽取产生的成长状态。"""
+        collection = self.data.setdefault("collection", {})
+        user_collection = collection.setdefault(user_id, [])
+        if not isinstance(user_collection, list):
+            user_collection = []
+            collection[user_id] = user_collection
+
+        pig_progress = self.data.setdefault("pig_progress", {})
+        user_progress = pig_progress.setdefault(user_id, {})
+        if not isinstance(user_progress, dict):
+            user_progress = {}
+            pig_progress[user_id] = user_progress
+
+        draw_state = self.data.setdefault("draw_state", {})
+        state = draw_state.setdefault(user_id, {"duplicate_streak": 0})
+        if not isinstance(state, dict):
+            state = {"duplicate_streak": 0}
+            draw_state[user_id] = state
+
+        previous_duplicate_streak = max(0, _safe_int(state.get("duplicate_streak"), 0))
+        previous_item = user_progress.get(pig_id)
+        has_progress = isinstance(previous_item, dict)
+        already_collected = pig_id in user_collection
+        previous_copies = (
+            max(1, _safe_int(previous_item.get("copies"), 1))
+            if has_progress
+            else (1 if already_collected else 0)
+        )
+        is_new_pig = previous_copies <= 0 and not already_collected
+
+        if pig_id not in user_collection:
+            user_collection.append(pig_id)
+            self._update_collection_progress(user_id, user_collection)
+
+        # 重复猪只影响成长状态，不能刷新 collection_progress，否则会污染排行并列时间。
+        if is_new_pig:
+            copies = 1
+            duplicate_streak = 0
+            first_obtained_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        else:
+            copies = previous_copies + 1
+            duplicate_streak = previous_duplicate_streak + 1
+            first_obtained_at = (
+                previous_item.get("first_obtained_at")
+                if has_progress and previous_item.get("first_obtained_at")
+                else None
+            )
+
+        user_progress[pig_id] = {
+            "copies": copies,
+            "first_obtained_at": first_obtained_at,
+        }
+        state["duplicate_streak"] = duplicate_streak
+        return DailyRollResult(
+            pig_id=pig_id,
+            created=True,
+            is_new_pig=is_new_pig,
+            previous_copies=previous_copies,
+            copies=copies,
+            previous_duplicate_streak=previous_duplicate_streak,
+            duplicate_streak=duplicate_streak,
+        )
+
+    def _build_existing_roll_result_locked(
+        self,
+        user_id: str,
+        pig_id: str,
+    ) -> DailyRollResult:
+        draw_state = self.get_draw_state(user_id)
+        copies = draw_state.copies_of(pig_id)
+        return DailyRollResult(
+            pig_id=pig_id,
+            created=False,
+            previous_copies=copies,
+            copies=copies,
+            previous_duplicate_streak=draw_state.duplicate_streak,
+            duplicate_streak=draw_state.duplicate_streak,
+        )
+
     # ---- 今日/历史 抽猪记录 ----
 
     def get_today_pig(self, user_id: str, date_str: Optional[str] = None) -> Optional[str]:
@@ -237,15 +407,11 @@ class PigDataManager:
             today = datetime.date.today().isoformat()
             if today not in self.data["history"]:
                 self.data["history"][today] = {}
+            previous_pig_id = self.data["history"][today].get(user_id)
             self.data["history"][today][user_id] = pig_id
             self._record_group_roll(today, group_id, user_id, pig_id)
-
-            # 图鉴：永久保留，不受 14 天历史清理影响
-            col = self.data.setdefault("collection", {})
-            user_col = col.setdefault(user_id, [])
-            if pig_id not in user_col:
-                user_col.append(pig_id)
-                self._update_collection_progress(user_id, user_col)
+            if previous_pig_id != pig_id:
+                self._apply_created_roll_progress_locked(user_id, pig_id)
 
             await self._atomic_save()
 
@@ -255,7 +421,7 @@ class PigDataManager:
         proposed_pig_id: str,
         date_str: Optional[str] = None,
         group_id: str = "",
-    ) -> tuple[str, bool]:
+    ) -> DailyRollResult:
         target_date = date_str or datetime.date.today().isoformat()
         async with self._lock:
             history = self.data.setdefault("history", {})
@@ -275,19 +441,14 @@ class PigDataManager:
                     dirty = before != existing_pig_id
                 if dirty:
                     await self._atomic_save()
-                return existing_pig_id, False
+                return self._build_existing_roll_result_locked(user_id, existing_pig_id)
 
             day_history[user_id] = proposed_pig_id
             self._record_group_roll(target_date, group_id, user_id, proposed_pig_id)
-
-            collection = self.data.setdefault("collection", {})
-            user_collection = collection.setdefault(user_id, [])
-            if proposed_pig_id not in user_collection:
-                user_collection.append(proposed_pig_id)
-                self._update_collection_progress(user_id, user_collection)
+            result = self._apply_created_roll_progress_locked(user_id, proposed_pig_id)
 
             await self._atomic_save()
-            return proposed_pig_id, True
+            return result
 
     async def mark_group_roll_seen(
         self,
@@ -691,6 +852,14 @@ class PigDataManager:
 
             if dates_to_del or protection_dates_to_del:
                 await self._atomic_save()
+
+
+def _safe_int(value, default: int = 0) -> int:
+    """将历史 JSON 中可能出现的字符串/空值转成整数，失败时使用默认值。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _is_valid_date(date_str: str) -> bool:
