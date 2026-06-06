@@ -97,7 +97,7 @@ if _nonebot_ready():
         usage=_USAGE,
         extra=PluginExtraData(
             author="k1yuyu",
-            version="0.2.0",
+            version="0.2.1",
             menu_type="游戏相关",
             configs=REGISTER_CONFIGS,
             commands=[

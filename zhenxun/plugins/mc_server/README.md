@@ -429,6 +429,7 @@ mcw PlayerName @用户
 | `MC_DISCONNECT_NOTIFY_THRESHOLD` | `3` | 连续失败多少次后标记断连并触发 `conn` 播报。 |
 | `MC_SAMPLE_INTERVAL_SECONDS` | `300` | 在线人数采样最小间隔，最小按 60 秒处理。 |
 | `MC_BIND_FLOW_TIMEOUT_SECONDS` | `120` | 绑定向导每一步等待群内回复的超时时间，最小按 30 秒处理。 |
+| `MC_REJOIN_SUPPRESS_SECONDS` | `30` | 玩家短时间重进时抑制进退服播报的窗口，最小按 5 秒处理。 |
 | `MC_ADMIN_LEVEL` | `5` | 群内 MC 配置管理所需真寻权限等级。 |
 | `MC_RCON_LEVEL` | `9` | 群内执行任意 RCON 命令所需真寻权限等级。 |
 | `MC_CHAT_FORMAT` | `[{sender}] {message}` | 群消息同步到游戏内的显示格式。 |
@@ -469,7 +470,8 @@ mcw PlayerName @用户
 在线时长使用 session 段累计：
 
 - 日志里出现 `joined the game` 时开启在线段。
-- 日志里出现 `left the game` 时关闭在线段。
+- 日志里出现 `left the game` 时会先等待 `MC_REJOIN_SUPPRESS_SECONDS`；如果玩家没有短时间重进，再按原始退出时间关闭在线段。
+- 短时间重进会被视为同一次在线，不发送进退服播报，也不会切断本次在线时长。
 - Bot 重启时会先截断旧的 active session。
 - 如果状态查询能看到玩家在线，插件会从重新观测到的时间点开启在线段。
 

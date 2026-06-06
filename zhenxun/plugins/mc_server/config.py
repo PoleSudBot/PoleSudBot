@@ -28,6 +28,7 @@ class McServerSettings:
     disconnect_notify_threshold: int
     sample_interval_seconds: int
     bind_flow_timeout_seconds: int
+    rejoin_suppress_seconds: int
     admin_level: int
     rcon_level: int
     chat_format: str
@@ -75,6 +76,14 @@ REGISTER_CONFIGS = [
         value=120,
         default_value=120,
         help="MC绑定向导单步等待超时时间（秒）",
+        type=int,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MC_REJOIN_SUPPRESS_SECONDS",
+        value=30,
+        default_value=30,
+        help="玩家短时间重进时抑制进退服播报的窗口（秒）",
         type=int,
     ),
     RegisterConfig(
@@ -217,6 +226,9 @@ def get_settings() -> McServerSettings:
         ),
         bind_flow_timeout_seconds=_as_int(
             raw.get("MC_BIND_FLOW_TIMEOUT_SECONDS", 120), 120, 30
+        ),
+        rejoin_suppress_seconds=_as_int(
+            raw.get("MC_REJOIN_SUPPRESS_SECONDS", 30), 30, 5
         ),
         admin_level=_as_int(raw.get("MC_ADMIN_LEVEL", 5), 5, 1),
         rcon_level=_as_int(raw.get("MC_RCON_LEVEL", 9), 9, 1),

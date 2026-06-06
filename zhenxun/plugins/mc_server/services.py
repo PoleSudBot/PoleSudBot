@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +72,12 @@ class PollResult:
     notified: int = 0
 
 
+@dataclass(frozen=True)
+class _PendingLeave:
+    occurred_at: datetime
+    task: asyncio.Task[None]
+
+
 def should_reset_log_cursor(
     *,
     cursor_inode: str,
@@ -87,6 +94,7 @@ class McServerService:
     def __init__(self) -> None:
         self._polling = False
         self._startup_sessions_closed = False
+        self._pending_leaves: dict[tuple[int, str], _PendingLeave] = {}
 
     async def bind_group_server(self, group_id: str, address: str) -> str:
         rendered = await self.bind_group_server_with_status(group_id, address)
@@ -614,35 +622,95 @@ class McServerService:
     async def _handle_log_event(self, server: McServer, event) -> None:
         occurred_at = event.occurred_at or now_local()
         if event.type == "join":
+            if self._cancel_pending_leave(server, event.player_name):
+                # 短时间重进视为同一次在线，保留原 active session 并压掉进退服播报。
+                await start_session(server, event.player_name, occurred_at=occurred_at)
+                return
             await start_session(server, event.player_name, occurred_at=occurred_at)
             if server.join_notify_enabled:
                 await self._send_group_notice(server, f"{event.player_name} 加入了游戏")
         elif event.type == "leave":
-            session = await end_session(
-                server,
-                event.player_name,
-                occurred_at=occurred_at,
-            )
-            suffix = ""
-            if session and session.ended_at:
-                ended_at = normalize_datetime(session.ended_at)
-                started_at = normalize_datetime(session.started_at)
-                seconds = (
-                    int((ended_at - started_at).total_seconds())
-                    if ended_at and started_at
-                    else 0
-                )
-                suffix = f"，本次在线 {format_duration(seconds)}"
-            if server.join_notify_enabled:
-                await self._send_group_notice(
-                    server,
-                    f"{event.player_name} 离开了游戏{suffix}",
-                )
+            self._schedule_pending_leave(server, event.player_name, occurred_at)
         elif event.type == "chat" and server.chat_bridge_enabled:
             await self._send_group_notice(
                 server,
                 f"<{event.player_name}> {event.message}",
             )
+
+    def _pending_leave_key(self, server: McServer, player_name: str) -> tuple[int, str]:
+        return (int(server.id), player_name.lower())
+
+    def _cancel_pending_leave(self, server: McServer, player_name: str) -> bool:
+        pending = self._pending_leaves.pop(
+            self._pending_leave_key(server, player_name),
+            None,
+        )
+        if not pending:
+            return False
+        pending.task.cancel()
+        return True
+
+    def _schedule_pending_leave(
+        self,
+        server: McServer,
+        player_name: str,
+        occurred_at: datetime,
+    ) -> None:
+        self._cancel_pending_leave(server, player_name)
+        key = self._pending_leave_key(server, player_name)
+        # 离开事件先延迟提交，避免 AuthMe/网络波动导致“离开+加入”刷屏并切断在线段。
+        task = asyncio.create_task(
+            self._commit_pending_leave(server, player_name, occurred_at),
+        )
+        task.add_done_callback(self._log_pending_leave_error)
+        self._pending_leaves[key] = _PendingLeave(occurred_at=occurred_at, task=task)
+
+    async def _commit_pending_leave(
+        self,
+        server: McServer,
+        player_name: str,
+        occurred_at: datetime,
+    ) -> None:
+        key = self._pending_leave_key(server, player_name)
+        try:
+            await asyncio.sleep(get_settings().rejoin_suppress_seconds)
+            session = await end_session(
+                server,
+                player_name,
+                occurred_at=occurred_at,
+            )
+            suffix = self._format_leave_suffix(session)
+            if server.join_notify_enabled:
+                await self._send_group_notice(
+                    server,
+                    f"{player_name} 离开了游戏{suffix}",
+                )
+        except asyncio.CancelledError:
+            raise
+        finally:
+            pending = self._pending_leaves.get(key)
+            task = asyncio.current_task()
+            if pending and pending.task is task:
+                self._pending_leaves.pop(key, None)
+
+    def _log_pending_leave_error(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.warning("MC延迟退服处理失败", MODULE_NAME, e=exc)
+
+    def _format_leave_suffix(self, session) -> str:
+        if not session or not session.ended_at:
+            return ""
+        ended_at = normalize_datetime(session.ended_at)
+        started_at = normalize_datetime(session.started_at)
+        seconds = (
+            int((ended_at - started_at).total_seconds())
+            if ended_at and started_at
+            else 0
+        )
+        return f"，本次在线 {format_duration(seconds)}"
 
     async def _mark_visible_players_online(self, server: McServer, players) -> None:
         if not players:

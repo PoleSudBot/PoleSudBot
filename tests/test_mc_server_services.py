@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timedelta
 from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
@@ -260,6 +262,164 @@ def test_should_reset_log_cursor_on_inode_change_or_truncate():
         cursor_offset=100,
         current_size=1000,
     )
+
+
+@pytest.mark.asyncio
+async def test_handle_log_event_sends_join_notice(monkeypatch: pytest.MonkeyPatch):
+    server = SimpleNamespace(id=1, group_id="123456", join_notify_enabled=True)
+    event = SimpleNamespace(
+        type="join",
+        player_name="Steve",
+        occurred_at=datetime(2026, 5, 16, 20, 0, 0),
+    )
+    starts = []
+    notices = []
+    service = McServerService()
+
+    async def fake_start_session(_server, player_name: str, *, occurred_at):
+        starts.append((player_name, occurred_at))
+        return None
+
+    async def fake_send_group_notice(_server, message: str):
+        notices.append(message)
+
+    monkeypatch.setattr(mc_services, "start_session", fake_start_session)
+    monkeypatch.setattr(service, "_send_group_notice", fake_send_group_notice)
+
+    await service._handle_log_event(server, event)
+
+    assert starts == [("Steve", event.occurred_at)]
+    assert notices == ["Steve 加入了游戏"]
+
+
+@pytest.mark.asyncio
+async def test_handle_log_event_delays_leave_notice_and_uses_original_time(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    started_at = datetime(2026, 5, 16, 20, 0, 0)
+    left_at = started_at + timedelta(minutes=5)
+    server = SimpleNamespace(id=1, group_id="123456", join_notify_enabled=True)
+    event = SimpleNamespace(type="leave", player_name="Steve", occurred_at=left_at)
+    ended_sessions = []
+    notices = []
+    service = McServerService()
+
+    async def fake_end_session(_server, player_name: str, *, occurred_at):
+        ended_sessions.append((player_name, occurred_at))
+        return SimpleNamespace(started_at=started_at, ended_at=occurred_at)
+
+    async def fake_send_group_notice(_server, message: str):
+        notices.append(message)
+
+    monkeypatch.setattr(
+        mc_services,
+        "get_settings",
+        lambda: SimpleNamespace(rejoin_suppress_seconds=0.01),
+    )
+    monkeypatch.setattr(mc_services, "end_session", fake_end_session)
+    monkeypatch.setattr(service, "_send_group_notice", fake_send_group_notice)
+
+    await service._handle_log_event(server, event)
+    assert ended_sessions == []
+    await asyncio.sleep(0.02)
+
+    assert ended_sessions == [("Steve", left_at)]
+    assert notices == ["Steve 离开了游戏，本次在线 5分钟"]
+
+
+@pytest.mark.asyncio
+async def test_handle_log_event_suppresses_short_rejoin_and_keeps_session(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    started_at = datetime(2026, 5, 16, 20, 0, 0)
+    left_at = started_at + timedelta(minutes=5)
+    rejoined_at = left_at + timedelta(seconds=3)
+    server = SimpleNamespace(id=1, group_id="123456", join_notify_enabled=True)
+    service = McServerService()
+    starts = []
+    ended_sessions = []
+    notices = []
+
+    async def fake_start_session(_server, player_name: str, *, occurred_at):
+        starts.append((player_name, occurred_at))
+        return None
+
+    async def fake_end_session(_server, player_name: str, *, occurred_at):
+        ended_sessions.append((player_name, occurred_at))
+        return SimpleNamespace(started_at=started_at, ended_at=occurred_at)
+
+    async def fake_send_group_notice(_server, message: str):
+        notices.append(message)
+
+    monkeypatch.setattr(
+        mc_services,
+        "get_settings",
+        lambda: SimpleNamespace(rejoin_suppress_seconds=0.05),
+    )
+    monkeypatch.setattr(mc_services, "start_session", fake_start_session)
+    monkeypatch.setattr(mc_services, "end_session", fake_end_session)
+    monkeypatch.setattr(service, "_send_group_notice", fake_send_group_notice)
+
+    await service._handle_log_event(
+        server,
+        SimpleNamespace(type="leave", player_name="Steve", occurred_at=left_at),
+    )
+    await service._handle_log_event(
+        server,
+        SimpleNamespace(type="join", player_name="Steve", occurred_at=rejoined_at),
+    )
+    await asyncio.sleep(0.06)
+
+    assert starts == [("Steve", rejoined_at)]
+    assert ended_sessions == []
+    assert notices == []
+
+
+@pytest.mark.asyncio
+async def test_handle_log_event_counts_online_from_first_join_after_short_rejoin(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    started_at = datetime(2026, 5, 16, 20, 0, 0)
+    first_left_at = started_at + timedelta(minutes=5)
+    rejoined_at = first_left_at + timedelta(seconds=3)
+    final_left_at = started_at + timedelta(minutes=20)
+    server = SimpleNamespace(id=1, group_id="123456", join_notify_enabled=True)
+    service = McServerService()
+    notices = []
+
+    async def fake_start_session(_server, _player_name: str, *, occurred_at):
+        return SimpleNamespace(started_at=started_at, ended_at=None)
+
+    async def fake_end_session(_server, _player_name: str, *, occurred_at):
+        return SimpleNamespace(started_at=started_at, ended_at=occurred_at)
+
+    async def fake_send_group_notice(_server, message: str):
+        notices.append(message)
+
+    monkeypatch.setattr(
+        mc_services,
+        "get_settings",
+        lambda: SimpleNamespace(rejoin_suppress_seconds=0.01),
+    )
+    monkeypatch.setattr(mc_services, "start_session", fake_start_session)
+    monkeypatch.setattr(mc_services, "end_session", fake_end_session)
+    monkeypatch.setattr(service, "_send_group_notice", fake_send_group_notice)
+
+    await service._handle_log_event(
+        server,
+        SimpleNamespace(type="leave", player_name="Steve", occurred_at=first_left_at),
+    )
+    await service._handle_log_event(
+        server,
+        SimpleNamespace(type="join", player_name="Steve", occurred_at=rejoined_at),
+    )
+    await service._handle_log_event(
+        server,
+        SimpleNamespace(type="leave", player_name="Steve", occurred_at=final_left_at),
+    )
+    await asyncio.sleep(0.02)
+
+    assert notices == ["Steve 离开了游戏，本次在线 20分钟"]
 
 
 @pytest.mark.asyncio

@@ -32,7 +32,7 @@ def test_parse_paper_log_line_detects_join_leave_and_chat():
     assert chat.message == "hello"
 
 
-def test_parse_paper_log_line_detects_login_and_not_secure_chat():
+def test_parse_paper_log_line_ignores_login_and_detects_not_secure_chat():
     now = datetime(2026, 5, 16, 20, 0, 0)
 
     login = parse_paper_log_line(
@@ -45,13 +45,17 @@ def test_parse_paper_log_line_detects_login_and_not_secure_chat():
         now,
     )
 
-    assert login is not None
-    assert login.type == "join"
-    assert login.player_name == "Alex"
+    assert login is None
     assert chat is not None
     assert chat.type == "chat"
     assert chat.player_name == "Alex"
     assert chat.message == "ping"
+
+
+def test_parse_paper_log_line_ignores_authme_login():
+    line = "[21:40:00] [Server thread/INFO]: [AuthMe] Alex logged in 127.0.0.1"
+
+    assert parse_paper_log_line(line) is None
 
 
 def test_parse_paper_log_line_ignores_unrelated_lines():

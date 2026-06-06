@@ -6,10 +6,7 @@ import re
 from .types import LogEvent
 
 _TIME_PREFIX = re.compile(r"^\[(?P<hms>\d{2}:\d{2}:\d{2})]\s+\[[^]]+]:\s+(?P<body>.*)$")
-_JOIN_PATTERNS = (
-    re.compile(r"^(?P<player>[A-Za-z0-9_]{3,16}) joined the game$"),
-    re.compile(r"^(?P<player>[A-Za-z0-9_]{3,16})\[/.+?] logged in with entity id .*$"),
-)
+_JOIN_PATTERN = re.compile(r"^(?P<player>[A-Za-z0-9_]{3,16}) joined the game$")
 _LEAVE_PATTERN = re.compile(r"^(?P<player>[A-Za-z0-9_]{3,16}) left the game$")
 _CHAT_PATTERNS = (
     re.compile(r"^<(?P<player>[A-Za-z0-9_]{3,16})> (?P<message>.*)$"),
@@ -23,14 +20,13 @@ def parse_paper_log_line(line: str, now: datetime | None = None) -> LogEvent | N
     body = match.group("body") if match else raw
     occurred_at = _parse_log_time(match.group("hms"), now) if match else now
 
-    for pattern in _JOIN_PATTERNS:
-        if joined := pattern.match(body):
-            return LogEvent(
-                type="join",
-                player_name=joined.group("player"),
-                raw=raw,
-                occurred_at=occurred_at,
-            )
+    if joined := _JOIN_PATTERN.match(body):
+        return LogEvent(
+            type="join",
+            player_name=joined.group("player"),
+            raw=raw,
+            occurred_at=occurred_at,
+        )
 
     if left := _LEAVE_PATTERN.match(body):
         return LogEvent(
