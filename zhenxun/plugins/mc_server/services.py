@@ -39,12 +39,16 @@ from .repositories import (
     end_session,
     get_active_season,
     get_count_samples,
+    get_group_binding,
     get_or_init_cursor,
     get_personal_online_data,
     get_personal_online_data_by_player_name,
     get_playtime_entries,
     get_server_for_group,
+    list_poll_servers,
+    list_server_group_bindings,
     record_count_sample,
+    require_group_binding,
     start_session,
     update_cursor,
     upsert_binding,
@@ -125,7 +129,11 @@ class McServerService:
     ) -> RenderedMessage:
         parsed = parse_server_address(host, default_port=server_port)
         status = await self._probe_bindable_server(parsed.host, parsed.port)
-        server = await bind_server(str(group_id), host=parsed.host, port=parsed.port)
+        server = await bind_server(
+            str(group_id),
+            host=parsed.host,
+            port=parsed.port,
+        )
         server.rcon_host = parsed.host
         server.rcon_port = rcon_port
         await server.save(update_fields=["rcon_host", "rcon_port", "updated_at"])
@@ -153,7 +161,12 @@ class McServerService:
         )
         rcon = parse_server_address(rcon_address, default_port=preset.rcon_port)
         status = await self._probe_bindable_server(parsed.host, parsed.port)
-        server = await bind_server(str(group_id), host=parsed.host, port=parsed.port)
+        server = await bind_server(
+            str(group_id),
+            host=parsed.host,
+            port=parsed.port,
+            preset_name=preset.name,
+        )
         warning = await self._apply_preset_fields(
             server,
             preset,
@@ -279,9 +292,10 @@ class McServerService:
         return f"已为群 {group_id} 保存RCON密码。"
 
     async def list_config(self, group_id: str) -> str:
-        server = await get_server_for_group(str(group_id))
-        if not server:
+        binding = await get_group_binding(str(group_id))
+        if not binding:
             return "当前群未绑定MC服务器，请先使用 mcbind <地址>。"
+        server = await binding.server
         bluemap_maps = (
             ", ".join(server.bluemap_map_ids) if server.bluemap_map_ids else "未配置"
         )
@@ -293,9 +307,9 @@ class McServerService:
                 f"BlueMap：{server.bluemap_base_url or '未配置'}",
                 f"地图：{bluemap_maps}",
                 f"RCON：{_rcon_label(server)}",
-                f"进退服播报：{'开' if server.join_notify_enabled else '关'}",
-                f"连接播报：{'开' if server.conn_notify_enabled else '关'}",
-                f"聊天互通：{'开' if server.chat_bridge_enabled else '关'}",
+                f"进退服播报：{'开' if binding.join_notify_enabled else '关'}",
+                f"连接播报：{'开' if binding.conn_notify_enabled else '关'}",
+                f"聊天互通：{'开' if binding.chat_bridge_enabled else '关'}",
             ]
         )
 
@@ -304,23 +318,23 @@ class McServerService:
             return await self.toggle_all(group_id, enabled)
         if switch not in SWITCH_KEYS:
             return "开关仅支持 join / conn / chat / all。"
-        server = await self._require_server(group_id)
+        binding = await require_group_binding(group_id)
         field = {
             SWITCH_JOIN: "join_notify_enabled",
             SWITCH_CONN: "conn_notify_enabled",
             SWITCH_CHAT: "chat_bridge_enabled",
         }[switch]
-        setattr(server, field, enabled)
-        await server.save(update_fields=[field, "updated_at"])
+        setattr(binding, field, enabled)
+        await binding.save(update_fields=[field, "updated_at"])
         return f"已{'开启' if enabled else '关闭'} {switch}。"
 
     async def toggle_all(self, group_id: str, enabled: bool) -> str:
-        server = await self._require_server(group_id)
+        binding = await require_group_binding(group_id)
         # 一键开关只覆盖三类播报/互通字段，不改变服务器地址、日志、RCON 等配置。
-        server.join_notify_enabled = enabled
-        server.conn_notify_enabled = enabled
-        server.chat_bridge_enabled = enabled
-        await server.save(
+        binding.join_notify_enabled = enabled
+        binding.conn_notify_enabled = enabled
+        binding.chat_bridge_enabled = enabled
+        await binding.save(
             update_fields=[
                 "join_notify_enabled",
                 "conn_notify_enabled",
@@ -409,8 +423,9 @@ class McServerService:
     async def send_chat_to_game(
         self, group_id: str, sender: str, message: str
     ) -> str | None:
-        server = await self._require_server(group_id)
-        if not server.chat_bridge_enabled:
+        binding = await require_group_binding(group_id)
+        server = await binding.server
+        if not binding.chat_bridge_enabled:
             return "聊天互通未开启，请先使用 mctoggle chat on。"
         list_response = await self.execute_rcon(server, "list")
         online_count = parse_rcon_list_online_count(list_response)
@@ -467,8 +482,9 @@ class McServerService:
     async def poll_once(self) -> PollResult:
         checked = notified = 0
         await self._close_stale_sessions_once()
-        for server in await McServer.all():
+        for server in await list_poll_servers():
             checked += 1
+            bindings = await list_server_group_bindings(server)
             status = await query_server_status(
                 server,
                 timeout=get_settings().request_timeout_seconds,
@@ -482,17 +498,20 @@ class McServerService:
                     status.max_players,
                 )
                 await self._mark_visible_players_online(server, status.players)
-                if was_disconnected and server.conn_notify_enabled:
-                    await self._send_group_notice(server, "MC服务器监听连接已恢复。")
-                    notified += 1
+                if was_disconnected:
+                    notified += await self._send_bound_group_notice(
+                        bindings,
+                        "MC服务器监听连接已恢复。",
+                        switch=SWITCH_CONN,
+                    )
             else:
                 should_notify = await self._mark_failed(server, status.error)
-                if should_notify and server.conn_notify_enabled:
-                    await self._send_group_notice(
-                        server,
+                if should_notify:
+                    notified += await self._send_bound_group_notice(
+                        bindings,
                         f"MC服务器监听连接断开：{status.error or '无法连接'}",
+                        switch=SWITCH_CONN,
                     )
-                    notified += 1
             await self.process_log(server)
         return PollResult(checked=checked, notified=notified)
 
@@ -639,7 +658,7 @@ class McServerService:
             return
         self._startup_sessions_closed = True
         observed_at = now_local()
-        for server in await McServer.all():
+        for server in await list_poll_servers():
             # Bot 离线期间缺少可靠事件源，旧 active 段先在重启观测点截断。
             await close_active_sessions(server, occurred_at=observed_at)
 
@@ -651,14 +670,18 @@ class McServerService:
                 await start_session(server, event.player_name, occurred_at=occurred_at)
                 return
             await start_session(server, event.player_name, occurred_at=occurred_at)
-            if server.join_notify_enabled:
-                await self._send_group_notice(server, f"{event.player_name} 加入了游戏")
+            await self._send_bound_group_notice(
+                await list_server_group_bindings(server),
+                f"{event.player_name} 加入了游戏",
+                switch=SWITCH_JOIN,
+            )
         elif event.type == "leave":
             self._schedule_pending_leave(server, event.player_name, occurred_at)
-        elif event.type == "chat" and server.chat_bridge_enabled:
-            await self._send_group_notice(
-                server,
+        elif event.type == "chat":
+            await self._send_bound_group_notice(
+                await list_server_group_bindings(server),
                 f"<{event.player_name}> {event.message}",
+                switch=SWITCH_CHAT,
             )
 
     def _pending_leave_key(self, server: McServer, player_name: str) -> tuple[int, str]:
@@ -704,11 +727,11 @@ class McServerService:
                 occurred_at=occurred_at,
             )
             suffix = self._format_leave_suffix(session)
-            if server.join_notify_enabled:
-                await self._send_group_notice(
-                    server,
-                    f"{player_name} 离开了游戏{suffix}",
-                )
+            await self._send_bound_group_notice(
+                await list_server_group_bindings(server),
+                f"{player_name} 离开了游戏{suffix}",
+                switch=SWITCH_JOIN,
+            )
         except asyncio.CancelledError:
             raise
         finally:
@@ -751,6 +774,24 @@ class McServerService:
             )
 
     async def _send_group_notice(self, server: McServer, message: str) -> None:
+        await self._send_notice_to_group(server.group_id, message)
+
+    async def _send_bound_group_notice(
+        self,
+        bindings,
+        message: str,
+        *,
+        switch: str,
+    ) -> int:
+        notified = 0
+        for binding in bindings:
+            if not _binding_switch_enabled(binding, switch):
+                continue
+            await self._send_notice_to_group(binding.group_id, message)
+            notified += 1
+        return notified
+
+    async def _send_notice_to_group(self, group_id: str, message: str) -> None:
         bot = _first_available_bot()
         if not bot:
             return
@@ -758,14 +799,14 @@ class McServerService:
             await PlatformUtils.send_message(
                 bot,
                 None,
-                server.group_id,
+                group_id,
                 f"[Server] {message}",
             )
         except Exception as exc:
             logger.warning(
                 "MC群通知发送失败",
                 MODULE_NAME,
-                target=server.group_id,
+                target=group_id,
                 e=exc,
             )
 
@@ -799,6 +840,15 @@ def _rcon_label(server: McServer) -> str:
     )
     password = "已保存" if server.rcon_password else "未保存密码"
     return f"{address}（{password}）"
+
+
+def _binding_switch_enabled(binding, switch: str) -> bool:
+    field = {
+        SWITCH_JOIN: "join_notify_enabled",
+        SWITCH_CONN: "conn_notify_enabled",
+        SWITCH_CHAT: "chat_bridge_enabled",
+    }.get(switch)
+    return bool(field and getattr(binding, field, False))
 
 
 mc_server_service = McServerService()

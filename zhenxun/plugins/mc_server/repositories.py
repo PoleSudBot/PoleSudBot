@@ -14,6 +14,7 @@ from .models import (
     McQqBinding,
     McSeason,
     McServer,
+    McServerGroupBinding,
 )
 from .stats import (
     aggregate_daily_online_points,
@@ -31,8 +32,90 @@ from .types import (
 from .utils import business_day_count, now_local
 
 
+def normalize_server_identity(host: str, port: int) -> str:
+    normalized_host = str(host).strip().lower().strip("[]")
+    return f"addr:{normalized_host}:{int(port)}"
+
+
+def preset_server_identity(preset_name: str) -> str:
+    return f"preset:{str(preset_name).strip()}"
+
+
+def server_storage_group_id(identity_key: str) -> str:
+    digest = hashlib.sha1(identity_key.encode("utf-8")).hexdigest()
+    return f"shared:{digest[:32]}"
+
+
 async def get_server_for_group(group_id: str, platform: str = "qq") -> McServer | None:
-    return await McServer.get_or_none(platform=platform, group_id=str(group_id))
+    binding = await get_group_binding(group_id, platform=platform)
+    if binding:
+        return await binding.server
+    server = await McServer.get_or_none(platform=platform, group_id=str(group_id))
+    if not server:
+        return None
+    await bind_group_to_server(group_id, server, platform=platform)
+    return server
+
+
+async def get_group_binding(
+    group_id: str,
+    platform: str = "qq",
+) -> McServerGroupBinding | None:
+    return await McServerGroupBinding.get_or_none(
+        platform=platform,
+        group_id=str(group_id),
+    )
+
+
+async def require_group_binding(
+    group_id: str,
+    platform: str = "qq",
+) -> McServerGroupBinding:
+    binding = await get_group_binding(group_id, platform=platform)
+    if not binding:
+        raise ValueError("当前群未绑定MC服务器，请先使用 mcbind <地址>。")
+    return binding
+
+
+async def bind_group_to_server(
+    group_id: str,
+    server: McServer,
+    *,
+    platform: str = "qq",
+) -> McServerGroupBinding:
+    existing = await get_group_binding(group_id, platform=platform)
+    if existing:
+        existing.server = server
+        await existing.save(update_fields=["server_id", "updated_at"])
+        return existing
+
+    binding, _ = await McServerGroupBinding.update_or_create(
+        platform=platform,
+        group_id=str(group_id),
+        defaults={
+            "server": server,
+            "join_notify_enabled": bool(
+                getattr(server, "join_notify_enabled", False)
+            ),
+            "conn_notify_enabled": bool(
+                getattr(server, "conn_notify_enabled", False)
+            ),
+            "chat_bridge_enabled": bool(
+                getattr(server, "chat_bridge_enabled", False)
+            ),
+        },
+    )
+    return binding
+
+
+async def list_server_group_bindings(
+    server: McServer,
+) -> list[McServerGroupBinding]:
+    return await McServerGroupBinding.filter(server=server).all()
+
+
+async def list_poll_servers() -> list[McServer]:
+    return await McServer.all()
 
 
 async def bind_server(
@@ -41,12 +124,37 @@ async def bind_server(
     host: str,
     port: int,
     platform: str = "qq",
+    preset_name: str = "",
 ) -> McServer:
-    server, _ = await McServer.update_or_create(
-        platform=platform,
-        group_id=str(group_id),
-        defaults={"host": host, "port": port, "name": "默认服务器"},
+    identity_key = (
+        preset_server_identity(preset_name)
+        if preset_name
+        else normalize_server_identity(host, port)
     )
+    server = await McServer.filter(identity_key=identity_key).first()
+    if not server:
+        # 预设绑定和手动地址绑定可能交替使用，地址相同就继续复用旧统计实体。
+        server = await McServer.filter(host=host, port=port).first()
+    if server:
+        server.host = host
+        server.port = port
+        server.identity_key = identity_key
+        server.preset_name = preset_name
+        await server.save(
+            update_fields=["host", "port", "identity_key", "preset_name", "updated_at"]
+        )
+    else:
+        # 旧唯一键仍在表结构里，server 行用稳定占位值，真实群关系由 binding 表维护。
+        server = await McServer.create(
+            platform=platform,
+            group_id=server_storage_group_id(identity_key),
+            host=host,
+            port=port,
+            name="默认服务器",
+            identity_key=identity_key,
+            preset_name=preset_name,
+        )
+    await bind_group_to_server(group_id, server, platform=platform)
     await get_active_season(server)
     return server
 

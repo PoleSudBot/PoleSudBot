@@ -54,6 +54,10 @@ async def _unused_async(*_args, **_kwargs):
     return None
 
 
+async def _empty_async_list(*_args, **_kwargs):
+    return []
+
+
 repositories_module = ModuleType("zhenxun.plugins.mc_server.repositories")
 for name in [
     "bind_server",
@@ -62,11 +66,15 @@ for name in [
     "end_session",
     "get_active_season",
     "get_count_samples",
+    "get_group_binding",
     "get_or_init_cursor",
     "get_personal_online_data",
     "get_personal_online_data_by_player_name",
     "get_playtime_entries",
+    "list_poll_servers",
+    "list_server_group_bindings",
     "record_count_sample",
+    "require_group_binding",
     "start_session",
     "update_cursor",
     "upsert_binding",
@@ -74,6 +82,8 @@ for name in [
 ]:
     setattr(repositories_module, name, _unused_async)
 repositories_module.get_server_for_group = _unused_async
+repositories_module.list_poll_servers = _empty_async_list
+repositories_module.list_server_group_bindings = _empty_async_list
 sys.modules.setdefault(
     "zhenxun.plugins.mc_server.repositories",
     repositories_module,
@@ -103,26 +113,45 @@ class _FakeServer(SimpleNamespace):
         self.saved_fields = update_fields
 
 
+class _FakeBinding(SimpleNamespace):
+    def __init__(self, server: _FakeServer | None = None) -> None:
+        super().__init__(
+            server=server or _FakeServer(),
+            group_id="123456",
+            join_notify_enabled=False,
+            conn_notify_enabled=True,
+            chat_bridge_enabled=False,
+            saved_fields=None,
+        )
+
+    async def save(self, *, update_fields: list[str]) -> None:
+        self.saved_fields = update_fields
+
+
 class _FakeCursor(SimpleNamespace):
     pass
 
 
 @pytest.mark.asyncio
 async def test_toggle_all_updates_three_switches(monkeypatch: pytest.MonkeyPatch):
-    server = _FakeServer()
+    binding = _FakeBinding()
 
-    async def fake_get_server_for_group(_group_id: str):
-        return server
+    async def fake_require_group_binding(_group_id: str):
+        return binding
 
-    monkeypatch.setattr(mc_services, "get_server_for_group", fake_get_server_for_group)
+    monkeypatch.setattr(
+        mc_services,
+        "require_group_binding",
+        fake_require_group_binding,
+    )
 
     message = await McServerService().toggle("123456", "all", True)
 
     assert message == "已开启全部MC播报/互通开关。"
-    assert server.join_notify_enabled is True
-    assert server.conn_notify_enabled is True
-    assert server.chat_bridge_enabled is True
-    assert server.saved_fields == [
+    assert binding.join_notify_enabled is True
+    assert binding.conn_notify_enabled is True
+    assert binding.chat_bridge_enabled is True
+    assert binding.saved_fields == [
         "join_notify_enabled",
         "conn_notify_enabled",
         "chat_bridge_enabled",
@@ -152,10 +181,17 @@ async def test_bind_group_server_preset_copies_config_fields(
         bluemap_map_ids=["world", "nether"],
     )
 
-    async def fake_bind_server(group_id: str, *, host: str, port: int):
+    async def fake_bind_server(
+        group_id: str,
+        *,
+        host: str,
+        port: int,
+        preset_name: str = "",
+    ):
         server.group_id = group_id
         server.host = host
         server.port = port
+        server.preset_name = preset_name
         return server
 
     async def fake_probe_server_status(*_args, **_kwargs):
@@ -204,7 +240,14 @@ async def test_bind_group_server_with_rcon_uses_same_host_for_rcon(
 ):
     server = _FakeServer()
 
-    async def fake_bind_server(_group_id: str, *, host: str, port: int):
+    async def fake_bind_server(
+        _group_id: str,
+        *,
+        host: str,
+        port: int,
+        preset_name: str = "",
+    ):
+        _ = preset_name
         server.host = host
         server.port = port
         return server
@@ -405,7 +448,9 @@ def test_should_reset_log_cursor_on_inode_change_or_truncate():
 
 @pytest.mark.asyncio
 async def test_handle_log_event_sends_join_notice(monkeypatch: pytest.MonkeyPatch):
-    server = SimpleNamespace(id=1, group_id="123456", join_notify_enabled=True)
+    server = SimpleNamespace(id=1, group_id="123456")
+    binding = _FakeBinding()
+    binding.join_notify_enabled = True
     event = SimpleNamespace(
         type="join",
         player_name="Steve",
@@ -419,16 +464,24 @@ async def test_handle_log_event_sends_join_notice(monkeypatch: pytest.MonkeyPatc
         starts.append((player_name, occurred_at))
         return None
 
-    async def fake_send_group_notice(_server, message: str):
-        notices.append(message)
+    async def fake_list_server_group_bindings(_server):
+        return [binding]
+
+    async def fake_send_notice_to_group(group_id: str, message: str):
+        notices.append((group_id, message))
 
     monkeypatch.setattr(mc_services, "start_session", fake_start_session)
-    monkeypatch.setattr(service, "_send_group_notice", fake_send_group_notice)
+    monkeypatch.setattr(
+        mc_services,
+        "list_server_group_bindings",
+        fake_list_server_group_bindings,
+    )
+    monkeypatch.setattr(service, "_send_notice_to_group", fake_send_notice_to_group)
 
     await service._handle_log_event(server, event)
 
     assert starts == [("Steve", event.occurred_at)]
-    assert notices == ["Steve 加入了游戏"]
+    assert notices == [("123456", "Steve 加入了游戏")]
 
 
 @pytest.mark.asyncio
@@ -437,7 +490,9 @@ async def test_handle_log_event_delays_leave_notice_and_uses_original_time(
 ):
     started_at = datetime(2026, 5, 16, 20, 0, 0)
     left_at = started_at + timedelta(minutes=5)
-    server = SimpleNamespace(id=1, group_id="123456", join_notify_enabled=True)
+    server = SimpleNamespace(id=1, group_id="123456")
+    binding = _FakeBinding()
+    binding.join_notify_enabled = True
     event = SimpleNamespace(type="leave", player_name="Steve", occurred_at=left_at)
     ended_sessions = []
     notices = []
@@ -447,8 +502,11 @@ async def test_handle_log_event_delays_leave_notice_and_uses_original_time(
         ended_sessions.append((player_name, occurred_at))
         return SimpleNamespace(started_at=started_at, ended_at=occurred_at)
 
-    async def fake_send_group_notice(_server, message: str):
-        notices.append(message)
+    async def fake_list_server_group_bindings(_server):
+        return [binding]
+
+    async def fake_send_notice_to_group(group_id: str, message: str):
+        notices.append((group_id, message))
 
     monkeypatch.setattr(
         mc_services,
@@ -456,14 +514,19 @@ async def test_handle_log_event_delays_leave_notice_and_uses_original_time(
         lambda: SimpleNamespace(rejoin_suppress_seconds=0.01),
     )
     monkeypatch.setattr(mc_services, "end_session", fake_end_session)
-    monkeypatch.setattr(service, "_send_group_notice", fake_send_group_notice)
+    monkeypatch.setattr(
+        mc_services,
+        "list_server_group_bindings",
+        fake_list_server_group_bindings,
+    )
+    monkeypatch.setattr(service, "_send_notice_to_group", fake_send_notice_to_group)
 
     await service._handle_log_event(server, event)
     assert ended_sessions == []
     await asyncio.sleep(0.02)
 
     assert ended_sessions == [("Steve", left_at)]
-    assert notices == ["Steve 离开了游戏，本次在线 5分钟"]
+    assert notices == [("123456", "Steve 离开了游戏，本次在线 5分钟")]
 
 
 @pytest.mark.asyncio
@@ -473,7 +536,9 @@ async def test_handle_log_event_suppresses_short_rejoin_and_keeps_session(
     started_at = datetime(2026, 5, 16, 20, 0, 0)
     left_at = started_at + timedelta(minutes=5)
     rejoined_at = left_at + timedelta(seconds=3)
-    server = SimpleNamespace(id=1, group_id="123456", join_notify_enabled=True)
+    server = SimpleNamespace(id=1, group_id="123456")
+    binding = _FakeBinding()
+    binding.join_notify_enabled = True
     service = McServerService()
     starts = []
     ended_sessions = []
@@ -487,8 +552,11 @@ async def test_handle_log_event_suppresses_short_rejoin_and_keeps_session(
         ended_sessions.append((player_name, occurred_at))
         return SimpleNamespace(started_at=started_at, ended_at=occurred_at)
 
-    async def fake_send_group_notice(_server, message: str):
-        notices.append(message)
+    async def fake_list_server_group_bindings(_server):
+        return [binding]
+
+    async def fake_send_notice_to_group(group_id: str, message: str):
+        notices.append((group_id, message))
 
     monkeypatch.setattr(
         mc_services,
@@ -497,7 +565,12 @@ async def test_handle_log_event_suppresses_short_rejoin_and_keeps_session(
     )
     monkeypatch.setattr(mc_services, "start_session", fake_start_session)
     monkeypatch.setattr(mc_services, "end_session", fake_end_session)
-    monkeypatch.setattr(service, "_send_group_notice", fake_send_group_notice)
+    monkeypatch.setattr(
+        mc_services,
+        "list_server_group_bindings",
+        fake_list_server_group_bindings,
+    )
+    monkeypatch.setattr(service, "_send_notice_to_group", fake_send_notice_to_group)
 
     await service._handle_log_event(
         server,
@@ -522,7 +595,9 @@ async def test_handle_log_event_counts_online_from_first_join_after_short_rejoin
     first_left_at = started_at + timedelta(minutes=5)
     rejoined_at = first_left_at + timedelta(seconds=3)
     final_left_at = started_at + timedelta(minutes=20)
-    server = SimpleNamespace(id=1, group_id="123456", join_notify_enabled=True)
+    server = SimpleNamespace(id=1, group_id="123456")
+    binding = _FakeBinding()
+    binding.join_notify_enabled = True
     service = McServerService()
     notices = []
 
@@ -532,8 +607,11 @@ async def test_handle_log_event_counts_online_from_first_join_after_short_rejoin
     async def fake_end_session(_server, _player_name: str, *, occurred_at):
         return SimpleNamespace(started_at=started_at, ended_at=occurred_at)
 
-    async def fake_send_group_notice(_server, message: str):
-        notices.append(message)
+    async def fake_list_server_group_bindings(_server):
+        return [binding]
+
+    async def fake_send_notice_to_group(group_id: str, message: str):
+        notices.append((group_id, message))
 
     monkeypatch.setattr(
         mc_services,
@@ -542,7 +620,12 @@ async def test_handle_log_event_counts_online_from_first_join_after_short_rejoin
     )
     monkeypatch.setattr(mc_services, "start_session", fake_start_session)
     monkeypatch.setattr(mc_services, "end_session", fake_end_session)
-    monkeypatch.setattr(service, "_send_group_notice", fake_send_group_notice)
+    monkeypatch.setattr(
+        mc_services,
+        "list_server_group_bindings",
+        fake_list_server_group_bindings,
+    )
+    monkeypatch.setattr(service, "_send_notice_to_group", fake_send_notice_to_group)
 
     await service._handle_log_event(
         server,
@@ -558,7 +641,7 @@ async def test_handle_log_event_counts_online_from_first_join_after_short_rejoin
     )
     await asyncio.sleep(0.02)
 
-    assert notices == ["Steve 离开了游戏，本次在线 20分钟"]
+    assert notices == [("123456", "Steve 离开了游戏，本次在线 20分钟")]
 
 
 @pytest.mark.asyncio

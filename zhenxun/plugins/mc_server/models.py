@@ -10,6 +10,8 @@ class McServer(Model):
     platform = fields.CharField(32, default="qq")
     group_id = fields.CharField(128)
     name = fields.CharField(128, default="默认服务器")
+    identity_key = fields.CharField(255, default="")
+    preset_name = fields.CharField(128, default="")
     host = fields.CharField(255)
     port = fields.IntField(default=25565)
     rcon_host = fields.CharField(255, default="")
@@ -34,7 +36,32 @@ class McServer(Model):
         table = "mc_server"
         table_description = "MC服务器群绑定"
         unique_together = (("platform", "group_id"),)
-        indexes = (("platform", "group_id"), ("host", "port"))
+        indexes = (("platform", "group_id"), ("host", "port"), ("identity_key",))
+
+    @classmethod
+    async def _run_script(cls):
+        return [
+            "ALTER TABLE mc_server ADD COLUMN identity_key VARCHAR(255) DEFAULT '';",
+            "ALTER TABLE mc_server ADD COLUMN preset_name VARCHAR(128) DEFAULT '';",
+        ]
+
+
+class McServerGroupBinding(Model):
+    id = fields.IntField(pk=True, generated=True, auto_increment=True)
+    server = fields.ForeignKeyField("models.McServer", related_name="group_bindings")
+    platform = fields.CharField(32, default="qq")
+    group_id = fields.CharField(128)
+    join_notify_enabled = fields.BooleanField(default=False)
+    conn_notify_enabled = fields.BooleanField(default=False)
+    chat_bridge_enabled = fields.BooleanField(default=False)
+    created_at = fields.DatetimeField(auto_now_add=True)
+    updated_at = fields.DatetimeField(auto_now=True)
+
+    class Meta:
+        table = "mc_server_group_binding"
+        table_description = "MC服务器群绑定关系"
+        unique_together = (("platform", "group_id"),)
+        indexes = (("server_id",), ("platform", "group_id"))
 
 
 class McSeason(Model):

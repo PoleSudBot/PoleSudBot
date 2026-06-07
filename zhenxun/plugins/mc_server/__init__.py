@@ -8,8 +8,8 @@ from .constants import PLUGIN_NAME
 _USAGE = """
 ## MC 服务器助手
 
-每个群可以绑定一个 MC 服务器。普通用户主要使用查询、统计、白名单和群服互通功能。
-服务器管理者可发送 `mcbind` 进入绑定向导，或发送 `mcbind <预设名>` 使用配置里的服务器预设；完整配置教程见插件 README。
+每个群可以绑定一个 MC 服务器；同一预设或同一地址端口的服务器会共享统计、日志、RCON 和 BlueMap 配置。
+进退服、断连和聊天互通开关按群独立控制。完整配置教程见插件 README。
 
 ### 常用查询
 
@@ -56,7 +56,7 @@ _USAGE = """
 - `mcbind`
   进入服务器绑定向导。
 - `mcbind <预设名>`
-  使用配置里的服务器预设绑定当前群。
+  使用配置里的服务器预设绑定当前群；同预设服务器共享数据。
 - `mcbind <地址> <服务器端口> <RCON端口>`
   用同一个地址快速配置 MC 与 RCON 端口。
 - `mctoggle all on` / `mctoggle all off`
@@ -101,7 +101,7 @@ if _nonebot_ready():
         usage=_USAGE,
         extra=PluginExtraData(
             author="k1yuyu",
-            version="0.3.0",
+            version="0.4.0",
             menu_type="游戏相关",
             configs=REGISTER_CONFIGS,
             commands=[
