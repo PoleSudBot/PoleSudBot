@@ -14,6 +14,7 @@ from zhenxun.plugins.mc_server.utils import (
     classify_tellraw_response,
     downsample_points,
     format_server_address,
+    format_time_range_hint,
     is_bind_flow_done,
     is_bind_flow_exit,
     is_bind_flow_skip,
@@ -26,6 +27,7 @@ from zhenxun.plugins.mc_server.utils import (
     parse_server_address,
     parse_time_range,
     resolve_latest_log_path,
+    should_show_today_online,
 )
 
 
@@ -126,14 +128,34 @@ def test_parse_time_range_presets_use_six_oclock_boundary():
 
     assert today.start == datetime(2026, 6, 6, 6, 0, 0, tzinfo=MC_TIMEZONE)
     assert today.end == current
+    assert today.end_is_current is True
     assert yesterday.start == datetime(2026, 6, 5, 6, 0, 0, tzinfo=MC_TIMEZONE)
     assert yesterday.end == datetime(2026, 6, 6, 6, 0, 0, tzinfo=MC_TIMEZONE)
     assert this_week.start == datetime(2026, 6, 1, 6, 0, 0, tzinfo=MC_TIMEZONE)
+    assert this_week.end_is_current is True
     assert last_week.start == datetime(2026, 5, 25, 6, 0, 0, tzinfo=MC_TIMEZONE)
     assert last_week.end == datetime(2026, 6, 1, 6, 0, 0, tzinfo=MC_TIMEZONE)
     assert this_month.start == datetime(2026, 6, 1, 6, 0, 0, tzinfo=MC_TIMEZONE)
     assert last_month.start == datetime(2026, 5, 1, 6, 0, 0, tzinfo=MC_TIMEZONE)
     assert last_month.end == datetime(2026, 6, 1, 6, 0, 0, tzinfo=MC_TIMEZONE)
+
+
+def test_format_time_range_hint_omits_current_end():
+    current = datetime(2026, 6, 7, 9, 30, 0, tzinfo=MC_TIMEZONE)
+    today = parse_time_range("今日", now=current)
+    yesterday = parse_time_range("昨日", now=current)
+
+    assert format_time_range_hint(today) == "26-06-07 06:00 ~ "
+    assert format_time_range_hint(yesterday) == "26-06-06 06:00 ~ 26-06-07 06:00"
+
+
+def test_should_show_today_online_only_for_multi_day_current_ranges():
+    current = datetime(2026, 6, 7, 9, 30, 0, tzinfo=MC_TIMEZONE)
+
+    assert should_show_today_online(parse_time_range("本周", now=current))
+    assert not should_show_today_online(parse_time_range("今日", now=current))
+    assert not should_show_today_online(parse_time_range("昨日", now=current))
+    assert not should_show_today_online(parse_time_range("上周", now=current))
 
 
 def test_is_time_range_word_accepts_shared_mc_stat_ranges():

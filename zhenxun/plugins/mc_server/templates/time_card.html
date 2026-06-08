@@ -20,6 +20,10 @@
       border-bottom: 1px solid var(--color-border);
     }
 
+    .rank-row.with-today {
+      grid-template-columns: 52px 1fr 118px 118px 118px;
+    }
+
     .rank-badge {
       display: inline-flex;
       align-items: center;
@@ -79,7 +83,8 @@
         <div class="title-group">
           <p class="eyebrow">MC 在线时长</p>
           <h1 class="page-title">{{ title }}</h1>
-          <div class="subtle">日平均从玩家首次可观测在线日起算，按 06:00 业务日统计</div>
+          <div class="subtle">{{ range_hint }}</div>
+          <div class="subtle">日平均从玩家首次可观测在线日到最后登录日，按 06:00 业务日统计</div>
         </div>
         <span class="level-badge">{{ items|length }} 名玩家</span>
       </div>
@@ -87,7 +92,7 @@
       {% if items %}
       <div class="rank-list">
         {% for item in items %}
-        <div class="rank-row">
+        <div class="rank-row{% if show_today_online %} with-today{% endif %}">
           <div class="rank-badge">#{{ item.rank }}</div>
           <div class="player-name">{{ item.name }}</div>
           <div class="duration">
@@ -98,6 +103,12 @@
             <span class="duration-label">日平均</span>
             <span class="duration-value">{{ item.average_duration }}</span>
           </div>
+          {% if show_today_online %}
+          <div class="duration">
+            <span class="duration-label">本日在线</span>
+            <span class="duration-value">{{ item.today_duration }}</span>
+          </div>
+          {% endif %}
         </div>
         {% endfor %}
       </div>

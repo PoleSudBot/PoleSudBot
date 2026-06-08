@@ -198,7 +198,7 @@ def business_day_start(value: datetime | None = None) -> datetime:
 def business_today_range(value: datetime | None = None) -> TimeRange:
     start = business_day_start(value)
     end = normalize_datetime(value) or now_local()
-    return TimeRange("今日", start, end)
+    return TimeRange("今日", start, end, end_is_current=True)
 
 
 def business_day_count(range_start: datetime, range_end: datetime) -> int:
@@ -231,6 +231,33 @@ def iter_business_days(range_start: datetime, range_end: datetime) -> list[TimeR
     return days or [TimeRange(start.strftime("%m-%d"), start, end)]
 
 
+def format_time_range_hint(time_range: TimeRange) -> str:
+    start = normalize_datetime(time_range.start) or time_range.start
+    end = normalize_datetime(time_range.end) or time_range.end
+    end_text = "" if time_range.end_is_current else end.strftime("%y-%m-%d %H:%M")
+    return f"{start.strftime('%y-%m-%d %H:%M')} ~ {end_text}"
+
+
+def should_show_today_online(
+    time_range: TimeRange,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    current = (
+        normalize_datetime(now) or normalize_datetime(time_range.end) or now_local()
+    )
+    start = normalize_datetime(time_range.start) or time_range.start
+    end = normalize_datetime(time_range.end) or time_range.end
+    today_start = business_day_start(current)
+    if not time_range.end_is_current:
+        return False
+    if business_day_count(start, end) <= 1:
+        return False
+
+    # “本日在线”只服务当前业务日相关的多日查询，历史范围即使超过一天也不显示。
+    return start < today_start and end > today_start
+
+
 def is_time_range_word(raw: str) -> bool:
     text = raw.strip()
     normalized = text.lower()
@@ -261,18 +288,28 @@ def parse_time_range(
     # 所有预设统计范围都按 06:00 业务边界切分，避免 mct/mcc 对“今日”等词各算各的。
     if text in {"", "本周目", "周目", "season"}:
         start = normalize_datetime(season_start) or business_day_start(current)
-        return TimeRange("本周目", start, current)
+        return TimeRange("本周目", start, current, end_is_current=True)
     if text in {"今日", "今天", "本日", "day", "today"}:
-        return TimeRange("今日", business_anchor, current)
+        return TimeRange("今日", business_anchor, current, end_is_current=True)
     if text in {"昨日", "昨天", "yesterday"}:
         return TimeRange("昨日", business_anchor - timedelta(days=1), business_anchor)
     if text in {"本周", "这周", "周", "week", "thisweek", "this_week"}:
-        return TimeRange("本周", combine_business_start(week_start_date), current)
+        return TimeRange(
+            "本周",
+            combine_business_start(week_start_date),
+            current,
+            end_is_current=True,
+        )
     if text in {"上周", "上星期", "上个星期", "lastweek", "last_week"}:
         end = combine_business_start(week_start_date)
         return TimeRange("上周", end - timedelta(days=7), end)
     if text in {"本月", "这个月", "月", "month", "thismonth", "this_month"}:
-        return TimeRange("本月", combine_business_start(month_start_date), current)
+        return TimeRange(
+            "本月",
+            combine_business_start(month_start_date),
+            current,
+            end_is_current=True,
+        )
     if text in {"上月", "上个月", "lastmonth", "last_month"}:
         end = combine_business_start(month_start_date)
         start = combine_business_start(_previous_month_start(business_date))
@@ -296,7 +333,8 @@ def parse_time_range(
         if start_date == end_date
         else f"{start_date.isoformat()}..{end_date.isoformat()}"
     )
-    return TimeRange(label, start, min(end, current))
+    range_end = min(end, current)
+    return TimeRange(label, start, range_end, end_is_current=end > current)
 
 
 def format_duration(seconds: int) -> str:

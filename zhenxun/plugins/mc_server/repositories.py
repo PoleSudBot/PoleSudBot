@@ -31,7 +31,13 @@ from .types import (
     PlaytimeRow,
     TimeRange,
 )
-from .utils import business_day_count, normalize_datetime, now_local
+from .utils import (
+    business_day_count,
+    business_today_range,
+    normalize_datetime,
+    now_local,
+    should_show_today_online,
+)
 
 
 def normalize_server_identity(host: str, port: int) -> str:
@@ -331,6 +337,14 @@ async def get_playtime_entries(
                 last_seen_at=segment.ended_at,
             )
         )
+    entries = aggregate_playtime(rows)
+    today_seconds_by_name: dict[str, int] = {}
+    if entries and should_show_today_online(time_range):
+        today_seconds_by_name = await _playtime_seconds_by_player_names(
+            server,
+            [entry.player_name for entry in entries],
+            business_today_range(time_range.end),
+        )
     return [
         PlaytimeEntry(
             player_name=entry.player_name,
@@ -342,10 +356,11 @@ async def get_playtime_entries(
                 entry.first_seen_at,
                 entry.last_seen_at,
             ),
+            today_seconds=today_seconds_by_name.get(entry.player_name.lower(), 0),
             first_seen_at=entry.first_seen_at,
             last_seen_at=entry.last_seen_at,
         )
-        for entry in aggregate_playtime(rows)
+        for entry in entries
     ]
 
 
@@ -415,6 +430,7 @@ async def get_personal_online_data(
         range_label=time_range.label,
         range_start=time_range.start,
         range_end=time_range.end,
+        range_end_is_current=time_range.end_is_current,
         qq_id=target_qq,
         player_names=player_names,
         segments=segments,
@@ -462,6 +478,7 @@ async def get_personal_online_data_by_player_name(
         range_label=time_range.label,
         range_start=time_range.start,
         range_end=time_range.end,
+        range_end_is_current=time_range.end_is_current,
         qq_id="",
         player_names=player_names,
         segments=segments,
@@ -515,6 +532,7 @@ def _build_personal_online_data(
     range_label: str,
     range_start: datetime,
     range_end: datetime,
+    range_end_is_current: bool,
     qq_id: str,
     player_names: list[str],
     segments: list[PersonalOnlineSegment],
@@ -531,6 +549,21 @@ def _build_personal_online_data(
         if chart_granularity == "hourly"
         else daily_points
     )
+    show_today_online = should_show_today_online(time_range)
+    today_range = business_today_range(time_range.end)
+    today_seconds = (
+        sum(
+            overlap_seconds(
+                segment.started_at,
+                segment.ended_at,
+                today_range.start,
+                today_range.end,
+            )
+            for segment in segments
+        )
+        if show_today_online
+        else 0
+    )
     # 个人日均只平均到本范围内最后一次在线日；仍在线的 segment 已被裁剪到查询结束。
     last_seen_at = max((segment.ended_at for segment in segments), default=None)
     return PersonalOnlineData(
@@ -538,6 +571,7 @@ def _build_personal_online_data(
         range_label=range_label,
         range_start=range_start,
         range_end=range_end,
+        range_end_is_current=range_end_is_current,
         qq_id=qq_id,
         player_names=player_names,
         segments=segments,
@@ -547,7 +581,36 @@ def _build_personal_online_data(
         total_seconds=total_seconds,
         average_seconds=total_seconds
         // average_business_day_count(time_range, first_seen_at, last_seen_at),
+        today_seconds=today_seconds,
+        show_today_online=show_today_online,
     )
+
+
+async def _playtime_seconds_by_player_names(
+    server: McServer,
+    player_names: list[str],
+    time_range: TimeRange,
+) -> dict[str, int]:
+    names = _unique_non_empty(player_names)
+    if not names:
+        return {}
+    totals = {name.lower(): 0 for name in names}
+    query_filter = _player_name_filter(names)
+    for session in await _online_sessions_in_range(
+        server,
+        time_range,
+    ).filter(query_filter).all():
+        # 今日在线同样按查询窗口裁剪，确保进行中和跨日 session 与总时长口径一致。
+        segment = clip_online_segment(
+            session.started_at,
+            session.ended_at,
+            time_range.start,
+            time_range.end,
+        )
+        if segment:
+            key = session.player_name.lower()
+            totals[key] = totals.get(key, 0) + segment.seconds
+    return totals
 
 
 async def _first_seen_by_player_names(

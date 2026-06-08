@@ -364,6 +364,7 @@ class McServerService:
         return await render_playtime(
             f"{_server_title(server)} {time_range.label} 在线时长",
             entries,
+            time_range,
         )
 
     async def personal_online_message(
@@ -412,6 +413,9 @@ class McServerService:
         data = ChartData(
             title=f"{_server_title(server)} 在线人数变化",
             range_label=time_range.label,
+            range_start=time_range.start,
+            range_end=time_range.end,
+            range_end_is_current=time_range.end_is_current,
             points=aggregate_sample_points(samples),
         )
         return await render_chart(data)

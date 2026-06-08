@@ -319,6 +319,7 @@ async def test_chart_message_defaults_to_business_today(
             "今日",
             datetime(2026, 5, 16, 6, 0, 0),
             datetime(2026, 5, 16, 12, 0, 0),
+            end_is_current=True,
         )
 
     monkeypatch.setattr(mc_services, "get_server_for_group", fake_get_server_for_group)
@@ -333,6 +334,9 @@ async def test_chart_message_defaults_to_business_today(
     assert captured["range_text"] == "今日"
     assert captured["time_range"].label == "今日"
     assert captured["chart"].title == "MC 服务器 在线人数变化"
+    assert captured["chart"].range_start == captured["time_range"].start
+    assert captured["chart"].range_end == captured["time_range"].end
+    assert captured["chart"].range_end_is_current is True
 
 
 @pytest.mark.asyncio
@@ -413,9 +417,10 @@ async def test_playtime_message_keeps_season_default(
         captured["range_label"] = time_range.label
         return []
 
-    async def fake_render_playtime(title, entries):
+    async def fake_render_playtime(title, entries, time_range):
         captured["title"] = title
         captured["entries"] = entries
+        captured["render_range"] = time_range
         return mc_services.RenderedMessage(image=None, fallback_text="time")
 
     monkeypatch.setattr(mc_services, "get_server_for_group", fake_get_server_for_group)
@@ -427,6 +432,7 @@ async def test_playtime_message_keeps_season_default(
 
     assert captured["range_label"] == "本周目"
     assert captured["title"] == "主服 本周目 在线时长"
+    assert captured["render_range"].label == "本周目"
 
 
 def test_should_reset_log_cursor_on_inode_change_or_truncate():

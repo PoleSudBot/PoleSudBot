@@ -12,8 +12,14 @@ from .types import (
     PlaytimeEntry,
     RenderedMessage,
     ServerStatus,
+    TimeRange,
 )
-from .utils import downsample_points, format_duration
+from .utils import (
+    downsample_points,
+    format_duration,
+    format_time_range_hint,
+    should_show_today_online,
+)
 
 _TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 _STATUS_TEMPLATE = _TEMPLATE_DIR / "status_card.html"
@@ -55,24 +61,46 @@ def format_status_text(status: ServerStatus) -> str:
     return "\n".join(lines)
 
 
-def format_playtime_text(title: str, entries: list[PlaytimeEntry]) -> str:
+def format_playtime_text(
+    title: str,
+    entries: list[PlaytimeEntry],
+    time_range: TimeRange,
+) -> str:
+    show_today = should_show_today_online(time_range)
+    range_hint = format_time_range_hint(time_range)
     if not entries:
-        return f"{title}\n暂无在线时长记录。"
-    lines = [title]
+        return f"{title}\n时间：{range_hint}\n暂无在线时长记录。"
+    lines = [title, f"时间：{range_hint}"]
     for index, entry in enumerate(entries, 1):
+        today_text = (
+            f"，本日在线 {format_duration(entry.today_seconds)}"
+            if show_today
+            else ""
+        )
         lines.append(
             f"{index}. {entry.player_name}：{format_duration(entry.seconds)}"
-            f"（日均 {format_duration(entry.average_seconds)}）"
+            f"（日均 {format_duration(entry.average_seconds)}{today_text}）"
         )
     return "\n".join(lines)
 
 
 def format_chart_text(data: ChartData) -> str:
+    range_hint = (
+        _range_hint(
+            data.range_label,
+            data.range_start,
+            data.range_end,
+            end_is_current=data.range_end_is_current,
+        )
+        if data.range_start and data.range_end
+        else data.range_label
+    )
     if not data.points:
-        return f"{data.title}\n{data.range_label} 暂无人数采样。"
+        return f"{data.title}\n时间：{range_hint}\n暂无人数采样。"
     return (
         f"{data.title}\n"
         f"范围：{data.range_label}\n"
+        f"时间：{range_hint}\n"
         f"采样：{len(data.points)} 个"
     )
 
@@ -100,6 +128,18 @@ def _display_title(name: str) -> str:
     return text
 
 
+def _range_hint(
+    label: str,
+    start,
+    end,
+    *,
+    end_is_current: bool = False,
+) -> str:
+    return format_time_range_hint(
+        TimeRange(label, start, end, end_is_current=end_is_current)
+    )
+
+
 def format_personal_online_text(data: PersonalOnlineData) -> str:
     player_label = (
         "、".join(data.player_names) if data.player_names else f"QQ {data.qq_id}"
@@ -107,10 +147,19 @@ def format_personal_online_text(data: PersonalOnlineData) -> str:
     lines = [
         data.title,
         f"范围：{data.range_label}",
+        "时间："
+        + _range_hint(
+            data.range_label,
+            data.range_start,
+            data.range_end,
+            end_is_current=data.range_end_is_current,
+        ),
         f"玩家：{player_label}",
         f"总时长：{format_duration(data.total_seconds)}",
         f"日均：{format_duration(data.average_seconds)}",
     ]
+    if data.show_today_online:
+        lines.append(f"本日在线：{format_duration(data.today_seconds)}")
     if not data.segments:
         lines.append("暂无在线记录。")
     else:
@@ -154,16 +203,24 @@ async def render_status(status: ServerStatus) -> RenderedMessage:
         return RenderedMessage(image=None, fallback_text=fallback)
 
 
-async def render_playtime(title: str, entries: list[PlaytimeEntry]) -> RenderedMessage:
-    fallback = format_playtime_text(title, entries)
+async def render_playtime(
+    title: str,
+    entries: list[PlaytimeEntry],
+    time_range: TimeRange,
+) -> RenderedMessage:
+    fallback = format_playtime_text(title, entries, time_range)
     if not _get_settings().render_enabled:
         return RenderedMessage(image=None, fallback_text=fallback)
+    show_today = should_show_today_online(time_range)
     try:
         return RenderedMessage(
             image=await _render_template(
                 _TIME_TEMPLATE,
                 {
                     "title": title,
+                    "range_label": time_range.label,
+                    "range_hint": format_time_range_hint(time_range),
+                    "show_today_online": show_today,
                     "items": [
                         {
                             "rank": index,
@@ -172,6 +229,7 @@ async def render_playtime(title: str, entries: list[PlaytimeEntry]) -> RenderedM
                             "average_duration": format_duration(
                                 entry.average_seconds
                             ),
+                            "today_duration": format_duration(entry.today_seconds),
                             "seconds": entry.seconds,
                         }
                         for index, entry in enumerate(entries[:20], 1)
@@ -200,6 +258,14 @@ async def render_chart(data: ChartData) -> RenderedMessage:
                 {
                     "title": data.title,
                     "range_label": data.range_label,
+                    "range_hint": _range_hint(
+                        data.range_label,
+                        data.range_start,
+                        data.range_end,
+                        end_is_current=data.range_end_is_current,
+                    )
+                    if data.range_start and data.range_end
+                    else data.range_label,
                     "sample_count": len(data.points),
                     "labels": [
                         point.captured_at.strftime("%m-%d %H:%M")
@@ -236,11 +302,22 @@ async def render_personal_online(data: PersonalOnlineData) -> RenderedMessage:
                 {
                     "title": data.title,
                     "range_label": data.range_label,
+                    "range_hint": _range_hint(
+                        data.range_label,
+                        data.range_start,
+                        data.range_end,
+                        end_is_current=data.range_end_is_current,
+                    ),
                     "player_label": "、".join(data.player_names)
                     if data.player_names
                     else f"QQ {data.qq_id}",
                     "total_duration": format_duration(data.total_seconds),
                     "average_duration": format_duration(data.average_seconds),
+                    "today_duration": format_duration(data.today_seconds),
+                    "show_today_online": data.show_today_online,
+                    "stat_grid_class": "four"
+                    if data.show_today_online
+                    else "three",
                     "chart_granularity": data.chart_granularity,
                     "chart_granularity_label": "小时级"
                     if data.chart_granularity == "hourly"

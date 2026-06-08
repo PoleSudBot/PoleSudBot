@@ -36,6 +36,7 @@ class TimeRange:
     label: str
     start: datetime
     end: datetime
+    end_is_current: bool = False
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,7 @@ class PlaytimeEntry:
     seconds: int
     qq_id: str = ""
     average_seconds: int = 0
+    today_seconds: int = 0
     first_seen_at: datetime | None = None
     last_seen_at: datetime | None = None
 
@@ -130,6 +132,7 @@ class PersonalOnlineData:
     range_start: datetime
     range_end: datetime
     qq_id: str
+    range_end_is_current: bool = False
     player_names: list[str] = field(default_factory=list)
     segments: list[PersonalOnlineSegment] = field(default_factory=list)
     daily_points: list[OnlineDurationPoint] = field(default_factory=list)
@@ -137,6 +140,8 @@ class PersonalOnlineData:
     chart_granularity: Literal["hourly", "daily"] = "daily"
     total_seconds: int = 0
     average_seconds: int = 0
+    today_seconds: int = 0
+    show_today_online: bool = False
 
 
 @dataclass(frozen=True)
@@ -144,4 +149,7 @@ class ChartData:
     title: str
     range_label: str
     points: list[SamplePoint]
+    range_start: datetime | None = None
+    range_end: datetime | None = None
+    range_end_is_current: bool = False
     playtime_entries: list[PlaytimeEntry] = field(default_factory=list)

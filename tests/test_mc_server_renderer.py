@@ -43,6 +43,7 @@ ServerStatus = mc_types.ServerStatus
 ChartData = mc_types.ChartData
 SamplePoint = mc_types.SamplePoint
 PlaytimeEntry = mc_types.PlaytimeEntry
+TimeRange = mc_types.TimeRange
 RenderingError = exceptions.RenderingError
 chart_summary = renderer.chart_summary
 format_personal_online_text = renderer.format_personal_online_text
@@ -87,6 +88,7 @@ def _personal_online_data() -> PersonalOnlineData:
         range_label="今日",
         range_start=start,
         range_end=end,
+        range_end_is_current=True,
         qq_id="10000",
         player_names=["Steve"],
         segments=[segment],
@@ -132,6 +134,7 @@ def test_format_personal_online_text_handles_empty_state():
         range_label=data.range_label,
         range_start=data.range_start,
         range_end=data.range_end,
+        range_end_is_current=data.range_end_is_current,
         qq_id=data.qq_id,
     )
 
@@ -156,9 +159,16 @@ def test_format_playtime_text_contains_daily_average():
     entries = [
         PlaytimeEntry(player_name="Steve", seconds=7200, average_seconds=3600)
     ]
+    time_range = TimeRange(
+        "今日",
+        datetime(2026, 5, 16, 6, 0, 0),
+        datetime(2026, 5, 16, 12, 0, 0),
+        end_is_current=True,
+    )
 
-    text = format_playtime_text("主服 本周目 在线时长", entries)
+    text = format_playtime_text("主服 今日 在线时长", entries, time_range)
 
+    assert "时间：26-05-16 06:00 ~ " in text
     assert "Steve：2小时00分（日均 1小时00分）" in text
 
 
@@ -233,10 +243,18 @@ async def test_render_chart_summary_uses_full_points_after_downsample(
     )
 
     result = await render_chart(
-        ChartData(title="人数图", range_label="今日", points=points)
+        ChartData(
+            title="人数图",
+            range_label="今日",
+            range_start=datetime(2026, 5, 16, 6, 0, 0),
+            range_end=datetime(2026, 5, 16, 12, 0, 0),
+            range_end_is_current=True,
+            points=points,
+        )
     )
 
     assert result.image == b"image"
+    assert captured_payload["range_hint"] == "26-05-16 06:00 ~ "
     assert "peak" not in captured_payload
     assert "avg" not in captured_payload
     assert captured_payload["sample_count"] == 5
@@ -266,11 +284,27 @@ async def test_render_playtime_includes_average_duration(
 
     result = await render_playtime(
         "在线时长",
-        [PlaytimeEntry(player_name="Steve", seconds=7200, average_seconds=3600)],
+        [
+            PlaytimeEntry(
+                player_name="Steve",
+                seconds=7200,
+                average_seconds=3600,
+                today_seconds=1800,
+            )
+        ],
+        TimeRange(
+            "本周",
+            datetime(2026, 5, 11, 6, 0, 0),
+            datetime(2026, 5, 16, 12, 0, 0),
+            end_is_current=True,
+        ),
     )
 
     assert result.image == b"image"
+    assert captured_payload["range_hint"] == "26-05-11 06:00 ~ "
+    assert captured_payload["show_today_online"] is True
     assert captured_payload["items"][0]["average_duration"] == "1小时00分"
+    assert captured_payload["items"][0]["today_duration"] == "30分钟"
 
 
 @pytest.mark.asyncio
@@ -293,6 +327,8 @@ async def test_render_personal_online_passes_chart_payload_without_segments(
     result = await render_personal_online(_personal_online_data())
 
     assert result.image == b"image"
+    assert captured_payload["range_hint"] == "26-05-16 10:00 ~ "
+    assert captured_payload["show_today_online"] is False
     assert captured_payload["average_duration"] == "1小时30分"
     assert captured_payload["chart_granularity"] == "hourly"
     assert captured_payload["chart_labels"] == ["05-16 10:00", "05-16 11:00"]

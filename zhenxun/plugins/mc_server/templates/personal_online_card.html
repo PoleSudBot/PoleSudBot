@@ -36,6 +36,10 @@
     .stat-grid.three {
       grid-template-columns: repeat(3, 1fr);
     }
+
+    .stat-grid.four {
+      grid-template-columns: repeat(4, 1fr);
+    }
   </style>
 </head>
 <body>
@@ -45,12 +49,12 @@
         <div class="title-group">
           <p class="eyebrow">MC 个人在线情况</p>
           <h1 class="page-title">{{ title }}</h1>
-          <div class="subtle">{{ range_label }}</div>
+          <div class="subtle">{{ range_hint }}</div>
         </div>
         <span class="level-badge">{{ chart_granularity_label }}</span>
       </div>
 
-      <div class="stat-grid three">
+      <div class="stat-grid {{ stat_grid_class }}">
         <div class="stat-box">
           {{ icons.icon_tile("clock") }}
           <div class="stat-copy">
@@ -72,6 +76,15 @@
             <div class="stat-value">{{ range_label }}</div>
           </div>
         </div>
+        {% if show_today_online %}
+        <div class="stat-box">
+          {{ icons.icon_tile("clock") }}
+          <div class="stat-copy">
+            <div class="stat-label">本日在线</div>
+            <div class="stat-value">{{ today_duration }}</div>
+          </div>
+        </div>
+        {% endif %}
       </div>
 
       <div class="player-panel">
