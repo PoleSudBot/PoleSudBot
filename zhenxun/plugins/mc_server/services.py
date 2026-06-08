@@ -45,6 +45,7 @@ from .repositories import (
     get_personal_online_data_by_player_name,
     get_playtime_entries,
     get_server_for_group,
+    list_active_sessions,
     list_poll_servers,
     list_server_group_bindings,
     record_count_sample,
@@ -480,6 +481,7 @@ class McServerService:
         for server in await list_poll_servers():
             checked += 1
             bindings = await list_server_group_bindings(server)
+            observed_at = now_local()
             status = await query_server_status(
                 server,
                 timeout=get_settings().request_timeout_seconds,
@@ -491,8 +493,14 @@ class McServerService:
                     server,
                     status.online_players,
                     status.max_players,
+                    observed_at=observed_at,
                 )
-                await self._mark_visible_players_online(server, status.players)
+                await self._handle_visible_players(
+                    server,
+                    status.players,
+                    observed_at=observed_at,
+                    player_list_complete=status.player_list_complete,
+                )
                 if was_disconnected:
                     notified += await self._send_bound_group_notice(
                         bindings,
@@ -500,7 +508,16 @@ class McServerService:
                         switch=SWITCH_CONN,
                     )
             else:
-                should_notify = await self._mark_failed(server, status.error)
+                should_notify = await self._mark_failed(
+                    server,
+                    status.error,
+                    observed_at=observed_at,
+                )
+                if server.disconnected:
+                    await self._close_active_sessions_by_observation(
+                        server,
+                        occurred_at=observed_at,
+                    )
                 if should_notify:
                     notified += await self._send_bound_group_notice(
                         bindings,
@@ -593,9 +610,14 @@ class McServerService:
         return server
 
     async def _mark_online(
-        self, server: McServer, online_count: int, max_players: int
+        self,
+        server: McServer,
+        online_count: int,
+        max_players: int,
+        *,
+        observed_at: datetime | None = None,
     ) -> None:
-        now = now_local()
+        now = observed_at or now_local()
         last_sampled_at = normalize_datetime(server.last_sampled_at)
         should_sample = (
             last_sampled_at is None
@@ -625,11 +647,18 @@ class McServerService:
                 captured_at=now,
             )
 
-    async def _mark_failed(self, server: McServer, error: str) -> bool:
+    async def _mark_failed(
+        self,
+        server: McServer,
+        error: str,
+        *,
+        observed_at: datetime | None = None,
+    ) -> bool:
+        now = observed_at or now_local()
         server.online = False
         server.failed_count += 1
         server.last_error = error
-        server.last_checked_at = now_local()
+        server.last_checked_at = now
         should_notify = (
             not server.disconnected
             and server.failed_count >= get_settings().disconnect_notify_threshold
@@ -672,6 +701,12 @@ class McServerService:
             )
         elif event.type == "leave":
             self._schedule_pending_leave(server, event.player_name, occurred_at)
+        elif event.type == "server_start":
+            # 新一轮启动说明旧 MC 进程已结束，重启前没 leave 的在线段必须截断。
+            await self._close_active_sessions_by_observation(
+                server,
+                occurred_at=occurred_at,
+            )
         elif event.type == "chat":
             await self._send_bound_group_notice(
                 await list_server_group_bindings(server),
@@ -754,18 +789,55 @@ class McServerService:
         )
         return f"，本次在线 {format_duration(seconds)}"
 
-    async def _mark_visible_players_online(self, server: McServer, players) -> None:
-        if not players:
-            return
-        observed_at = now_local()
+    async def _handle_visible_players(
+        self,
+        server: McServer,
+        players,
+        *,
+        observed_at: datetime,
+        player_list_complete: bool,
+    ) -> None:
+        visible_names: set[str] = set()
         for player in players:
+            player_name = str(getattr(player, "name", "") or "").strip()
+            if not player_name:
+                continue
+            visible_names.add(player_name.lower())
             # 状态源只能证明“此刻在线”，不能回推 Bot 离线期间的真实上线时间。
             await start_session(
                 server,
-                player.name,
+                player_name,
                 occurred_at=observed_at,
-                uuid=player.uuid,
+                uuid=str(getattr(player, "uuid", "") or ""),
                 source="status",
+            )
+        # 不完整 sample 不能反推“名单外玩家已下线”；只有完整名单才能做反向关闭。
+        if not player_list_complete:
+            return
+        active_sessions = await list_active_sessions(server)
+        for session in active_sessions:
+            player_name = str(getattr(session, "player_name", "") or "").strip()
+            if not player_name or player_name.lower() in visible_names:
+                continue
+            await end_session(
+                server,
+                player_name,
+                occurred_at=observed_at,
+            )
+
+    async def _close_active_sessions_by_observation(
+        self,
+        server: McServer,
+        *,
+        occurred_at: datetime,
+    ) -> None:
+        closed = await close_active_sessions(server, occurred_at=occurred_at)
+        if closed:
+            logger.info(
+                "MC服务器状态观测后已截断在线会话",
+                MODULE_NAME,
+                server=str(getattr(server, "id", "")),
+                closed=closed,
             )
 
     async def _send_group_notice(self, server: McServer, message: str) -> None:

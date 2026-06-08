@@ -8,6 +8,7 @@ from .types import LogEvent
 _TIME_PREFIX = re.compile(r"^\[(?P<hms>\d{2}:\d{2}:\d{2})]\s+\[[^]]+]:\s+(?P<body>.*)$")
 _JOIN_PATTERN = re.compile(r"^(?P<player>[A-Za-z0-9_]{3,16}) joined the game$")
 _LEAVE_PATTERN = re.compile(r"^(?P<player>[A-Za-z0-9_]{3,16}) left the game$")
+_SERVER_START_PATTERN = re.compile(r'^Done \([^)]+\)! For help, type "help"$')
 _CHAT_PATTERNS = (
     re.compile(r"^<(?P<player>[A-Za-z0-9_]{3,16})> (?P<message>.*)$"),
     re.compile(r"^\[Not Secure] <(?P<player>[A-Za-z0-9_]{3,16})> (?P<message>.*)$"),
@@ -35,6 +36,9 @@ def parse_paper_log_line(line: str, now: datetime | None = None) -> LogEvent | N
             raw=raw,
             occurred_at=occurred_at,
         )
+
+    if _SERVER_START_PATTERN.match(body):
+        return LogEvent(type="server_start", raw=raw, occurred_at=occurred_at)
 
     for pattern in _CHAT_PATTERNS:
         if chat := pattern.match(body):

@@ -80,6 +80,7 @@ class ServerStatus:
     online_players: int = 0
     max_players: int = 0
     players: list[PlayerStatus] = field(default_factory=list)
+    player_list_complete: bool = False
     weather: str = "未知/未配置数据源"
     error: str = ""
 

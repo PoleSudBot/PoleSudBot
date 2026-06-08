@@ -97,6 +97,8 @@ async def _query_status(server: McServer, *, timeout: int) -> ServerStatus:
         online_players=status.online_players,
         max_players=status.max_players,
         players=enriched,
+        # 只有合并后的可见名单数量与在线人数一致时，才能反向校准缺失玩家下线。
+        player_list_complete=status.online_players == len(enriched),
         weather=status.weather,
     )
 

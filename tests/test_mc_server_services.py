@@ -71,7 +71,9 @@ for name in [
     "get_personal_online_data",
     "get_personal_online_data_by_player_name",
     "get_playtime_entries",
+    "get_total_online_seconds_by_player_names",
     "list_poll_servers",
+    "list_active_sessions",
     "list_server_group_bindings",
     "record_count_sample",
     "require_group_binding",
@@ -100,6 +102,12 @@ class _FakeServer(SimpleNamespace):
             join_notify_enabled=False,
             conn_notify_enabled=True,
             chat_bridge_enabled=False,
+            online=False,
+            disconnected=False,
+            failed_count=0,
+            last_error="",
+            last_checked_at=None,
+            last_sampled_at=None,
             rcon_host="",
             rcon_port=25575,
             rcon_password="",
@@ -644,6 +652,196 @@ async def test_handle_log_event_counts_online_from_first_join_after_short_rejoin
     await asyncio.sleep(0.02)
 
     assert notices == [("123456", "Steve 离开了游戏，本次在线 20分钟")]
+
+
+@pytest.mark.asyncio
+async def test_handle_log_event_closes_active_sessions_on_server_start(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    started_at = datetime(2026, 5, 16, 20, 0, 0)
+    restart_at = started_at + timedelta(minutes=10)
+    server = SimpleNamespace(id=1, group_id="123456")
+    service = McServerService()
+    closed = []
+
+    async def fake_close_active_sessions(_server, *, occurred_at):
+        closed.append(occurred_at)
+        return 2
+
+    monkeypatch.setattr(
+        mc_services,
+        "close_active_sessions",
+        fake_close_active_sessions,
+    )
+
+    await service._handle_log_event(
+        server,
+        SimpleNamespace(type="server_start", occurred_at=restart_at),
+    )
+
+    assert closed == [restart_at]
+
+
+@pytest.mark.asyncio
+async def test_handle_visible_players_closes_missing_only_when_list_complete(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    server = SimpleNamespace(id=1, group_id="123456")
+    service = McServerService()
+    observed_at = datetime(2026, 5, 16, 20, 0, 0)
+    starts = []
+    ends = []
+
+    async def fake_start_session(
+        _server,
+        player_name: str,
+        *,
+        occurred_at,
+        uuid="",
+        source="log",
+    ):
+        starts.append((player_name, occurred_at, uuid, source))
+        return None
+
+    async def fake_list_active_sessions(_server):
+        return [
+            SimpleNamespace(player_name="Steve"),
+            SimpleNamespace(player_name="Alex"),
+        ]
+
+    async def fake_end_session(_server, player_name: str, *, occurred_at):
+        ends.append((player_name, occurred_at))
+        return None
+
+    monkeypatch.setattr(mc_services, "start_session", fake_start_session)
+    monkeypatch.setattr(mc_services, "list_active_sessions", fake_list_active_sessions)
+    monkeypatch.setattr(mc_services, "end_session", fake_end_session)
+
+    await service._handle_visible_players(
+        server,
+        [SimpleNamespace(name="Steve", uuid="uuid-steve")],
+        observed_at=observed_at,
+        player_list_complete=False,
+    )
+    assert starts == [("Steve", observed_at, "uuid-steve", "status")]
+    assert ends == []
+
+    starts.clear()
+    await service._handle_visible_players(
+        server,
+        [SimpleNamespace(name="Steve", uuid="uuid-steve")],
+        observed_at=observed_at,
+        player_list_complete=True,
+    )
+    assert starts == [("Steve", observed_at, "uuid-steve", "status")]
+    assert ends == [("Alex", observed_at)]
+
+
+@pytest.mark.asyncio
+async def test_poll_once_closes_active_sessions_on_confirmed_disconnect(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    server = _FakeServer()
+    server.failed_count = 2
+    observed_at = datetime(2026, 5, 16, 20, 0, 0)
+    closed = []
+
+    async def fake_list_poll_servers():
+        return [server]
+
+    async def fake_list_server_group_bindings(_server):
+        return []
+
+    async def fake_query_server_status(_server, *, timeout):
+        _ = timeout
+        return SimpleNamespace(online=False, error="connection failed")
+
+    async def fake_close_active_sessions(_server, *, occurred_at):
+        closed.append(occurred_at)
+        return 1
+
+    monkeypatch.setattr(mc_services, "now_local", lambda: observed_at)
+    monkeypatch.setattr(mc_services, "list_poll_servers", fake_list_poll_servers)
+    monkeypatch.setattr(
+        mc_services,
+        "list_server_group_bindings",
+        fake_list_server_group_bindings,
+    )
+    monkeypatch.setattr(mc_services, "query_server_status", fake_query_server_status)
+    monkeypatch.setattr(
+        mc_services,
+        "close_active_sessions",
+        fake_close_active_sessions,
+    )
+    monkeypatch.setattr(
+        mc_services,
+        "get_settings",
+        lambda: SimpleNamespace(
+            request_timeout_seconds=8,
+            disconnect_notify_threshold=3,
+            sample_interval_seconds=300,
+        ),
+    )
+
+    service = McServerService()
+    service._startup_sessions_closed = True
+    result = await service.poll_once()
+
+    assert result.checked == 1
+    assert closed == [observed_at]
+
+
+@pytest.mark.asyncio
+async def test_poll_once_keeps_active_sessions_before_disconnect_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    server = _FakeServer()
+    observed_at = datetime(2026, 5, 16, 20, 0, 0)
+    closed = []
+
+    async def fake_list_poll_servers():
+        return [server]
+
+    async def fake_list_server_group_bindings(_server):
+        return []
+
+    async def fake_query_server_status(_server, *, timeout):
+        _ = timeout
+        return SimpleNamespace(online=False, error="connection failed")
+
+    async def fake_close_active_sessions(_server, *, occurred_at):
+        closed.append(occurred_at)
+        return 1
+
+    monkeypatch.setattr(mc_services, "now_local", lambda: observed_at)
+    monkeypatch.setattr(mc_services, "list_poll_servers", fake_list_poll_servers)
+    monkeypatch.setattr(
+        mc_services,
+        "list_server_group_bindings",
+        fake_list_server_group_bindings,
+    )
+    monkeypatch.setattr(mc_services, "query_server_status", fake_query_server_status)
+    monkeypatch.setattr(
+        mc_services,
+        "close_active_sessions",
+        fake_close_active_sessions,
+    )
+    monkeypatch.setattr(
+        mc_services,
+        "get_settings",
+        lambda: SimpleNamespace(
+            request_timeout_seconds=8,
+            disconnect_notify_threshold=3,
+        ),
+    )
+
+    service = McServerService()
+    service._startup_sessions_closed = True
+    result = await service.poll_once()
+
+    assert result.checked == 1
+    assert server.disconnected is False
+    assert closed == []
 
 
 @pytest.mark.asyncio

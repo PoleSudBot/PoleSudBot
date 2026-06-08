@@ -60,3 +60,16 @@ def test_parse_paper_log_line_ignores_authme_login():
 
 def test_parse_paper_log_line_ignores_unrelated_lines():
     assert parse_paper_log_line("[20:00:00] [Server thread/INFO]: Done") is None
+
+
+def test_parse_paper_log_line_detects_server_start():
+    now = datetime(2026, 5, 16, 20, 0, 0)
+
+    event = parse_paper_log_line(
+        '[20:00:00] [Server thread/INFO]: Done (7.123s)! For help, type "help"',
+        now,
+    )
+
+    assert event is not None
+    assert event.type == "server_start"
+    assert event.occurred_at == datetime(2026, 5, 16, 20, 0, 0)
