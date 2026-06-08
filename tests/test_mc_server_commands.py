@@ -30,7 +30,9 @@ def test_mc_commands_accept_common_short_aliases():
     assert mcwhitelist_command().parse("mcw Steve").matched
     assert mcinfo_command().parse("mci").matched
     assert mctime_command().parse("mct 今日").matched
+    assert mctime_command().parse("mct 上周").matched
     assert mcchart_command().parse("mcc 本周").matched
+    assert mcchart_command().parse("mcc 昨日").matched
     assert mctoggle_command().parse("mctg all on").matched
 
 
@@ -89,11 +91,11 @@ def test_mcwhitelist_parses_text_parts():
 
 
 def test_mctime_target_parser_keeps_ranking_range_without_target():
-    parsed = mctime_command().parse("mctime 今日")
+    parsed = mctime_command().parse("mctime 上周")
 
     assert parsed.matched
     assert resolve_mctime_query(parsed.query("parts"), self_qq_id="10000") == (
-        MctimeQuery("ranking", None, "今日")
+        MctimeQuery("ranking", None, "上周")
     )
 
 
@@ -126,11 +128,11 @@ def test_mctime_target_parser_supports_player_name():
 
 
 def test_mctime_target_parser_supports_player_name_with_range():
-    parsed = mctime_command().parse("mct Letemps 本周")
+    parsed = mctime_command().parse("mct Letemps 上月")
 
     assert parsed.matched
     assert resolve_mctime_query(parsed.query("parts"), self_qq_id="10000") == (
-        MctimeQuery("player", "Letemps", "本周")
+        MctimeQuery("player", "Letemps", "上月")
     )
 
 

@@ -59,7 +59,6 @@ from .status import probe_server_status, query_server_status
 from .types import ChartData, RenderedMessage
 from .utils import (
     build_tellraw_command,
-    business_today_range,
     classify_tellraw_response,
     format_duration,
     format_server_address,
@@ -407,11 +406,7 @@ class McServerService:
     ) -> RenderedMessage:
         server = await self._require_server(group_id)
         season = await get_active_season(server)
-        time_range = (
-            business_today_range()
-            if not (range_text or "").strip()
-            else parse_time_range(range_text, season.started_at)
-        )
+        time_range = parse_time_range(range_text or "今日", season.started_at)
         samples = await get_count_samples(server, time_range)
         data = ChartData(
             title=f"{_server_title(server)} 在线人数变化",

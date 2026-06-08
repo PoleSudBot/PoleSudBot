@@ -304,24 +304,26 @@ async def test_chart_message_defaults_to_business_today(
         captured["chart"] = data
         return mc_services.RenderedMessage(image=None, fallback_text="chart")
 
+    def fake_parse_time_range(range_text, season_start):
+        captured["range_text"] = range_text
+        captured["season_start"] = season_start
+        return TimeRange(
+            "今日",
+            datetime(2026, 5, 16, 6, 0, 0),
+            datetime(2026, 5, 16, 12, 0, 0),
+        )
+
     monkeypatch.setattr(mc_services, "get_server_for_group", fake_get_server_for_group)
     monkeypatch.setattr(mc_services, "get_active_season", fake_get_active_season)
     monkeypatch.setattr(mc_services, "get_count_samples", fake_get_count_samples)
     monkeypatch.setattr(mc_services, "render_chart", fake_render_chart)
-    monkeypatch.setattr(
-        mc_services,
-        "business_today_range",
-        lambda: TimeRange(
-            "本日",
-            datetime(2026, 5, 16, 6, 0, 0),
-            datetime(2026, 5, 16, 12, 0, 0),
-        ),
-    )
+    monkeypatch.setattr(mc_services, "parse_time_range", fake_parse_time_range)
 
     rendered = await McServerService().chart_message("123456")
 
     assert rendered.fallback_text == "chart"
-    assert captured["time_range"].label == "本日"
+    assert captured["range_text"] == "今日"
+    assert captured["time_range"].label == "今日"
     assert captured["chart"].title == "MC 服务器 在线人数变化"
 
 

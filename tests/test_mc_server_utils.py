@@ -8,15 +8,16 @@ import pytest
 
 from zhenxun.plugins.mc_server.utils import (
     MC_TIMEZONE,
+    build_tellraw_command,
     business_day_count,
     business_today_range,
-    build_tellraw_command,
     classify_tellraw_response,
     downsample_points,
     format_server_address,
     is_bind_flow_done,
     is_bind_flow_exit,
     is_bind_flow_skip,
+    is_time_range_word,
     normalize_datetime,
     now_local,
     parse_bind_private_setup,
@@ -90,9 +91,9 @@ def test_parse_time_range_accepts_single_day_and_range():
     ranged = parse_time_range("2026-05-01..2026-05-03")
 
     assert one_day.label == "2026-05-15"
-    assert one_day.start == datetime(2026, 5, 15, 0, 0, 0, tzinfo=MC_TIMEZONE)
+    assert one_day.start == datetime(2026, 5, 15, 6, 0, 0, tzinfo=MC_TIMEZONE)
     assert ranged.label == "2026-05-01..2026-05-03"
-    assert ranged.start == datetime(2026, 5, 1, 0, 0, 0, tzinfo=MC_TIMEZONE)
+    assert ranged.start == datetime(2026, 5, 1, 6, 0, 0, tzinfo=MC_TIMEZONE)
 
 
 def test_parse_time_range_rejects_reversed_range():
@@ -107,10 +108,39 @@ def test_business_today_range_uses_six_oclock_boundary():
     early_range = business_today_range(early)
     daytime_range = business_today_range(daytime)
 
-    assert early_range.label == "本日"
+    assert early_range.label == "今日"
     assert early_range.start == datetime(2026, 5, 15, 6, 0, 0, tzinfo=MC_TIMEZONE)
     assert early_range.end == early
     assert daytime_range.start == datetime(2026, 5, 16, 6, 0, 0, tzinfo=MC_TIMEZONE)
+
+
+def test_parse_time_range_presets_use_six_oclock_boundary():
+    current = datetime(2026, 6, 7, 5, 30, 0, tzinfo=MC_TIMEZONE)
+
+    today = parse_time_range("今日", now=current)
+    yesterday = parse_time_range("昨日", now=current)
+    this_week = parse_time_range("本周", now=current)
+    last_week = parse_time_range("上周", now=current)
+    this_month = parse_time_range("本月", now=current)
+    last_month = parse_time_range("上月", now=current)
+
+    assert today.start == datetime(2026, 6, 6, 6, 0, 0, tzinfo=MC_TIMEZONE)
+    assert today.end == current
+    assert yesterday.start == datetime(2026, 6, 5, 6, 0, 0, tzinfo=MC_TIMEZONE)
+    assert yesterday.end == datetime(2026, 6, 6, 6, 0, 0, tzinfo=MC_TIMEZONE)
+    assert this_week.start == datetime(2026, 6, 1, 6, 0, 0, tzinfo=MC_TIMEZONE)
+    assert last_week.start == datetime(2026, 5, 25, 6, 0, 0, tzinfo=MC_TIMEZONE)
+    assert last_week.end == datetime(2026, 6, 1, 6, 0, 0, tzinfo=MC_TIMEZONE)
+    assert this_month.start == datetime(2026, 6, 1, 6, 0, 0, tzinfo=MC_TIMEZONE)
+    assert last_month.start == datetime(2026, 5, 1, 6, 0, 0, tzinfo=MC_TIMEZONE)
+    assert last_month.end == datetime(2026, 6, 1, 6, 0, 0, tzinfo=MC_TIMEZONE)
+
+
+def test_is_time_range_word_accepts_shared_mc_stat_ranges():
+    assert is_time_range_word("上周")
+    assert is_time_range_word("last_month")
+    assert is_time_range_word("2026-05-01..2026-05-03")
+    assert not is_time_range_word("Steve")
 
 
 def test_business_day_count_uses_six_oclock_days():

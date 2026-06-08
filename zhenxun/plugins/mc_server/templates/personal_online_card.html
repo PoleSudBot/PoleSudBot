@@ -33,36 +33,8 @@
       font-weight: 500;
     }
 
-    .segment-list {
-      margin-top: 16px;
-      border-top: 1px solid var(--color-border);
-    }
-
-    .segment-row {
-      display: grid;
-      grid-template-columns: 1fr 104px;
-      gap: 12px;
-      align-items: center;
-      min-height: 42px;
-      padding: 10px 0;
-      border-bottom: 1px solid var(--color-border);
-    }
-
-    .segment-time {
-      color: var(--color-text-dark);
-      font-size: 13px;
-      line-height: 1.25;
-      font-weight: 500;
-      overflow-wrap: anywhere;
-    }
-
-    .segment-duration {
-      color: var(--color-primary-dark);
-      font-size: 13px;
-      line-height: 1.2;
-      font-weight: 700;
-      text-align: right;
-      white-space: nowrap;
+    .stat-grid.three {
+      grid-template-columns: repeat(3, 1fr);
     }
   </style>
 </head>
@@ -75,15 +47,22 @@
           <h1 class="page-title">{{ title }}</h1>
           <div class="subtle">{{ range_label }}</div>
         </div>
-        <span class="level-badge">{{ segment_count }} 段</span>
+        <span class="level-badge">{{ chart_granularity_label }}</span>
       </div>
 
-      <div class="stat-grid two">
+      <div class="stat-grid three">
         <div class="stat-box">
           {{ icons.icon_tile("clock") }}
           <div class="stat-copy">
             <div class="stat-label">总时长</div>
             <div class="stat-value">{{ total_duration }}</div>
+          </div>
+        </div>
+        <div class="stat-box">
+          {{ icons.icon_tile("gauge") }}
+          <div class="stat-copy">
+            <div class="stat-label">日平均</div>
+            <div class="stat-value">{{ average_duration }}</div>
           </div>
         </div>
         <div class="stat-box">
@@ -99,22 +78,13 @@
         {{ icons.icon_tile("user") }}
         <div>
           <div class="player-name">{{ player_label }}</div>
-          <div class="player-meta">按 06:00 业务日汇总在线时长</div>
+          <div class="player-meta">按 06:00 业务日统计，当前为{{ chart_granularity_label }}图表</div>
         </div>
       </div>
 
-      {% if segments %}
+      {% if has_online %}
       <div class="chart-shell">
         <div id="personal-online-chart" class="chart-container"></div>
-      </div>
-
-      <div class="segment-list">
-        {% for segment in segment_rows %}
-        <div class="segment-row">
-          <div class="segment-time">{{ segment.start }} ~ {{ segment.end }}</div>
-          <div class="segment-duration">{{ segment.duration }}</div>
-        </div>
-        {% endfor %}
       </div>
       {% else %}
       <div class="empty">暂无在线记录</div>
@@ -122,7 +92,7 @@
     </div>
   </div>
 
-  {% if segments %}
+  {% if has_online %}
   <script src="{{ asset('js/echarts.min.js') }}"></script>
   <script>
     const chartDom = document.getElementById("personal-online-chart");
@@ -171,15 +141,15 @@
           axisLabel: {
             color: mutedColor,
             fontSize: 11,
-            formatter: (value) => `${Math.round(value / 3600)}h`
+            formatter: (value) => formatDuration(value)
           },
           axisLine: { show: true, lineStyle: { color: borderColor, width: 1 } },
           splitLine: { lineStyle: { color: "rgba(209, 71, 117, 0.12)", type: "dashed" } }
         },
         series: [{
           name: "在线时长",
-          type: "line",
-          smooth: true,
+          type: "{{ 'bar' if chart_granularity == 'hourly' else 'line' }}",
+          smooth: {{ 'false' if chart_granularity == 'hourly' else 'true' }},
           symbol: "circle",
           symbolSize: 7,
           data: {{ chart_values | dump_json | safe }},

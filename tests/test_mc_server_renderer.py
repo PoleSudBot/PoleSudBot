@@ -91,7 +91,13 @@ def _personal_online_data() -> PersonalOnlineData:
         player_names=["Steve"],
         segments=[segment],
         daily_points=[OnlineDurationPoint(label="05-16", seconds=segment.seconds)],
+        chart_points=[
+            OnlineDurationPoint(label="05-16 10:00", seconds=3600),
+            OnlineDurationPoint(label="05-16 11:00", seconds=1800),
+        ],
+        chart_granularity="hourly",
         total_seconds=segment.seconds,
+        average_seconds=segment.seconds,
     )
 
 
@@ -104,7 +110,8 @@ def test_format_status_text_contains_core_fields():
     assert "Steve" in text
     assert "world (1.0, 64.0, 2.0)" in text
     assert "当前1小时01分" in text
-    assert "总计2小时30分" in text
+    assert "累计2小时30分" in text
+    assert "天气" not in text
 
 
 def test_format_personal_online_text_contains_core_fields():
@@ -113,8 +120,9 @@ def test_format_personal_online_text_contains_core_fields():
     assert "主服 今日 个人在线情况" in text
     assert "玩家：Steve" in text
     assert "总时长：1小时30分" in text
-    assert "在线段：1 段" in text
-    assert "05-16 10:00" in text
+    assert "日均：1小时30分" in text
+    assert "图表：小时级在线时长" in text
+    assert "在线段" not in text
 
 
 def test_format_personal_online_text_handles_empty_state():
@@ -130,6 +138,7 @@ def test_format_personal_online_text_handles_empty_state():
     text = format_personal_online_text(empty)
 
     assert "总时长：0分钟" in text
+    assert "日均：0分钟" in text
     assert "暂无在线记录" in text
 
 
@@ -265,7 +274,7 @@ async def test_render_playtime_includes_average_duration(
 
 
 @pytest.mark.asyncio
-async def test_render_personal_online_passes_daily_chart_payload(
+async def test_render_personal_online_passes_chart_payload_without_segments(
     monkeypatch: pytest.MonkeyPatch,
 ):
     captured_payload = {}
@@ -284,6 +293,9 @@ async def test_render_personal_online_passes_daily_chart_payload(
     result = await render_personal_online(_personal_online_data())
 
     assert result.image == b"image"
-    assert captured_payload["chart_labels"] == ["05-16"]
-    assert captured_payload["chart_values"] == [5400]
-    assert captured_payload["chart_durations"] == ["1小时30分"]
+    assert captured_payload["average_duration"] == "1小时30分"
+    assert captured_payload["chart_granularity"] == "hourly"
+    assert captured_payload["chart_labels"] == ["05-16 10:00", "05-16 11:00"]
+    assert captured_payload["chart_values"] == [3600, 1800]
+    assert captured_payload["chart_durations"] == ["1小时00分", "30分钟"]
+    assert "segment_rows" not in captured_payload

@@ -18,7 +18,9 @@ from .models import (
 )
 from .stats import (
     aggregate_daily_online_points,
+    aggregate_hourly_online_points,
     aggregate_playtime,
+    average_business_day_count,
     clip_online_segment,
     overlap_seconds,
 )
@@ -29,7 +31,7 @@ from .types import (
     PlaytimeRow,
     TimeRange,
 )
-from .utils import business_day_count, now_local
+from .utils import business_day_count, normalize_datetime, now_local
 
 
 def normalize_server_identity(host: str, port: int) -> str:
@@ -303,29 +305,45 @@ async def get_playtime_entries(
     if qq_id:
         query = query.filter(qq_id=str(qq_id))
 
+    sessions = await query.all()
+    first_seen_by_name = await _first_seen_by_player_names(
+        server,
+        [session.player_name for session in sessions if session.player_name],
+    )
+
     rows = []
-    for session in await query.all():
+    for session in sessions:
         # 将会话裁剪到查询窗口内，避免跨天/跨周目的长会话把范围外时长算进去。
-        seconds = overlap_seconds(
+        segment = clip_online_segment(
             session.started_at,
             session.ended_at,
             time_range.start,
             time_range.end,
         )
+        if not segment:
+            continue
         rows.append(
             PlaytimeRow(
                 player_name=session.player_name,
                 qq_id=session.qq_id,
-                seconds=seconds,
+                seconds=segment.seconds,
+                first_seen_at=first_seen_by_name.get(session.player_name.lower()),
+                last_seen_at=segment.ended_at,
             )
         )
-    day_count = business_day_count(time_range.start, time_range.end)
     return [
         PlaytimeEntry(
             player_name=entry.player_name,
             qq_id=entry.qq_id,
             seconds=entry.seconds,
-            average_seconds=entry.seconds // day_count,
+            average_seconds=entry.seconds
+            // average_business_day_count(
+                time_range,
+                entry.first_seen_at,
+                entry.last_seen_at,
+            ),
+            first_seen_at=entry.first_seen_at,
+            last_seen_at=entry.last_seen_at,
         )
         for entry in aggregate_playtime(rows)
     ]
@@ -384,6 +402,7 @@ async def get_personal_online_data(
     if player_names:
         target_filter |= _player_name_filter(player_names)
 
+    first_seen_at = await _first_seen_for_filter(server, target_filter)
     sessions = await query.filter(target_filter).order_by("started_at").all()
     segments = _segments_from_sessions(sessions, time_range)
     for session in sessions:
@@ -391,7 +410,7 @@ async def get_personal_online_data(
             player_names.append(session.player_name)
 
     player_names = _unique_non_empty(player_names)
-    return PersonalOnlineData(
+    return _build_personal_online_data(
         title=title,
         range_label=time_range.label,
         range_start=time_range.start,
@@ -399,12 +418,8 @@ async def get_personal_online_data(
         qq_id=target_qq,
         player_names=player_names,
         segments=segments,
-        daily_points=aggregate_daily_online_points(
-            segments,
-            time_range.start,
-            time_range.end,
-        ),
-        total_seconds=sum(segment.seconds for segment in segments),
+        time_range=time_range,
+        first_seen_at=first_seen_at,
     )
 
 
@@ -430,6 +445,7 @@ async def get_personal_online_data_by_player_name(
     if not exists:
         raise ValueError(f"未找到玩家在线记录：{target_name}")
 
+    first_seen_at = await _first_seen_for_filter(server, name_filter)
     sessions = await (
         _online_sessions_in_range(server, time_range)
         .filter(name_filter)
@@ -441,7 +457,7 @@ async def get_personal_online_data_by_player_name(
         + [session.player_name for session in sessions if session.player_name]
     )
     segments = _segments_from_sessions(sessions, time_range)
-    return PersonalOnlineData(
+    return _build_personal_online_data(
         title=title,
         range_label=time_range.label,
         range_start=time_range.start,
@@ -449,12 +465,8 @@ async def get_personal_online_data_by_player_name(
         qq_id="",
         player_names=player_names,
         segments=segments,
-        daily_points=aggregate_daily_online_points(
-            segments,
-            time_range.start,
-            time_range.end,
-        ),
-        total_seconds=sum(segment.seconds for segment in segments),
+        time_range=time_range,
+        first_seen_at=first_seen_at,
     )
 
 
@@ -495,6 +507,79 @@ def _segments_from_sessions(
         if segment:
             segments.append(segment)
     return segments
+
+
+def _build_personal_online_data(
+    *,
+    title: str,
+    range_label: str,
+    range_start: datetime,
+    range_end: datetime,
+    qq_id: str,
+    player_names: list[str],
+    segments: list[PersonalOnlineSegment],
+    time_range: TimeRange,
+    first_seen_at: datetime | None,
+) -> PersonalOnlineData:
+    total_seconds = sum(segment.seconds for segment in segments)
+    daily_points = aggregate_daily_online_points(segments, range_start, range_end)
+    chart_granularity = (
+        "hourly" if business_day_count(range_start, range_end) <= 5 else "daily"
+    )
+    chart_points = (
+        aggregate_hourly_online_points(segments, range_start, range_end)
+        if chart_granularity == "hourly"
+        else daily_points
+    )
+    # 个人日均只平均到本范围内最后一次在线日；仍在线的 segment 已被裁剪到查询结束。
+    last_seen_at = max((segment.ended_at for segment in segments), default=None)
+    return PersonalOnlineData(
+        title=title,
+        range_label=range_label,
+        range_start=range_start,
+        range_end=range_end,
+        qq_id=qq_id,
+        player_names=player_names,
+        segments=segments,
+        daily_points=daily_points,
+        chart_points=chart_points,
+        chart_granularity=chart_granularity,
+        total_seconds=total_seconds,
+        average_seconds=total_seconds
+        // average_business_day_count(time_range, first_seen_at, last_seen_at),
+    )
+
+
+async def _first_seen_by_player_names(
+    server: McServer,
+    player_names: list[str],
+) -> dict[str, datetime]:
+    names = _unique_non_empty(player_names)
+    if not names:
+        return {}
+    result: dict[str, datetime] = {}
+    for session in await (
+        McOnlineSession.filter(server=server)
+        .filter(_player_name_filter(names))
+        .order_by("started_at")
+        .all()
+    ):
+        key = session.player_name.lower()
+        if key not in result:
+            first_seen = normalize_datetime(session.started_at)
+            if first_seen:
+                result[key] = first_seen
+    return result
+
+
+async def _first_seen_for_filter(server: McServer, query_filter: Q) -> datetime | None:
+    session = (
+        await McOnlineSession.filter(server=server)
+        .filter(query_filter)
+        .order_by("started_at")
+        .first()
+    )
+    return normalize_datetime(session.started_at) if session else None
 
 
 def _player_name_filter(player_names: list[str]) -> Q:

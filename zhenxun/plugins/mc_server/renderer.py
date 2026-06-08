@@ -40,7 +40,6 @@ def format_status_text(status: ServerStatus) -> str:
         ),
         f"版本：{status.version or '未知'}",
         f"人数：{status.online_players}/{status.max_players}",
-        f"天气：{status.weather}",
     ]
     if status.players:
         lines.append("在线玩家：")
@@ -51,7 +50,7 @@ def format_status_text(status: ServerStatus) -> str:
             if player.online_seconds:
                 detail += f"  当前{format_duration(player.online_seconds)}"
             if player.total_seconds:
-                detail += f"  总计{format_duration(player.total_seconds)}"
+                detail += f"  累计{format_duration(player.total_seconds)}"
             lines.append(f"- {detail}")
     return "\n".join(lines)
 
@@ -110,21 +109,13 @@ def format_personal_online_text(data: PersonalOnlineData) -> str:
         f"范围：{data.range_label}",
         f"玩家：{player_label}",
         f"总时长：{format_duration(data.total_seconds)}",
-        f"在线段：{len(data.segments)} 段",
+        f"日均：{format_duration(data.average_seconds)}",
     ]
     if not data.segments:
         lines.append("暂无在线记录。")
-        return "\n".join(lines)
-
-    for segment in data.segments[:8]:
-        lines.append(
-            "- "
-            f"{segment.started_at.strftime('%m-%d %H:%M')} ~ "
-            f"{segment.ended_at.strftime('%m-%d %H:%M')}："
-            f"{format_duration(segment.seconds)}"
-        )
-    if len(data.segments) > 8:
-        lines.append(f"... 其余 {len(data.segments) - 8} 段已省略")
+    else:
+        granularity = "小时级" if data.chart_granularity == "hourly" else "每日"
+        lines.append(f"图表：{granularity}在线时长")
     return "\n".join(lines)
 
 
@@ -236,8 +227,8 @@ async def render_personal_online(data: PersonalOnlineData) -> RenderedMessage:
     fallback = format_personal_online_text(data)
     if not _get_settings().render_enabled:
         return RenderedMessage(image=None, fallback_text=fallback)
-    segments = _timeline_segments(data)
-    daily_seconds = [point.seconds for point in data.daily_points]
+    chart_points = data.chart_points or data.daily_points
+    chart_seconds = [point.seconds for point in chart_points]
     try:
         return RenderedMessage(
             image=await _render_template(
@@ -249,14 +240,17 @@ async def render_personal_online(data: PersonalOnlineData) -> RenderedMessage:
                     if data.player_names
                     else f"QQ {data.qq_id}",
                     "total_duration": format_duration(data.total_seconds),
-                    "segment_count": len(data.segments),
-                    "chart_labels": [point.label for point in data.daily_points],
-                    "chart_values": daily_seconds,
+                    "average_duration": format_duration(data.average_seconds),
+                    "chart_granularity": data.chart_granularity,
+                    "chart_granularity_label": "小时级"
+                    if data.chart_granularity == "hourly"
+                    else "每日",
+                    "has_online": bool(data.segments),
+                    "chart_labels": [point.label for point in chart_points],
+                    "chart_values": chart_seconds,
                     "chart_durations": [
-                        format_duration(seconds) for seconds in daily_seconds
+                        format_duration(seconds) for seconds in chart_seconds
                     ],
-                    "segments": segments,
-                    "segment_rows": segments[:8],
                     "range_start": data.range_start.strftime("%m-%d %H:%M"),
                     "range_end": data.range_end.strftime("%m-%d %H:%M"),
                 },
@@ -267,30 +261,6 @@ async def render_personal_online(data: PersonalOnlineData) -> RenderedMessage:
     except RenderingError as exc:
         logger.warning("MC个人在线图渲染失败，回退文字", MODULE_NAME, e=exc)
         return RenderedMessage(image=None, fallback_text=fallback)
-
-
-def _timeline_segments(data: PersonalOnlineData) -> list[dict[str, object]]:
-    total_seconds = max(1, int((data.range_end - data.range_start).total_seconds()))
-    items = []
-    for segment in data.segments:
-        left = (
-            (segment.started_at - data.range_start).total_seconds() / total_seconds
-        ) * 100
-        width = (segment.seconds / total_seconds) * 100
-        left = max(0.0, min(100.0, left))
-        width = max(0.0, min(100.0 - left, width))
-        # 很短的在线段在长时间范围里会窄到不可见，渲染时给一个最小可见宽度。
-        display_width = min(100.0 - left, max(width, 0.8)) if width > 0 else 0
-        items.append(
-            {
-                "left": round(left, 3),
-                "width": round(display_width, 3),
-                "start": segment.started_at.strftime("%m-%d %H:%M"),
-                "end": segment.ended_at.strftime("%m-%d %H:%M"),
-                "duration": format_duration(segment.seconds),
-            }
-        )
-    return items
 
 
 async def _render_template(path: Path, payload: dict, *, viewport_width: int) -> bytes:

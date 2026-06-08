@@ -1,28 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import re
 from typing import Literal
 
 from nonebot_plugin_alconna import Alconna, Args, At, CommandMeta, MultiVar, Text
 
+from .utils import is_time_range_word
+
 MCTIME_SELF_WORDS = {"me", "我", "自己"}
-MCTIME_RANGE_WORDS = {
-    "今日",
-    "今天",
-    "day",
-    "today",
-    "本周",
-    "周",
-    "week",
-    "本月",
-    "月",
-    "month",
-    "本周目",
-    "周目",
-    "season",
-}
-_DATE_WORD_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}(?:\.\.\d{4}-\d{2}-\d{2})?$")
 
 
 @dataclass(frozen=True)
@@ -99,10 +84,7 @@ def resolve_mctime_query(
 
 
 def _is_range_start(word: str) -> bool:
-    normalized = word.strip().lower()
-    return word.strip() in MCTIME_RANGE_WORDS or normalized in MCTIME_RANGE_WORDS or bool(
-        _DATE_WORD_PATTERN.match(normalized)
-    )
+    return is_time_range_word(word)
 
 
 def mcbind_command() -> Alconna:

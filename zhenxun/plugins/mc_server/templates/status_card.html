@@ -13,7 +13,7 @@
 
     .metric-row {
       display: grid;
-      grid-template-columns: 1.15fr 0.9fr 1.35fr 1.25fr;
+      grid-template-columns: 1.15fr 0.9fr 1.35fr;
       gap: 12px;
       margin-top: 16px;
     }
@@ -111,13 +111,6 @@
               <div class="stat-value">{{ status.version or "未知" }}</div>
             </div>
           </div>
-          <div class="stat-box">
-            {{ icons.icon_tile("cloud") }}
-            <div class="stat-copy">
-              <div class="stat-label">天气</div>
-              <div class="stat-value">{{ status.weather or "未知" }}</div>
-            </div>
-          </div>
         </div>
 
         {% if status.error %}
@@ -141,7 +134,7 @@
               <span class="time-value">{{ player.online or "0分钟" }}</span>
             </div>
             <div class="player-time">
-              <span class="time-label">总在线</span>
+              <span class="time-label">累计在线</span>
               <span class="time-value">{{ player.total or "0分钟" }}</span>
             </div>
           </div>

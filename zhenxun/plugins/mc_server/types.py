@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,8 @@ class PlaytimeEntry:
     seconds: int
     qq_id: str = ""
     average_seconds: int = 0
+    first_seen_at: datetime | None = None
+    last_seen_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +99,8 @@ class PlaytimeRow:
     player_name: str
     qq_id: str
     seconds: int
+    first_seen_at: datetime | None = None
+    last_seen_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -127,7 +132,10 @@ class PersonalOnlineData:
     player_names: list[str] = field(default_factory=list)
     segments: list[PersonalOnlineSegment] = field(default_factory=list)
     daily_points: list[OnlineDurationPoint] = field(default_factory=list)
+    chart_points: list[OnlineDurationPoint] = field(default_factory=list)
+    chart_granularity: Literal["hourly", "daily"] = "daily"
     total_seconds: int = 0
+    average_seconds: int = 0
 
 
 @dataclass(frozen=True)

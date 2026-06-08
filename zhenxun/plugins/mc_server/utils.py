@@ -42,6 +42,40 @@ _TELLRAW_FAILURE_PATTERNS = (
 EXIT_BIND_FLOW_WORDS = {"q", "quit", "退出", "取消"}
 SKIP_BIND_FLOW_WORDS = {"skip", "跳过"}
 DONE_BIND_FLOW_WORDS = {"done", "完成"}
+TIME_RANGE_WORDS = {
+    "今日",
+    "今天",
+    "本日",
+    "day",
+    "today",
+    "昨日",
+    "昨天",
+    "yesterday",
+    "本周",
+    "这周",
+    "周",
+    "week",
+    "thisweek",
+    "this_week",
+    "上周",
+    "上星期",
+    "上个星期",
+    "lastweek",
+    "last_week",
+    "本月",
+    "这个月",
+    "月",
+    "month",
+    "thismonth",
+    "this_month",
+    "上月",
+    "上个月",
+    "lastmonth",
+    "last_month",
+    "本周目",
+    "周目",
+    "season",
+}
 T = TypeVar("T")
 
 
@@ -149,6 +183,10 @@ def combine_local(target_date: date, target_time: time) -> datetime:
     return datetime.combine(target_date, target_time, tzinfo=MC_TIMEZONE)
 
 
+def combine_business_start(target_date: date) -> datetime:
+    return combine_local(target_date, time(BUSINESS_DAY_START_HOUR))
+
+
 def business_day_start(value: datetime | None = None) -> datetime:
     current = normalize_datetime(value) or now_local()
     boundary = combine_local(current.date(), time(BUSINESS_DAY_START_HOUR))
@@ -160,7 +198,7 @@ def business_day_start(value: datetime | None = None) -> datetime:
 def business_today_range(value: datetime | None = None) -> TimeRange:
     start = business_day_start(value)
     end = normalize_datetime(value) or now_local()
-    return TimeRange("本日", start, end)
+    return TimeRange("今日", start, end)
 
 
 def business_day_count(range_start: datetime, range_end: datetime) -> int:
@@ -193,44 +231,72 @@ def iter_business_days(range_start: datetime, range_end: datetime) -> list[TimeR
     return days or [TimeRange(start.strftime("%m-%d"), start, end)]
 
 
+def is_time_range_word(raw: str) -> bool:
+    text = raw.strip()
+    normalized = text.lower()
+    return normalized in TIME_RANGE_WORDS or bool(_DATE_RANGE_PATTERN.match(normalized))
+
+
+def _month_start(target_date: date) -> date:
+    return target_date.replace(day=1)
+
+
+def _previous_month_start(target_date: date) -> date:
+    return (target_date.replace(day=1) - timedelta(days=1)).replace(day=1)
+
+
 def parse_time_range(
     raw: str | None,
     season_start: datetime | None = None,
+    *,
+    now: datetime | None = None,
 ) -> TimeRange:
-    now = now_local()
+    current = normalize_datetime(now) or now_local()
     text = (raw or "").strip().lower()
+    business_anchor = business_day_start(current)
+    business_date = business_anchor.date()
+    week_start_date = business_date - timedelta(days=business_date.weekday())
+    month_start_date = _month_start(business_date)
+
+    # 所有预设统计范围都按 06:00 业务边界切分，避免 mct/mcc 对“今日”等词各算各的。
     if text in {"", "本周目", "周目", "season"}:
-        start = normalize_datetime(season_start) or combine_local(now.date(), time.min)
-        return TimeRange("本周目", start, now)
-    if text in {"今日", "今天", "day", "today"}:
-        start = combine_local(now.date(), time.min)
-        return TimeRange("今日", start, now)
-    if text in {"本周", "周", "week"}:
-        start_date = now.date() - timedelta(days=now.weekday())
-        return TimeRange("本周", combine_local(start_date, time.min), now)
-    if text in {"本月", "月", "month"}:
-        start_date = now.date().replace(day=1)
-        return TimeRange("本月", combine_local(start_date, time.min), now)
+        start = normalize_datetime(season_start) or business_day_start(current)
+        return TimeRange("本周目", start, current)
+    if text in {"今日", "今天", "本日", "day", "today"}:
+        return TimeRange("今日", business_anchor, current)
+    if text in {"昨日", "昨天", "yesterday"}:
+        return TimeRange("昨日", business_anchor - timedelta(days=1), business_anchor)
+    if text in {"本周", "这周", "周", "week", "thisweek", "this_week"}:
+        return TimeRange("本周", combine_business_start(week_start_date), current)
+    if text in {"上周", "上星期", "上个星期", "lastweek", "last_week"}:
+        end = combine_business_start(week_start_date)
+        return TimeRange("上周", end - timedelta(days=7), end)
+    if text in {"本月", "这个月", "月", "month", "thismonth", "this_month"}:
+        return TimeRange("本月", combine_business_start(month_start_date), current)
+    if text in {"上月", "上个月", "lastmonth", "last_month"}:
+        end = combine_business_start(month_start_date)
+        start = combine_business_start(_previous_month_start(business_date))
+        return TimeRange("上月", start, end)
 
     match = _DATE_RANGE_PATTERN.match(text)
     if not match:
         raise ValueError(
-            "时间范围支持 今日/本周/本月/本周目/YYYY-MM-DD/"
-            "YYYY-MM-DD..YYYY-MM-DD"
+            "时间范围支持 今日/昨日/本周/上周/本月/上月/本周目/"
+            "YYYY-MM-DD/YYYY-MM-DD..YYYY-MM-DD"
         )
 
     start_date = date.fromisoformat(match.group("start"))
     end_date = date.fromisoformat(match.group("end") or match.group("start"))
     if end_date < start_date:
         raise ValueError("结束日期不能早于开始日期")
-    start = combine_local(start_date, time.min)
-    end = combine_local(end_date + timedelta(days=1), time.min)
+    start = combine_business_start(start_date)
+    end = combine_business_start(end_date + timedelta(days=1))
     label = (
         start_date.isoformat()
         if start_date == end_date
         else f"{start_date.isoformat()}..{end_date.isoformat()}"
     )
-    return TimeRange(label, start, min(end, now))
+    return TimeRange(label, start, min(end, current))
 
 
 def format_duration(seconds: int) -> str:

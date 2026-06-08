@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .types import (
     OnlineDurationPoint,
@@ -8,8 +8,9 @@ from .types import (
     PlaytimeEntry,
     PlaytimeRow,
     SamplePoint,
+    TimeRange,
 )
-from .utils import iter_business_days, normalize_datetime
+from .utils import business_day_count, iter_business_days, normalize_datetime
 
 
 def overlap_seconds(
@@ -65,16 +66,66 @@ def clip_online_segment(
 
 
 def aggregate_playtime(rows: list[PlaytimeRow]) -> list[PlaytimeEntry]:
-    totals: dict[tuple[str, str], int] = {}
+    totals: dict[str, dict[str, object]] = {}
     for row in rows:
-        key = (row.player_name, row.qq_id)
-        totals[key] = totals.get(key, 0) + row.seconds
+        player_name = row.player_name.strip()
+        if not player_name:
+            continue
+        key = player_name.lower()
+        first_seen_at = normalize_datetime(row.first_seen_at)
+        last_seen_at = normalize_datetime(row.last_seen_at)
+        item = totals.setdefault(
+            key,
+            {
+                "player_name": player_name,
+                "qq_id": row.qq_id,
+                "seconds": 0,
+                "first_seen_at": first_seen_at,
+                "last_seen_at": last_seen_at,
+            },
+        )
+        item["seconds"] = int(item["seconds"]) + row.seconds
+        if row.qq_id and not item["qq_id"]:
+            item["qq_id"] = row.qq_id
+        # 同一 MC 名在绑定前后可能有不同 qq_id，日均口径要合并最早和最晚可观测在线点。
+        if first_seen_at:
+            current_first_seen = normalize_datetime(item["first_seen_at"])
+            if current_first_seen is None or first_seen_at < current_first_seen:
+                item["first_seen_at"] = first_seen_at
+        if last_seen_at:
+            current_last_seen = normalize_datetime(item["last_seen_at"])
+            if current_last_seen is None or last_seen_at > current_last_seen:
+                item["last_seen_at"] = last_seen_at
     entries = [
-        PlaytimeEntry(player_name=player_name, qq_id=qq_id, seconds=seconds)
-        for (player_name, qq_id), seconds in totals.items()
-        if player_name and seconds > 0
+        PlaytimeEntry(
+            player_name=str(item["player_name"]),
+            qq_id=str(item["qq_id"]),
+            seconds=int(item["seconds"]),
+            first_seen_at=item["first_seen_at"],
+            last_seen_at=item["last_seen_at"],
+        )
+        for item in totals.values()
+        if int(item["seconds"]) > 0
     ]
     return sorted(entries, key=lambda item: (-item.seconds, item.player_name.lower()))
+
+
+def average_business_day_count(
+    time_range: TimeRange,
+    first_seen_at: datetime | None,
+    last_seen_at: datetime | None,
+) -> int:
+    range_start = normalize_datetime(time_range.start) or time_range.start
+    range_end = normalize_datetime(time_range.end) or time_range.end
+    first_seen = normalize_datetime(first_seen_at)
+    last_seen = normalize_datetime(last_seen_at)
+    average_start = max(range_start, first_seen) if first_seen else range_start
+    average_end = min(range_end, last_seen) if last_seen else range_end
+    if average_end <= average_start:
+        return 1
+
+    # 离开服务器后的日期不再进入分母，避免退坑玩家被后续查询窗口持续稀释。
+    return business_day_count(average_start, average_end)
 
 
 def aggregate_sample_points(rows: list[object]) -> list[SamplePoint]:
@@ -105,4 +156,41 @@ def aggregate_daily_online_points(
             for segment in segments
         )
         points.append(OnlineDurationPoint(label=day_range.label, seconds=seconds))
+    return points
+
+
+def aggregate_hourly_online_points(
+    segments: list[PersonalOnlineSegment],
+    range_start: datetime,
+    range_end: datetime,
+) -> list[OnlineDurationPoint]:
+    start = normalize_datetime(range_start)
+    end = normalize_datetime(range_end)
+    if not start or not end or end <= start:
+        return []
+
+    # 小范围个人图按小时分桶，既保留短期细节，也继续用同一套 overlap 裁剪逻辑。
+    cursor = start.replace(minute=0, second=0, microsecond=0)
+    points = []
+    while cursor < end:
+        next_cursor = cursor + timedelta(hours=1)
+        bucket_start = max(cursor, start)
+        bucket_end = min(next_cursor, end)
+        if bucket_end > bucket_start:
+            seconds = sum(
+                overlap_seconds(
+                    segment.started_at,
+                    segment.ended_at,
+                    bucket_start,
+                    bucket_end,
+                )
+                for segment in segments
+            )
+            points.append(
+                OnlineDurationPoint(
+                    label=cursor.strftime("%m-%d %H:00"),
+                    seconds=seconds,
+                )
+            )
+        cursor = next_cursor
     return points
