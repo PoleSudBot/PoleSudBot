@@ -21,6 +21,7 @@ from .repositories import (
     get_active_season,
     normalize_server_identity,
 )
+from .utils import normalize_datetime
 
 _MIGRATED = False
 
@@ -99,14 +100,22 @@ async def _merge_server_into(source: McServer, canonical: McServer) -> None:
     player_map = await _merge_players(source, canonical)
     season_map = await _merge_seasons(source, canonical)
 
-    # Session 是统计本体，先把 player/season/server 三个外键都指向 canonical。
+    # Session 是统计本体，迁移时同步清掉旧群重复记录造成的重叠在线段。
     for session in await McOnlineSession.filter(server=source).all():
-        if session.player_id in player_map:
-            session.player_id = player_map[session.player_id]
-        if session.season_id in season_map:
-            session.season_id = season_map[session.season_id]
-        session.server = canonical
-        await session.save(update_fields=["server_id", "player_id", "season_id"])
+        target_player_id = player_map.get(
+            int(session.player_id),
+            int(session.player_id),
+        )
+        target_season_id = season_map.get(
+            int(session.season_id) if session.season_id else 0,
+            session.season_id,
+        )
+        await _merge_online_session(
+            session,
+            canonical,
+            player_id=target_player_id,
+            season_id=target_season_id,
+        )
 
     for sample in await McPlayerCountSample.filter(server=source).all():
         if sample.season_id in season_map:
@@ -140,7 +149,71 @@ async def _merge_players(source: McServer, canonical: McServer) -> dict[int, int
     return player_map
 
 
-async def _merge_seasons(source: McServer, canonical: McServer) -> dict[int, int | None]:
+async def _merge_online_session(
+    session: McOnlineSession,
+    canonical: McServer,
+    *,
+    player_id: int,
+    season_id: int | None,
+) -> None:
+    overlapping = [
+        item
+        for item in await McOnlineSession.filter(
+            server=canonical,
+            player_id=player_id,
+        ).all()
+        if _sessions_overlap(session, item)
+    ]
+    if not overlapping:
+        session.server = canonical
+        session.player_id = player_id
+        session.season_id = season_id
+        await session.save(update_fields=["server_id", "player_id", "season_id"])
+        return
+
+    # 旧版本同一服务器按群拆行时会生成重复在线段；同一重叠组只保留覆盖时间最长的记录。
+    best = max([session, *overlapping], key=_session_length_key)
+    if int(best.id) != int(session.id):
+        await session.delete()
+        return
+
+    for item in overlapping:
+        await item.delete()
+    session.server = canonical
+    session.player_id = player_id
+    session.season_id = season_id
+    await session.save(update_fields=["server_id", "player_id", "season_id"])
+
+
+def _sessions_overlap(left: McOnlineSession, right: McOnlineSession) -> bool:
+    left_start = normalize_datetime(left.started_at)
+    right_start = normalize_datetime(right.started_at)
+    if not left_start or not right_start:
+        return False
+    left_end = normalize_datetime(left.ended_at)
+    right_end = normalize_datetime(right.ended_at)
+
+    # 进行中的在线段没有固定结束时间，迁移去重时按开放区间判断是否与历史段相交。
+    left_after_right = right_end is not None and left_start >= right_end
+    right_after_left = left_end is not None and right_start >= left_end
+    return not (left_after_right or right_after_left)
+
+
+def _session_length_key(session: McOnlineSession) -> tuple[int, int, int]:
+    start = normalize_datetime(session.started_at)
+    end = normalize_datetime(session.ended_at)
+    if not start:
+        return (0, 0, -int(session.id))
+    if not end:
+        # 开放 session 代表仍在线，优先保留开始更早的一条，避免被短闭合段截断。
+        return (1, -int(start.timestamp()), -int(session.id))
+    return (0, max(0, int((end - start).total_seconds())), -int(session.id))
+
+
+async def _merge_seasons(
+    source: McServer,
+    canonical: McServer,
+) -> dict[int, int | None]:
     season_map: dict[int, int | None] = {}
     canonical_active = await get_active_season(canonical)
     for season in await McSeason.filter(server=source).all():
