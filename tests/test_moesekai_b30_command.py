@@ -8,7 +8,6 @@ from zhenxun.plugins.moesekai.command_schema import (
     best30_command,
     resolve_best30_query,
 )
-from nonebot_plugin_alconna import At
 
 
 def test_best30_command_accepts_main_alias_and_compact_server_shortcuts():
@@ -43,6 +42,9 @@ def test_resolve_best30_query_rejects_extra_words():
 
 
 def test_resolve_best30_query_rejects_at_target():
+    # At must be imported after command_schema lets NoneBot load alconna as a plugin.
+    from nonebot_plugin_alconna import At
+
     assert resolve_best30_query((At("user", "2233"),)) == (
         None,
         None,

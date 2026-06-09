@@ -57,7 +57,11 @@ async def test_handle_update_uses_default_server(monkeypatch: pytest.MonkeyPatch
         "_resolve_default_server",
         fake_resolve_default_server,
     )
-    monkeypatch.setattr(service_module.master_data_provider, "update_region", fake_update_region)
+    monkeypatch.setattr(
+        service_module.master_data_provider,
+        "update_region",
+        fake_update_region,
+    )
 
     result = await service_module.moesekai_app.handle_update(
         "qq",
@@ -67,6 +71,69 @@ async def test_handle_update_uses_default_server(monkeypatch: pytest.MonkeyPatch
         is_superuser=False,
     )
     assert result == "JP 已更新"
+
+
+@pytest.mark.asyncio
+async def test_handle_update_dispatches_new_card_notifications_when_bot_available(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_is_qq_blacklisted(*_args, **_kwargs):
+        return None
+
+    async def fake_resolve_default_server(*_args, **_kwargs):
+        return "jp", None
+
+    update_result = service_module.RegionUpdateResult(
+        server="jp",
+        updated=True,
+        download_success=True,
+        current_revision="rev-2",
+        added_records={"cards": [{"id": 100}], "stamps": []},
+    )
+
+    async def fake_update_region(server: str, *, force: bool):
+        assert (server, force) == ("jp", True)
+        return update_result
+
+    dispatched: dict[str, object] = {}
+
+    async def fake_dispatch(bot, results):
+        dispatched["bot"] = bot
+        dispatched["results"] = results
+
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_is_qq_blacklisted",
+        fake_is_qq_blacklisted,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_resolve_default_server",
+        fake_resolve_default_server,
+    )
+    monkeypatch.setattr(
+        service_module.master_data_provider,
+        "update_region",
+        fake_update_region,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_dispatch_manual_new_card_notifications",
+        fake_dispatch,
+    )
+
+    bot = SimpleNamespace()
+    result = await service_module.moesekai_app.handle_update(
+        "qq",
+        "123456",
+        None,
+        update_all=False,
+        is_superuser=False,
+        bot=bot,
+    )
+
+    assert "日服 已更新" in result
+    assert dispatched == {"bot": bot, "results": [update_result]}
 
 
 @pytest.mark.asyncio

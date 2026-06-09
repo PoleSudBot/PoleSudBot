@@ -152,6 +152,7 @@ async def _(
             parsed.server,
             update_all=parsed.all_servers,
             is_superuser=is_superuser,
+            bot=bot,
         )
     elif parsed.action == "story":
         result = await handle_story(

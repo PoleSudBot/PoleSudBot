@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 import random
 import time
-from typing import Any, AsyncIterator, Awaitable, Callable, Literal
+from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from nonebot.adapters import Bot
@@ -724,6 +725,7 @@ class MoeSekaiApplication:
         *,
         update_all: bool,
         is_superuser: bool,
+        bot: Bot | None = None,
     ) -> str:
         if error := await self._is_qq_blacklisted(platform, user_id, is_superuser):
             return error
@@ -731,6 +733,7 @@ class MoeSekaiApplication:
             if not is_superuser:
                 return "pjsk update all 仅超级用户可用"
             results = await master_data_provider.update_all(force=True)
+            await self._dispatch_manual_new_card_notifications(bot, results)
             return "\n\n".join(result.to_message() for result in results)
         resolved_server, error = await self._resolve_default_server(
             platform,
@@ -741,7 +744,21 @@ class MoeSekaiApplication:
         if error or not resolved_server:
             return "请先绑定账号设置默认区服，或使用 pjsk update <cn|jp|tw> 显式指定区服"
         result = await master_data_provider.update_region(resolved_server, force=True)
+        await self._dispatch_manual_new_card_notifications(bot, [result])
         return result.to_message()
+
+    async def _dispatch_manual_new_card_notifications(
+        self,
+        bot: Bot | None,
+        results: list[RegionUpdateResult],
+    ) -> None:
+        if bot is None:
+            return
+        try:
+            # 手动更新和自动探测共享同一批结果，避免 force 更新推进 state 后丢失新卡差异。
+            await self.dispatch_new_card_notifications(bot, results)
+        except Exception as exc:
+            logger.error("MoeSekai 手动更新后的新卡提醒分发失败", MODULE_NAME, e=exc)
 
     async def handle_story(self, event_id: int, *, force_refresh: bool = False):
         event = await self._get_event_by_id("jp", event_id)
@@ -2315,7 +2332,32 @@ class MoeSekaiApplication:
                 extra=f"results={len(dispatch_results)}",
             )
         else:
-            logger.debug("MoeSekai 新卡提醒阶段 无需处理的新卡更新结果", MODULE_NAME)
+            updated_results = [
+                result
+                for result in results
+                if result.updated and result.download_success and not result.error
+            ]
+            if updated_results:
+                detail = ", ".join(
+                    (
+                        f"{result.server}:"
+                        f"cards={len(result.added_records.get('cards', []))},"
+                        f"stamps={len(result.added_records.get('stamps', []))},"
+                        f"version={result.current_version or '-'},"
+                        f"revision={result.current_revision or '-'}"
+                    )
+                    for result in updated_results
+                )
+                logger.info(
+                    "MoeSekai 新卡提醒未触发："
+                    f"本轮主数据更新没有新增卡/表情记录 {detail}",
+                    MODULE_NAME,
+                )
+            else:
+                logger.debug(
+                    "MoeSekai 新卡提醒阶段 无需处理的新卡更新结果",
+                    MODULE_NAME,
+                )
             return
 
         for result in dispatch_results:
@@ -2346,6 +2388,16 @@ class MoeSekaiApplication:
                 extra=f"toggles={len(toggles)}",
             )
             if not toggles:
+                logger.info(
+                    (
+                        f"MoeSekai 新卡提醒跳过：{server_label(result.server)} "
+                        "没有开启新卡上线提醒的群 "
+                        f"cards={len(cards)} stamps={len(stamps)} "
+                        f"version={result.current_version or '-'} "
+                        f"revision={result.current_revision or '-'}"
+                    ),
+                    MODULE_NAME,
+                )
                 self._delete_new_card_pending_snapshot(
                     pending_state,
                     server=result.server,
