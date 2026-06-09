@@ -16,10 +16,15 @@ nonebot.init()
 
 from zhenxun.plugins.moesekai.adapters.results import MoeImageTextMessage
 from zhenxun.plugins.moesekai.application import service as service_module
+from zhenxun.plugins.moesekai.b30 import ConstantsTable, parse_constants_csv
 from zhenxun.plugins.moesekai.providers.aliases import (
     AliasProfile,
 )
-from zhenxun.plugins.moesekai.providers.suite import SuiteB30Data, SuiteProfile
+from zhenxun.plugins.moesekai.providers.suite import (
+    SuiteApiError,
+    SuiteB30Data,
+    SuiteProfile,
+)
 from zhenxun.plugins.moesekai.screenshot import ScreenshotError
 
 
@@ -108,30 +113,11 @@ async def test_handle_best30_uses_explicit_uid_without_binding(
 
 
 @pytest.mark.asyncio
-async def test_handle_best30_uses_share_rule_for_at_target(
+async def test_handle_best30_rejects_at_target(
     monkeypatch: pytest.MonkeyPatch,
 ):
     async def fake_is_qq_blacklisted(*_args, **_kwargs):
         return None
-
-    async def fake_resolve_binding_for_user(
-        platform: str,
-        requester_is_superuser: bool,
-        target_user_id: str,
-        explicit_server: str | None,
-        *,
-        ignore_share: bool = False,
-    ):
-        assert platform == "qq"
-        assert requester_is_superuser is False
-        assert target_user_id == "2233"
-        assert explicit_server is None
-        assert ignore_share is False
-        return SimpleNamespace(server="jp", game_id="1234567890123"), None
-
-    async def fake_capture(server: str, game_id: str):
-        assert (server, game_id) == ("jp", "1234567890123")
-        return b"best30"
 
     monkeypatch.setattr(
         service_module.moesekai_app,
@@ -141,12 +127,9 @@ async def test_handle_best30_uses_share_rule_for_at_target(
     monkeypatch.setattr(
         service_module.moesekai_app,
         "_resolve_binding_for_user",
-        fake_resolve_binding_for_user,
-    )
-    monkeypatch.setattr(
-        service_module.moesekai_app,
-        "_capture_best30_image",
-        fake_capture,
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("B30 @用户查询不应解析目标绑定")
+        ),
     )
 
     result = await service_module.moesekai_app.handle_best30(
@@ -158,7 +141,7 @@ async def test_handle_best30_uses_share_rule_for_at_target(
         is_superuser=False,
     )
 
-    assert result == b"best30"
+    assert result == "B30 不支持 @用户查询，请使用游戏ID或查询自己的绑定账号"
 
 
 @pytest.mark.asyncio
@@ -205,6 +188,146 @@ async def test_build_best30_avatar_uses_default_deck_leader(
     )
 
     assert avatar_uri == "data:image/png;base64,YXZhdGFy"
+
+
+@pytest.mark.asyncio
+async def test_capture_best30_image_returns_haruki_public_api_hint(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def fake_get_b30_data(_server: str, _game_id: str):
+        raise SuiteApiError("missing suite data")
+
+    monkeypatch.setattr(
+        service_module.suite_provider,
+        "get_b30_data",
+        fake_get_b30_data,
+    )
+
+    result = await service_module.moesekai_app._capture_best30_image("jp", "123")
+
+    assert result == (
+        "未查询到suite数据，请前往Haruki工具箱上传数据，"
+        "并确保游戏账号管理处勾选了“允许公开API访问”"
+    )
+
+
+@pytest.mark.asyncio
+async def test_build_best30_image_uses_master_title_and_fixed_sources(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    suite_data = SuiteB30Data(
+        profile=SuiteProfile("6540035398873094", "kiyu", 495, 1779774627),
+        music_results=[
+            {
+                "musicId": 671,
+                "musicDifficultyType": "append",
+                "playResult": "all_perfect",
+                "fullComboFlg": True,
+                "fullPerfectFlg": True,
+            }
+        ],
+        user_decks=[],
+        user_cards=[],
+        default_deck_id=0,
+        source_url="https://suite-api.haruki.seiunx.com/public/jp/suite/6540035398873094",
+    )
+    table = ConstantsTable(
+        parse_constants_csv(
+            "Song,JP Name,Constant,Level,Note Count,Difficulty,Song ID,Notes\n"
+            "CSV Song,CSV JP,38.1,APD 38,2800,Append,671,help\n"
+        )
+    )
+
+    async def fake_get_b30_data(server: str, game_id: str):
+        assert (server, game_id) == ("jp", "6540035398873094")
+        return suite_data
+
+    async def fake_get_table():
+        return table
+
+    async def fake_get_musics(server: str):
+        assert server == "jp"
+        return [
+            {
+                "id": 671,
+                "title": "怪獣になりたい",
+                "assetbundleName": "jacket_671",
+                "publishedAt": 1,
+            }
+        ]
+
+    async def fake_get_cards(server: str):
+        assert server == "jp"
+        return []
+
+    async def fake_avatar(*_args, **_kwargs):
+        return ""
+
+    async def fake_get_music_jacket(
+        server: str,
+        assetbundle_name: str,
+        *,
+        timeout: float,
+    ):
+        assert (server, assetbundle_name, timeout) == ("jp", "jacket_671", 8)
+        return b"jacket"
+
+    async def fake_render_best30_image(**kwargs):
+        result = kwargs["result"]
+        entry = result.entries[0]
+        assert kwargs["sources"] == [
+            "suite数据来源：Haruki工具箱",
+            "定数来源：社区定数",
+        ]
+        assert entry.title == "怪獣になりたい"
+        assert entry.level == 38
+        assert entry.level_label == "38"
+        assert entry.constant == 38.1
+        assert entry.jacket_uri == "data:image/png;base64,amFja2V0"
+        return b"best30"
+
+    monkeypatch.setattr(
+        service_module.suite_provider,
+        "get_b30_data",
+        fake_get_b30_data,
+    )
+    monkeypatch.setattr(
+        service_module.b30_constants_provider,
+        "get_table",
+        fake_get_table,
+    )
+    monkeypatch.setattr(
+        service_module.master_data_provider,
+        "get_musics",
+        fake_get_musics,
+    )
+    monkeypatch.setattr(
+        service_module.master_data_provider,
+        "get_cards",
+        fake_get_cards,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_build_best30_avatar_uri",
+        fake_avatar,
+    )
+    monkeypatch.setattr(
+        service_module.asset_provider,
+        "get_music_jacket",
+        fake_get_music_jacket,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "render_best30_image",
+        fake_render_best30_image,
+    )
+
+    result = await service_module.moesekai_app._build_best30_image(
+        "jp",
+        "6540035398873094",
+    )
+
+    assert result == b"best30"
 
 
 @pytest.mark.asyncio

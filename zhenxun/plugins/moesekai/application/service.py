@@ -496,8 +496,8 @@ class MoeSekaiApplication:
     ) -> bytes | str:
         if error := await self._is_qq_blacklisted(platform, requester_user_id, is_superuser):
             return error
-        if game_id and target_user_id:
-            return "B30 查询不能同时指定游戏ID和 @用户"
+        if target_user_id:
+            return "B30 不支持 @用户查询，请使用游戏ID或查询自己的绑定账号"
         if game_id:
             resolved_server = server or "jp"
             if resolved_server not in SERVER_SET:
@@ -508,32 +508,20 @@ class MoeSekaiApplication:
                 return error
             return await self._capture_best30_image(resolved_server, game_id)
 
-        query_self = target_user_id is None or target_user_id == requester_user_id
-        if query_self:
-            resolved_server, error = await self._resolve_default_server(
-                platform,
-                requester_user_id,
-                explicit_server=server,
-                fallback_jp=False,
-            )
-            if error or not resolved_server:
-                return "你还没有绑定任何账号，请先使用“绑定 [区服] <游戏ID>”"
-            binding = await get_user_binding(platform, requester_user_id, resolved_server)
-            if not binding:
-                return f"你还没有绑定{server_label(resolved_server)}账号"
-            if error := await self._is_uid_blacklisted(
-                binding.server, binding.game_id, is_superuser
-            ):
-                return error
-            return await self._capture_best30_image(binding.server, binding.game_id)
-
-        binding, error = await self._resolve_binding_for_user(
+        resolved_server, error = await self._resolve_default_server(
             platform,
-            is_superuser,
-            target_user_id,
-            server,
+            requester_user_id,
+            explicit_server=server,
+            fallback_jp=False,
         )
-        if error:
+        if error or not resolved_server:
+            return "你还没有绑定任何账号，请先使用“绑定 [区服] <游戏ID>”"
+        binding = await get_user_binding(platform, requester_user_id, resolved_server)
+        if not binding:
+            return f"你还没有绑定{server_label(resolved_server)}账号"
+        if error := await self._is_uid_blacklisted(
+            binding.server, binding.game_id, is_superuser
+        ):
             return error
         return await self._capture_best30_image(binding.server, binding.game_id)
 
@@ -545,7 +533,10 @@ class MoeSekaiApplication:
                 f"MoeSekai B30 Suite 数据获取失败: {server}/{game_id}",
                 MODULE_NAME,
             )
-            return "B30 数据获取失败，请确认该账号已上传 Suite 数据后稍后重试"
+            return (
+                "未查询到suite数据，请前往Haruki工具箱上传数据，"
+                "并确保游戏账号管理处勾选了“允许公开API访问”"
+            )
         except (Best30RenderError, RenderingError) as exc:
             logger.warning(
                 f"MoeSekai B30 图片渲染失败: {server}/{game_id}",

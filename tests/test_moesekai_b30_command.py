@@ -8,6 +8,7 @@ from zhenxun.plugins.moesekai.command_schema import (
     best30_command,
     resolve_best30_query,
 )
+from nonebot_plugin_alconna import At
 
 
 def test_best30_command_accepts_main_alias_and_compact_server_shortcuts():
@@ -37,5 +38,14 @@ def test_resolve_best30_query_rejects_extra_words():
         "jp",
         "123",
         None,
-        "用法: b30 [区服] [游戏ID|@用户]",
+        "用法: b30 [区服] [游戏ID]",
+    )
+
+
+def test_resolve_best30_query_rejects_at_target():
+    assert resolve_best30_query((At("user", "2233"),)) == (
+        None,
+        None,
+        "2233",
+        "B30 不支持 @用户查询，请使用游戏ID或查询自己的绑定账号",
     )

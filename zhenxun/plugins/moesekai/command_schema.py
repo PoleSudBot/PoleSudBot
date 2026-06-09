@@ -57,8 +57,13 @@ def resolve_best30_query(
         words = words[1:]
     at_target = first_at_from_parts(parts, self_id=self_id)
     game_id = words[0] if words else None
+    if at_target:
+        return (
+            server,
+            game_id,
+            at_target,
+            "B30 不支持 @用户查询，请使用游戏ID或查询自己的绑定账号",
+        )
     if len(words) > 1:
-        return server, game_id, at_target, "用法: b30 [区服] [游戏ID|@用户]"
-    if game_id and at_target:
-        return server, game_id, at_target, "B30 查询不能同时指定游戏ID和 @用户"
+        return server, game_id, at_target, "用法: b30 [区服] [游戏ID]"
     return server, game_id, at_target, None
