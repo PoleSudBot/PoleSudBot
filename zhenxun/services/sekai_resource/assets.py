@@ -73,6 +73,12 @@ class AssetProvider:
                 "card_thumbnail_after_training": [
                     f"thumbnail/chara/{assetbundle}_after_training.png"
                 ],
+                "card_cutout_normal": [
+                    f"character/member_cutout/{assetbundle}/normal.png"
+                ],
+                "card_cutout_after_training": [
+                    f"character/member_cutout/{assetbundle}/after_training.png"
+                ],
                 "music_jacket": [f"music/jacket/{assetbundle}/{assetbundle}.png"],
                 "music_audio": [
                     f"music/short/{assetbundle}_short.{ext}"
@@ -95,6 +101,12 @@ class AssetProvider:
             ],
             "card_thumbnail_after_training": [
                 f"startapp/thumbnail/chara/{assetbundle}_after_training.png"
+            ],
+            "card_cutout_normal": [
+                f"startapp/character/member_cutout/{assetbundle}/normal.png"
+            ],
+            "card_cutout_after_training": [
+                f"startapp/character/member_cutout/{assetbundle}/after_training.png"
             ],
             "music_jacket": [f"startapp/music/jacket/{assetbundle}/{assetbundle}.png"],
             "music_audio": [
@@ -270,6 +282,32 @@ class AssetProvider:
             )
         return self.get_local_path(server, kind=kind, assetbundle=assetbundle)
 
+    async def get_card_cutout_image(
+        self,
+        server: str,
+        assetbundle: str,
+        *,
+        after_training: bool = False,
+        timeout: float = 20,
+    ) -> bytes | None:
+        kind = "card_cutout_after_training" if after_training else "card_cutout_normal"
+        return await self.fetch_first_content(
+            server,
+            kind=kind,
+            assetbundle=assetbundle,
+            timeout=timeout,
+        )
+
+    def get_card_cutout_image_local_path(
+        self,
+        server: str,
+        assetbundle: str,
+        *,
+        after_training: bool = False,
+    ) -> Path | None:
+        kind = "card_cutout_after_training" if after_training else "card_cutout_normal"
+        return self.get_local_path(server, kind=kind, assetbundle=assetbundle)
+
     async def get_music_jacket(
         self,
         server: str,
@@ -297,6 +335,28 @@ class AssetProvider:
             assetbundle=assetbundle,
             timeout=timeout,
         )
+
+    def get_music_audio_local_path(
+        self,
+        server: str,
+        assetbundle: str,
+    ) -> Path | None:
+        return self.get_local_path(server, kind="music_audio", assetbundle=assetbundle)
+
+    async def ensure_music_audio_local_path(
+        self,
+        server: str,
+        assetbundle: str,
+        *,
+        timeout: float = 20,
+    ) -> Path | None:
+        # 音频裁剪必须拿到本地文件路径；缓存未命中时先走既有下载链路落盘。
+        if path := self.get_music_audio_local_path(server, assetbundle):
+            return path
+        content = await self.get_music_audio(server, assetbundle, timeout=timeout)
+        if content is None:
+            return None
+        return self.get_music_audio_local_path(server, assetbundle)
 
     async def get_event_banner(
         self,

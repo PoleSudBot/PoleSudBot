@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
@@ -12,6 +13,8 @@ import httpx
 
 from .config import MASTER_DATASET_KEYS, MasterSourceConfig, get_settings
 from .constants import (
+    LEGACY_MASTER_DATA_DIR,
+    LEGACY_STATE_DIR,
     MASTER_DATA_DIR,
     MODULE_NAME,
     SERVER_SET,
@@ -238,17 +241,16 @@ class MasterDataProvider:
         return normalized
 
     @classmethod
-    def _load_diff_baseline(
+    def _load_baseline_payloads(
         cls,
         server: str,
-        region_state: dict[str, Any],
+        dataset_path: Callable[[str], Path],
+        *,
+        source_label: str,
     ) -> dict[str, list[Any]] | None:
-        # 只有 state 和本地全量文件都存在时才比对新增，防止首次落地全量推送。
-        if not region_state:
-            return None
         baseline: dict[str, list[Any]] = {}
         for dataset in MASTER_DATASET_KEYS:
-            path = cls._dataset_path(server, dataset)
+            path = dataset_path(dataset)
             if not path.exists():
                 return None
             try:
@@ -256,7 +258,7 @@ class MasterDataProvider:
             except json.JSONDecodeError as exc:
                 logger.warning(
                     f"SekaiResource 主数据基线解析失败，将跳过新增记录比对: "
-                    f"{server}/{dataset}",
+                    f"{server}/{dataset} ({source_label})",
                     MODULE_NAME,
                     e=exc,
                 )
@@ -265,6 +267,49 @@ class MasterDataProvider:
                 return None
             baseline[dataset] = payload
         return baseline
+
+    @classmethod
+    def _load_legacy_diff_baseline(
+        cls,
+        server: str,
+    ) -> dict[str, list[Any]] | None:
+        legacy_state = JsonStateStore(LEGACY_STATE_DIR / "master_state.json").load({})
+        legacy_region_state = (
+            legacy_state.get(server, {}) if isinstance(legacy_state, dict) else {}
+        )
+        if not legacy_region_state:
+            return None
+        baseline = cls._load_baseline_payloads(
+            server,
+            lambda dataset: LEGACY_MASTER_DATA_DIR / server / f"{dataset}.json",
+            source_label="legacy-moesekai",
+        )
+        if baseline is not None:
+            logger.info(
+                f"SekaiResource 使用旧 MoeSekai 主数据作为首次差异基线: {server}",
+                MODULE_NAME,
+            )
+        return baseline
+
+    @classmethod
+    def _load_diff_baseline(
+        cls,
+        server: str,
+        region_state: dict[str, Any],
+    ) -> dict[str, list[Any]] | None:
+        # 已存在的本地全量文件是最可靠的差异基线；state 只用来区分完全首次落地。
+        current_baseline = cls._load_baseline_payloads(
+            server,
+            lambda dataset: cls._dataset_path(server, dataset),
+            source_label="current",
+        )
+        if current_baseline is not None:
+            return current_baseline
+        if region_state:
+            return None
+        # sekai_resource 拆出后数据根从 moesekai 迁走；首次落新目录时用旧目录兜底，
+        # 否则真实更新会因为缺少新 state 被当作首次落地而没有 added_records。
+        return cls._load_legacy_diff_baseline(server)
 
     @classmethod
     def _diff_update_added_records(
@@ -900,6 +945,11 @@ class MasterDataProvider:
     @classmethod
     async def get_virtual_lives(cls, server: str) -> list[dict[str, Any]]:
         payload = await cls.get_dataset(server, "virtualLives")
+        return payload if isinstance(payload, list) else []
+
+    @classmethod
+    async def get_gachas(cls, server: str) -> list[dict[str, Any]]:
+        payload = await cls.get_dataset(server, "gachas")
         return payload if isinstance(payload, list) else []
 
     @classmethod

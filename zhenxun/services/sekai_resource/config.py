@@ -55,6 +55,7 @@ else:
 MASTER_DATASET_KEYS = (
     "events",
     "virtualLives",
+    "gachas",
     "cards",
     "gameCharacters",
     "honors",
@@ -272,10 +273,24 @@ def _merge_master_sources_config(
         for item in (raw_sources or [])
     ]
     configured_map = {item.name: item for item in configured_sources}
-    merged = [
-        configured_map.pop(default_source.name, default_source)
-        for default_source in (default_sources or DEFAULT_MASTER_SOURCES)
-    ]
+    merged: list[MasterSourceConfig] = []
+    for default_source in default_sources or DEFAULT_MASTER_SOURCES:
+        configured_source = configured_map.pop(default_source.name, None)
+        if not configured_source:
+            merged.append(default_source)
+            continue
+        # 默认源会随版本新增 dataset；旧配置同名源只覆盖用户字段，缺失的
+        # dataset 路径从当前默认值补齐，避免升级后新增数据集永远下载不到。
+        merged.append(
+            configured_source.model_copy(
+                update={
+                    "datasets": {
+                        **default_source.datasets,
+                        **configured_source.datasets,
+                    }
+                }
+            )
+        )
     merged.extend(configured_map.values())
     return merged
 

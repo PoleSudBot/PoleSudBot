@@ -1,3 +1,11 @@
+from .aliases import (
+    AliasProfile,
+    AliasProvider,
+    AliasResolveResult,
+    alias_provider,
+    normalize_alias,
+    sync_music_aliases,
+)
 from .asset_cache import AssetCacheProvider, asset_cache_provider
 from .asset_fetcher import AssetFetcher, asset_fetcher
 from .assets import AssetProvider, asset_provider
@@ -31,6 +39,9 @@ from .master_data import (
 __all__ = [
     "MASTER_DATASET_KEYS",
     "REGISTER_CONFIGS",
+    "AliasProfile",
+    "AliasProvider",
+    "AliasResolveResult",
     "AssetCacheProvider",
     "AssetFetcher",
     "AssetProvider",
@@ -44,6 +55,7 @@ __all__ = [
     "SekaiResourceSettings",
     "SourceRevisionInfo",
     "SourceVersionInfo",
+    "alias_provider",
     "asset_cache_provider",
     "asset_fetcher",
     "asset_provider",
@@ -51,8 +63,10 @@ __all__ = [
     "get_settings",
     "master_data_provider",
     "master_data_service",
+    "normalize_alias",
     "normalize_difficulty",
     "parse_constants_csv",
     "refresh_settings",
     "register_configs",
+    "sync_music_aliases",
 ]

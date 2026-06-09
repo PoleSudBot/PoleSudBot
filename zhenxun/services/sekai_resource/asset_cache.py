@@ -48,6 +48,12 @@ class AssetCacheProvider:
             "card_thumbnail_after_training": [
                 f"{normalized_server}/startapp/thumbnail/chara/{normalized_bundle}_after_training.png"
             ],
+            "card_cutout_normal": [
+                f"{normalized_server}/startapp/character/member_cutout/{normalized_bundle}/normal.png"
+            ],
+            "card_cutout_after_training": [
+                f"{normalized_server}/startapp/character/member_cutout/{normalized_bundle}/after_training.png"
+            ],
             "music_jacket": [
                 f"{normalized_server}/startapp/music/jacket/{normalized_bundle}/{normalized_bundle}.png"
             ],

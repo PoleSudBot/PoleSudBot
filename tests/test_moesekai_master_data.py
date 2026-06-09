@@ -11,6 +11,8 @@ import pytest
 nonebot.init()
 
 from zhenxun.services.sekai_resource import master_data as masterdata_module
+from zhenxun.services.sekai_resource.asset_cache import AssetCacheProvider
+from zhenxun.services.sekai_resource.assets import AssetProvider
 import zhenxun.services.sekai_resource.config as resource_config
 from zhenxun.services.sekai_resource.config import (
     MASTER_DATASET_KEYS,
@@ -45,6 +47,31 @@ class _FakeResourceConfig:
 
 def test_sekai_resource_uses_dedicated_data_dir():
     assert RESOURCE_DATA_DIR.name == "sekai_resource"
+
+
+def test_master_dataset_keys_include_gachas():
+    assert "gachas" in MASTER_DATASET_KEYS
+
+
+def test_card_cutout_asset_paths_are_supported():
+    cache_paths = AssetCacheProvider.canonical_relative_paths(
+        "jp",
+        kind="card_cutout_normal",
+        assetbundle="card_test",
+    )
+    assert cache_paths == [
+        "jp/startapp/character/member_cutout/card_test/normal.png"
+    ]
+
+    provider = AssetProvider()
+    urls = provider.build_candidate_urls(
+        "jp",
+        kind="card_cutout_after_training",
+        assetbundle="card_test",
+    )
+    assert urls[0].endswith(
+        "/startapp/character/member_cutout/card_test/after_training.png"
+    )
 
 
 def test_resource_settings_prefers_new_namespace(monkeypatch: pytest.MonkeyPatch):
@@ -206,6 +233,37 @@ def test_merge_master_sources_config_uses_new_default_order():
         "haruki-tw",
     ]
     assert any(item.name == "sekai-viewer-jp" for item in merged)
+
+
+def test_merge_master_sources_config_backfills_new_default_datasets():
+    legacy_datasets = {
+        dataset: f"{dataset}.json"
+        for dataset in MASTER_DATASET_KEYS
+        if dataset != "gachas"
+    }
+    merged = _merge_master_sources_config(
+        [
+            {
+                "name": "8823-jp",
+                "family": "8823",
+                "region": "jp",
+                "owner": "custom-owner",
+                "repo": "custom-repo",
+                "branch": "custom-branch",
+                "version_path": "versions.json",
+                "version_field": "data_version",
+                "datasets": legacy_datasets,
+            }
+        ]
+    )
+
+    source = next(item for item in merged if item.name == "8823-jp")
+
+    assert source.owner == "custom-owner"
+    assert source.dataset_path("gachas") == "gachas.json"
+    assert source.dataset_url("gachas").endswith(
+        "/custom-owner/custom-repo/custom-branch/gachas.json"
+    )
 
 
 @pytest.mark.asyncio
@@ -610,6 +668,111 @@ async def test_update_region_first_landing_does_not_report_added_records(
     assert result.added_records == {}
     assert result.changed_datasets == []
     assert saved_state["jp"]["version"] == "1.0.0"
+
+
+@pytest.mark.asyncio
+async def test_update_region_uses_legacy_moesekai_baseline_on_first_resource_landing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    source = MasterSourceConfig(
+        name="8823-jp",
+        region="jp",
+        base_url="https://example.com/8823",
+        version_path="versions.json",
+        version_field="dataVersion",
+        datasets={key: f"{key}.json" for key in MASTER_DATASET_KEYS},
+    )
+    current_root = tmp_path / "sekai_resource_master"
+    legacy_master_root = tmp_path / "moesekai_master"
+    legacy_state_root = tmp_path / "moesekai_state"
+    _write_master_payloads(
+        legacy_master_root,
+        "jp",
+        _full_master_payload(card_ids=[1], stamp_ids=[]),
+    )
+    legacy_state_root.mkdir(parents=True)
+    (legacy_state_root / "master_state.json").write_text(
+        json.dumps(
+            {
+                "jp": {
+                    "source_name": "8823-jp",
+                    "revision": "rev-1",
+                    "version": "1.0.0",
+                    "datasets": list(MASTER_DATASET_KEYS),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    saved_state: dict[str, dict[str, object]] = {}
+    original_cache = MasterDataService._cache
+    MasterDataService._cache = {}
+
+    def fake_dataset_path(_cls: type[MasterDataService], server: str, dataset: str):
+        path = current_root / server / f"{dataset}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    async def fake_select_source(
+        _cls: type[MasterDataService],
+        _server: str,
+        *,
+        include_lazy: bool,
+    ):
+        assert include_lazy is False
+        return source, [
+            SourceVersionInfo(
+                source=source,
+                revision="rev-2",
+                version="1.0.1",
+                success=True,
+            )
+        ]
+
+    async def fake_fetch_selected_payloads(
+        _cls: type[MasterDataService],
+        _source: MasterSourceConfig,
+    ):
+        return _full_master_payload(card_ids=[1, 2], stamp_ids=[10]), "1.0.1"
+
+    monkeypatch.setattr(
+        MasterDataService, "_dataset_path", classmethod(fake_dataset_path)
+    )
+    monkeypatch.setattr(
+        MasterDataService, "_select_source", classmethod(fake_select_source)
+    )
+    monkeypatch.setattr(
+        MasterDataService,
+        "_fetch_selected_payloads",
+        classmethod(fake_fetch_selected_payloads),
+    )
+    monkeypatch.setattr(MasterDataService, "_load_state", classmethod(lambda _cls: {}))
+    monkeypatch.setattr(
+        MasterDataService,
+        "_save_state",
+        classmethod(lambda _cls, payload: saved_state.update(payload)),
+    )
+    monkeypatch.setattr(masterdata_module, "LEGACY_MASTER_DATA_DIR", legacy_master_root)
+    monkeypatch.setattr(masterdata_module, "LEGACY_STATE_DIR", legacy_state_root)
+    monkeypatch.setattr(
+        masterdata_module,
+        "get_settings",
+        lambda: SimpleNamespace(master_check_mode="version"),
+    )
+
+    try:
+        result = await MasterDataService.update_region("jp")
+    finally:
+        MasterDataService._cache = original_cache
+
+    assert result.updated is True
+    assert result.added_records == {
+        "cards": [{"id": 2}],
+        "stamps": [{"id": 10}],
+    }
+    assert result.changed_datasets == ["cards", "stamps"]
+    assert saved_state["jp"]["version"] == "1.0.1"
 
 
 @pytest.mark.asyncio
