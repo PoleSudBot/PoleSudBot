@@ -14,6 +14,7 @@ from zhenxun.plugins.moesekai.config import (
     get_settings,
 )
 from zhenxun.plugins.moesekai.config_migration import migrate_legacy_plugin_config
+from zhenxun.services.sekai_resource import config as resource_config
 
 
 class _FakeConfig:
@@ -22,6 +23,7 @@ class _FakeConfig:
         payload: dict[str, object],
         *,
         resource_payload: dict[str, object] | None = None,
+        explicit_legacy_keys: set[str] | None = None,
         explicit_resource_keys: set[str] | None = None,
     ):
         resource_payload = resource_payload or {}
@@ -38,7 +40,16 @@ class _FakeConfig:
                 }
             ),
         }
-        self._simple_data = {"moesekai": dict(payload)}
+        legacy_keys = (
+            payload.keys() if explicit_legacy_keys is None else explicit_legacy_keys
+        )
+        self._simple_data = {
+            "moesekai": {
+                key: payload[key]
+                for key in legacy_keys
+                if key in payload
+            }
+        }
         if explicit_resource_keys:
             self._simple_data["sekai_resource"] = {
                 key: resource_payload[key]
@@ -252,6 +263,49 @@ def test_migrate_legacy_plugin_config_keeps_explicit_resource_value(
         == "new-token"
     )
     assert fake_config.get_config("moesekai", "MOESEKAI_GITHUB_TOKEN", None) is None
+
+
+def test_resource_b30_constants_url_ignores_legacy_default(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fake_config = _FakeConfig(
+        {
+            "MOESEKAI_B30_CONSTANTS_URL": (
+                "https://moe.exmeaning.com/data/pjskb30/merged_chart.csv"
+            )
+        },
+        explicit_legacy_keys=set(),
+    )
+    monkeypatch.setattr(resource_config, "Config", fake_config)
+    resource_config.get_settings.cache_clear()
+
+    try:
+        assert (
+            resource_config.get_settings().b30_constants_url
+            == resource_config.DEFAULT_B30_CONSTANTS_URL
+        )
+    finally:
+        resource_config.get_settings.cache_clear()
+
+
+def test_resource_b30_constants_url_keeps_explicit_legacy_override(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fake_config = _FakeConfig(
+        {
+            "MOESEKAI_B30_CONSTANTS_URL": "https://example.com/custom.csv",
+        }
+    )
+    monkeypatch.setattr(resource_config, "Config", fake_config)
+    resource_config.get_settings.cache_clear()
+
+    try:
+        assert (
+            resource_config.get_settings().b30_constants_url
+            == "https://example.com/custom.csv"
+        )
+    finally:
+        resource_config.get_settings.cache_clear()
 
 
 def test_migrate_keeps_explicit_profile_token_without_legacy_template(

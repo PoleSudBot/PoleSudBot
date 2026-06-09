@@ -70,6 +70,14 @@ DEFAULT_ASSET_SOURCE_ORDER = [
     "haruki-jp-dedicated",
     "legacy-viewer",
 ]
+DEFAULT_B30_CONSTANTS_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1B8tX9VL2PcSJKyuHFVd2UT_8kYlY4ZdwHwg9MfWOPug/"
+    "gviz/tq?tqx=out:csv&gid=1855810409"
+)
+LEGACY_MOESEKAI_B30_CONSTANTS_URL = (
+    "https://moe.exmeaning.com/data/pjskb30/merged_chart.csv"
+)
 
 
 def _dataset_paths(prefix: str = "") -> dict[str, str]:
@@ -287,6 +295,9 @@ class SekaiResourceSettings(BaseModel):
         default_factory=lambda: DEFAULT_ASSET_SOURCE_ORDER.copy()
     )
     audio_format_priority: list[str] = Field(default_factory=lambda: ["mp3", "flac"])
+    b30_constants_url: str = DEFAULT_B30_CONSTANTS_URL
+    b30_constants_timeout_seconds: float = 10.0
+    b30_constants_refresh_interval_seconds: int = 86_400
 
     @field_validator(
         "master_source_order",
@@ -311,6 +322,16 @@ class SekaiResourceSettings(BaseModel):
     @classmethod
     def _normalize_master_interval(cls, value: int) -> int:
         return max(1, value)
+
+    @field_validator("b30_constants_timeout_seconds")
+    @classmethod
+    def _normalize_timeout_seconds(cls, value: float) -> float:
+        return max(1.0, float(value))
+
+    @field_validator("b30_constants_refresh_interval_seconds")
+    @classmethod
+    def _normalize_b30_refresh_interval_seconds(cls, value: int) -> int:
+        return max(60, int(value))
 
     @field_validator("master_sources")
     @classmethod
@@ -388,6 +409,30 @@ REGISTER_CONFIGS = [
         help="SekaiResource 音频资源格式优先级",
         type=list[str],
     ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="SEKAI_RESOURCE_B30_CONSTANTS_URL",
+        value=REGISTER_DEFAULTS.b30_constants_url,
+        default_value=REGISTER_DEFAULTS.b30_constants_url,
+        help="SekaiResource B30 社区定数 CSV 地址",
+        type=str,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="SEKAI_RESOURCE_B30_CONSTANTS_TIMEOUT_SECONDS",
+        value=REGISTER_DEFAULTS.b30_constants_timeout_seconds,
+        default_value=REGISTER_DEFAULTS.b30_constants_timeout_seconds,
+        help="SekaiResource B30 社区定数请求超时秒数",
+        type=float,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="SEKAI_RESOURCE_B30_CONSTANTS_REFRESH_INTERVAL_SECONDS",
+        value=REGISTER_DEFAULTS.b30_constants_refresh_interval_seconds,
+        default_value=REGISTER_DEFAULTS.b30_constants_refresh_interval_seconds,
+        help="SekaiResource B30 社区定数自动检查间隔，秒",
+        type=int,
+    ),
 ]
 
 _SENTINEL = object()
@@ -447,6 +492,7 @@ def _get_compat_config(
     *,
     legacy_key: str,
     legacy_keys: list[str] | None = None,
+    legacy_default: Any = _SENTINEL,
 ) -> Any:
     value = Config.get_config(MODULE_NAME, key, _SENTINEL)
     if value is not _SENTINEL and (
@@ -458,7 +504,15 @@ def _get_compat_config(
     # 新配置只是注册默认值时继续读取旧键，避免升级后用户配置被默认值遮蔽。
     for candidate in [legacy_key, *(legacy_keys or [])]:
         legacy_value = Config.get_config(LEGACY_MODULE_NAME, candidate, _SENTINEL)
-        if legacy_value is not _SENTINEL:
+        if legacy_value is _SENTINEL:
+            continue
+        if legacy_default is _SENTINEL:
+            return legacy_value
+        # 旧 B30 默认源已经过期；只有用户显式配置过旧键时才迁移旧值。
+        if (
+            not _config_value_equals(legacy_value, legacy_default)
+            or _is_explicit_config_value(LEGACY_MODULE_NAME, candidate, legacy_default)
+        ):
             return legacy_value
     if value is not _SENTINEL:
         return value
@@ -511,6 +565,24 @@ def get_settings() -> SekaiResourceSettings:
             defaults.audio_format_priority,
             legacy_key="MOESEKAI_AUDIO_FORMAT_PRIORITY",
         ),
+        "b30_constants_url": _get_compat_config(
+            "SEKAI_RESOURCE_B30_CONSTANTS_URL",
+            defaults.b30_constants_url,
+            legacy_key="MOESEKAI_B30_CONSTANTS_URL",
+            legacy_default=LEGACY_MOESEKAI_B30_CONSTANTS_URL,
+        ),
+        "b30_constants_timeout_seconds": _get_compat_config(
+            "SEKAI_RESOURCE_B30_CONSTANTS_TIMEOUT_SECONDS",
+            defaults.b30_constants_timeout_seconds,
+            legacy_key="MOESEKAI_B30_CONSTANTS_TIMEOUT_SECONDS",
+            legacy_default=10.0,
+        ),
+        "b30_constants_refresh_interval_seconds": _get_compat_config(
+            "SEKAI_RESOURCE_B30_CONSTANTS_REFRESH_INTERVAL_SECONDS",
+            defaults.b30_constants_refresh_interval_seconds,
+            legacy_key="MOESEKAI_B30_CONSTANTS_REFRESH_INTERVAL_SECONDS",
+            legacy_default=21_600,
+        ),
     }
     settings = SekaiResourceSettings.model_validate(payload)
     ordered_defaults = build_default_master_sources(settings.master_source_order)
@@ -531,6 +603,7 @@ register_configs()
 
 __all__ = [
     "DEFAULT_ASSET_SOURCE_ORDER",
+    "DEFAULT_B30_CONSTANTS_URL",
     "DEFAULT_MASTER_SOURCES",
     "DEFAULT_MASTER_SOURCE_ORDER",
     "MASTER_DATASET_KEYS",
