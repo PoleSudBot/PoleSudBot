@@ -54,7 +54,7 @@
                     <span>MUSIC</span>
                     {% endif %}
                     <span class="diff diff-{{ entry.difficulty }}">
-                        {% if entry.level %}{{ entry.level }}{% else %}{{ entry.constant|int }}{% endif %}
+                        {% if entry.level_label %}{{ entry.level_label }}{% elif entry.level %}{{ entry.level }}{% else %}{{ entry.constant|int }}{% endif %}
                     </span>
                 </div>
                 <div class="entry-body">

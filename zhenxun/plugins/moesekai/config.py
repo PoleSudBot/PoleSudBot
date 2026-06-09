@@ -85,9 +85,6 @@ class MoeSekaiSettings(BaseModel):
         "https://suite-api.haruki.seiunx.com/public/{server}/suite/{game_id}"
     )
     suite_api_timeout_seconds: float = 20.0
-    b30_constants_url: str = "https://moe.exmeaning.com/data/pjskb30/merged_chart.csv"
-    b30_constants_timeout_seconds: float = 10.0
-    b30_constants_refresh_interval_seconds: int = 21600
     b30_viewport_width: int = 980
     profile_static_asset_bases: list[str] = Field(
         default_factory=lambda: DEFAULT_PROFILE_STATIC_ASSET_BASES.copy()
@@ -182,15 +179,10 @@ class MoeSekaiSettings(BaseModel):
     def _normalize_ttl_seconds(cls, value: int) -> int:
         return max(0, value)
 
-    @field_validator("suite_api_timeout_seconds", "b30_constants_timeout_seconds")
+    @field_validator("suite_api_timeout_seconds")
     @classmethod
     def _normalize_timeout_seconds(cls, value: float) -> float:
         return max(1.0, float(value))
-
-    @field_validator("b30_constants_refresh_interval_seconds")
-    @classmethod
-    def _normalize_refresh_interval_seconds(cls, value: int) -> int:
-        return max(60, int(value))
 
 
 def _build_profile_url_templates(settings: MoeSekaiSettings) -> list[str]:
@@ -275,30 +267,6 @@ REGISTER_CONFIGS = [
         default_value=REGISTER_DEFAULTS.suite_api_timeout_seconds,
         help="Suite API 请求超时秒数",
         type=float,
-    ),
-    RegisterConfig(
-        module=MODULE_NAME,
-        key="MOESEKAI_B30_CONSTANTS_URL",
-        value=REGISTER_DEFAULTS.b30_constants_url,
-        default_value=REGISTER_DEFAULTS.b30_constants_url,
-        help="B30 谱面定数 CSV 地址",
-        type=str,
-    ),
-    RegisterConfig(
-        module=MODULE_NAME,
-        key="MOESEKAI_B30_CONSTANTS_TIMEOUT_SECONDS",
-        value=REGISTER_DEFAULTS.b30_constants_timeout_seconds,
-        default_value=REGISTER_DEFAULTS.b30_constants_timeout_seconds,
-        help="B30 定数 CSV 请求超时秒数",
-        type=float,
-    ),
-    RegisterConfig(
-        module=MODULE_NAME,
-        key="MOESEKAI_B30_CONSTANTS_REFRESH_INTERVAL_SECONDS",
-        value=REGISTER_DEFAULTS.b30_constants_refresh_interval_seconds,
-        default_value=REGISTER_DEFAULTS.b30_constants_refresh_interval_seconds,
-        help="B30 定数 CSV 内存缓存刷新间隔秒数",
-        type=int,
     ),
     RegisterConfig(
         module=MODULE_NAME,
@@ -629,18 +597,6 @@ def get_settings() -> MoeSekaiSettings:
         "suite_api_timeout_seconds": _get_compat_config(
             "MOESEKAI_SUITE_API_TIMEOUT_SECONDS",
             defaults.suite_api_timeout_seconds,
-        ),
-        "b30_constants_url": _get_compat_config(
-            "MOESEKAI_B30_CONSTANTS_URL",
-            defaults.b30_constants_url,
-        ),
-        "b30_constants_timeout_seconds": _get_compat_config(
-            "MOESEKAI_B30_CONSTANTS_TIMEOUT_SECONDS",
-            defaults.b30_constants_timeout_seconds,
-        ),
-        "b30_constants_refresh_interval_seconds": _get_compat_config(
-            "MOESEKAI_B30_CONSTANTS_REFRESH_INTERVAL_SECONDS",
-            defaults.b30_constants_refresh_interval_seconds,
         ),
         "b30_viewport_width": _get_compat_config(
             "MOESEKAI_B30_VIEWPORT_WIDTH",

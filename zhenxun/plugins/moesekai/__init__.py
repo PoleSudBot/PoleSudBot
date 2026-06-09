@@ -26,6 +26,7 @@ if not _TEST_MODE:
     from zhenxun.utils.manager.priority_manager import PriorityLifecycle
     from zhenxun.utils.platform import PlatformUtils
 
+    from .b30 import b30_constants_provider
     from .commands import matcher
     from .config import get_settings, refresh_settings
     from .config_migration import migrate_legacy_plugin_config
@@ -193,6 +194,7 @@ if not _TEST_MODE:
         while True:
             try:
                 results = await master_data_service.probe_next_updates()
+                await b30_constants_provider.refresh_if_needed()
                 if get_settings().master_notify_superusers:
                     for message in await build_auto_update_notifications(results):
                         await PlatformUtils.send_superuser(bot, message)

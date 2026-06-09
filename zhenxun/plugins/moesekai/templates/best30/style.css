@@ -218,7 +218,7 @@ h1 {
     position: absolute;
     top: 0;
     right: 0;
-    min-width: 28px;
+    min-width: 30px;
     padding: 3px 5px 4px;
     border-radius: 0 6px 0 6px;
     color: #ffffff;
@@ -249,7 +249,8 @@ h1 {
 }
 
 .diff-append {
-    background: rgba(251, 113, 133, 0.84);
+    background: rgba(255, 214, 231, 0.94);
+    color: #a63a64;
 }
 
 .entry-body {

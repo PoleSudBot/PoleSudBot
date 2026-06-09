@@ -601,8 +601,8 @@ class MoeSekaiApplication:
             self._attach_best30_jackets(server, result),
         )
         sources = [
-            f"suite数据来源：{self._source_origin(suite_data.source_url)}",
-            f"定数来源：{self._source_origin(b30_constants_provider.source_url())}",
+            "suite数据来源：Haruki工具箱",
+            "定数来源：社区定数",
         ]
         return await render_best30_image(
             server=server,

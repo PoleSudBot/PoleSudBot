@@ -104,6 +104,9 @@ def test_register_configs_do_not_expose_legacy_keys():
     assert "MOESEKAI_RANKING_VIEWPORT_WIDTH" not in config_keys
     assert "MOESEKAI_DECK_VIEWPORT_WIDTH" not in config_keys
     assert "MOESEKAI_DECK_DEFAULT_MUSIC_ID" not in config_keys
+    assert "MOESEKAI_B30_CONSTANTS_URL" not in config_keys
+    assert "MOESEKAI_B30_CONSTANTS_TIMEOUT_SECONDS" not in config_keys
+    assert "MOESEKAI_B30_CONSTANTS_REFRESH_INTERVAL_SECONDS" not in config_keys
     assert "MOESEKAI_ALIAS_GLOBAL_EDITOR_GROUPS" not in config_keys
     assert "MOESEKAI_CHARACTER_VIEWPORT_WIDTH" in config_keys
 
