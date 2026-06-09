@@ -117,14 +117,13 @@ def aggregate_playtime(rows: list[PlaytimeRow]) -> list[PlaytimeEntry]:
     return sorted(entries, key=lambda item: (-item.seconds, item.player_name.lower()))
 
 
-def active_business_day_labels(
+def active_day_labels(
     segments: list[PersonalOnlineSegment],
-    range_start: datetime,
-    range_end: datetime,
+    time_range: TimeRange,
 ) -> set[str]:
     labels: set[str] = set()
-    for day_range in iter_business_days(range_start, range_end):
-        # 有效日只看当天是否存在真实在线秒数，不用首次/最后在线跨度填充分母。
+    for day_range in _iter_daily_ranges(time_range):
+        # 有效日跟随查询分桶模式，避免 7d 这类滚动范围混入 06:00 业务边界。
         seconds = sum(
             overlap_seconds(
                 segment.started_at,
@@ -139,12 +138,27 @@ def active_business_day_labels(
     return labels
 
 
+def active_business_day_labels(
+    segments: list[PersonalOnlineSegment],
+    range_start: datetime,
+    range_end: datetime,
+) -> set[str]:
+    return active_day_labels(segments, TimeRange("业务日", range_start, range_end))
+
+
 def active_business_day_count(
     segments: list[PersonalOnlineSegment],
     range_start: datetime,
     range_end: datetime,
 ) -> int:
     return len(active_business_day_labels(segments, range_start, range_end))
+
+
+def active_day_count(
+    segments: list[PersonalOnlineSegment],
+    time_range: TimeRange,
+) -> int:
+    return len(active_day_labels(segments, time_range))
 
 
 def average_business_day_count(
@@ -177,12 +191,11 @@ def aggregate_sample_points(rows: list[object]) -> list[SamplePoint]:
 
 def aggregate_daily_online_points(
     segments: list[PersonalOnlineSegment],
-    range_start: datetime,
-    range_end: datetime,
+    time_range: TimeRange,
 ) -> list[OnlineDurationPoint]:
     points = []
-    for day_range in iter_business_days(range_start, range_end):
-        # 日趋势按 06:00 业务日切分，避免跨午夜长会话被硬拆到自然日。
+    for day_range in _iter_daily_ranges(time_range):
+        # 日趋势按查询范围的分桶模式切分：业务范围用 06:00，滚动范围用真实 24h。
         seconds = sum(
             overlap_seconds(
                 segment.started_at,
@@ -194,6 +207,40 @@ def aggregate_daily_online_points(
         )
         points.append(OnlineDurationPoint(label=day_range.label, seconds=seconds))
     return points
+
+
+def should_use_hourly_online_points(time_range: TimeRange) -> bool:
+    start = normalize_datetime(time_range.start)
+    end = normalize_datetime(time_range.end)
+    if not start or not end or end <= start:
+        return True
+    return (end - start).total_seconds() <= 72 * 3600
+
+
+def _iter_daily_ranges(time_range: TimeRange) -> list[TimeRange]:
+    if time_range.bucket_mode != "rolling":
+        return iter_business_days(time_range.start, time_range.end)
+
+    start = normalize_datetime(time_range.start)
+    end = normalize_datetime(time_range.end)
+    if not start or not end or end <= start:
+        return []
+
+    ranges = []
+    cursor = start
+    while cursor < end:
+        next_cursor = min(cursor + timedelta(days=1), end)
+        # 滚动日级标签标记桶结束日，保证 7d 的最后一个点落在“本日”。
+        ranges.append(
+            TimeRange(
+                next_cursor.strftime("%m-%d"),
+                cursor,
+                next_cursor,
+                bucket_mode="rolling",
+            )
+        )
+        cursor = next_cursor
+    return ranges
 
 
 def aggregate_hourly_online_points(

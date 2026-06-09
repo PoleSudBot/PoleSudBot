@@ -40,25 +40,48 @@
       const softColor = rootStyle.getPropertyValue("--color-primary").trim() || "#ff6699";
       const mutedColor = rootStyle.getPropertyValue("--color-text-muted").trim() || "#9b7582";
       const borderColor = rootStyle.getPropertyValue("--color-border").trim() || "#ffe0ea";
+      const formatTimeLabel = (value) => {
+        const date = new Date(value);
+        const pad = (item) => String(item).padStart(2, "0");
+        return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+      };
 
       chart.setOption({
         backgroundColor: "transparent",
         animation: false,
-        grid: { top: 28, bottom: 34, left: 46, right: 20 },
+        grid: { top: 28, bottom: 68, left: 46, right: 20 },
         tooltip: {
           trigger: "axis",
-          valueFormatter: (value) => `${value} 人`,
+          formatter: (params) => {
+            const point = Array.isArray(params) ? params[0] : params;
+            const value = Array.isArray(point.value) ? point.value[1] : point.value;
+            const time = Array.isArray(point.value) ? point.value[0] : point.axisValue;
+            return `${formatTimeLabel(time)}<br/>在线人数：${value} 人`;
+          },
           axisPointer: {
             type: "line",
             lineStyle: { color: borderColor, width: 1 }
           }
         },
         xAxis: {
-          type: "category",
+          type: "time",
           boundaryGap: false,
-          data: {{ labels | dump_json | safe }},
-          axisTick: { show: false },
-          axisLabel: { color: mutedColor, fontSize: 11, fontWeight: 500 },
+          axisTick: {
+            show: true,
+            alignWithLabel: true,
+            inside: true,
+            length: 6,
+            lineStyle: { color: borderColor, width: 1.4 }
+          },
+          axisLabel: {
+            color: mutedColor,
+            fontSize: 10,
+            fontWeight: 500,
+            rotate: 45,
+            hideOverlap: true,
+            formatter: (value) => formatTimeLabel(value),
+            align: "right"
+          },
           axisLine: { lineStyle: { color: borderColor, width: 1 } }
         },
         yAxis: {
@@ -75,7 +98,7 @@
           smooth: true,
           symbol: "circle",
           symbolSize: 7,
-          data: {{ counts | dump_json | safe }},
+          data: {{ series_points | dump_json | safe }},
           lineStyle: { color: primaryColor, width: 3 },
           itemStyle: { color: primaryColor, borderColor: "#fff", borderWidth: 2 },
           areaStyle: { color: "rgba(255, 102, 153, 0.14)" },

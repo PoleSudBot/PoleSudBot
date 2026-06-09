@@ -350,7 +350,17 @@ class McServerService:
             server,
             timeout=get_settings().request_timeout_seconds,
         )
-        return await render_status(status)
+        trend_range = parse_time_range("24h")
+        samples = await get_count_samples(server, trend_range)
+        trend_data = ChartData(
+            title=f"{_server_title(server)} 过去24h 在线人数",
+            range_label=trend_range.label,
+            range_start=trend_range.start,
+            range_end=trend_range.end,
+            range_end_is_current=trend_range.end_is_current,
+            points=aggregate_sample_points(samples),
+        )
+        return await render_status(status, trend_data)
 
     async def playtime_message(
         self,
@@ -376,7 +386,7 @@ class McServerService:
     ) -> RenderedMessage:
         server = await self._require_server(group_id)
         season = await get_active_season(server)
-        time_range = parse_time_range(range_text or "本周", season.started_at)
+        time_range = parse_time_range(range_text or "7d", season.started_at)
         data = await get_personal_online_data(
             server,
             time_range,
@@ -394,7 +404,7 @@ class McServerService:
     ) -> RenderedMessage:
         server = await self._require_server(group_id)
         season = await get_active_season(server)
-        time_range = parse_time_range(range_text or "本周", season.started_at)
+        time_range = parse_time_range(range_text or "7d", season.started_at)
         data = await get_personal_online_data_by_player_name(
             server,
             time_range,
@@ -408,7 +418,7 @@ class McServerService:
     ) -> RenderedMessage:
         server = await self._require_server(group_id)
         season = await get_active_season(server)
-        time_range = parse_time_range(range_text or "今日", season.started_at)
+        time_range = parse_time_range(range_text or "3d", season.started_at)
         samples = await get_count_samples(server, time_range)
         data = ChartData(
             title=f"{_server_title(server)} 在线人数变化",

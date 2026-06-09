@@ -37,6 +37,7 @@ class TimeRange:
     start: datetime
     end: datetime
     end_is_current: bool = False
+    bucket_mode: Literal["business", "rolling"] = "business"
 
 
 @dataclass(frozen=True)

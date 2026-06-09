@@ -291,7 +291,7 @@ async def test_bind_group_server_with_rcon_uses_same_host_for_rcon(
 
 
 @pytest.mark.asyncio
-async def test_chart_message_defaults_to_business_today(
+async def test_chart_message_defaults_to_three_days(
     monkeypatch: pytest.MonkeyPatch,
 ):
     server = _FakeServer()
@@ -316,10 +316,11 @@ async def test_chart_message_defaults_to_business_today(
         captured["range_text"] = range_text
         captured["season_start"] = season_start
         return TimeRange(
-            "今日",
-            datetime(2026, 5, 16, 6, 0, 0),
+            "3d",
+            datetime(2026, 5, 13, 12, 0, 0),
             datetime(2026, 5, 16, 12, 0, 0),
             end_is_current=True,
+            bucket_mode="rolling",
         )
 
     monkeypatch.setattr(mc_services, "get_server_for_group", fake_get_server_for_group)
@@ -331,16 +332,62 @@ async def test_chart_message_defaults_to_business_today(
     rendered = await McServerService().chart_message("123456")
 
     assert rendered.fallback_text == "chart"
-    assert captured["range_text"] == "今日"
-    assert captured["time_range"].label == "今日"
+    assert captured["range_text"] == "3d"
+    assert captured["time_range"].label == "3d"
+    assert captured["time_range"].bucket_mode == "rolling"
     assert captured["chart"].title == "MC 服务器 在线人数变化"
     assert captured["chart"].range_start == captured["time_range"].start
     assert captured["chart"].range_end == captured["time_range"].end
     assert captured["chart"].range_end_is_current is True
 
 
+
 @pytest.mark.asyncio
-async def test_personal_online_messages_default_to_week(
+async def test_status_message_includes_24h_count_trend(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    server = _FakeServer()
+    server.name = "主服"
+    status = SimpleNamespace(name="主服")
+    captured = {}
+
+    async def fake_get_server_for_group(_group_id: str):
+        return server
+
+    async def fake_query_server_status(_server, *, timeout):
+        captured["timeout"] = timeout
+        return status
+
+    async def fake_get_count_samples(_server, time_range):
+        captured["time_range"] = time_range
+        return [SimpleNamespace(captured_at=time_range.end, online_count=2)]
+
+    async def fake_render_status(status_arg, trend_arg=None):
+        captured["render"] = (status_arg, trend_arg)
+        return mc_services.RenderedMessage(image=None, fallback_text="status")
+
+    monkeypatch.setattr(mc_services, "get_server_for_group", fake_get_server_for_group)
+    monkeypatch.setattr(mc_services, "query_server_status", fake_query_server_status)
+    monkeypatch.setattr(mc_services, "get_count_samples", fake_get_count_samples)
+    monkeypatch.setattr(mc_services, "render_status", fake_render_status)
+    monkeypatch.setattr(
+        mc_services,
+        "get_settings",
+        lambda: SimpleNamespace(request_timeout_seconds=8),
+    )
+
+    rendered = await McServerService().status_message("123456")
+
+    trend = captured["render"][1]
+    assert rendered.fallback_text == "status"
+    assert captured["time_range"].label == "24h"
+    assert captured["time_range"].bucket_mode == "rolling"
+    assert trend.range_label == "24h"
+    assert trend.points[0].online_count == 2
+
+
+@pytest.mark.asyncio
+async def test_personal_online_messages_default_to_seven_days(
     monkeypatch: pytest.MonkeyPatch,
 ):
     server = _FakeServer()
@@ -395,8 +442,8 @@ async def test_personal_online_messages_default_to_week(
         player_name="Letemps",
     )
 
-    assert captured["qq"] == ("本周", "10000", "主服 本周 个人在线情况")
-    assert captured["player"] == ("本周", "Letemps", "主服 本周 个人在线情况")
+    assert captured["qq"] == ("7d", "10000", "主服 7d 个人在线情况")
+    assert captured["player"] == ("7d", "Letemps", "主服 7d 个人在线情况")
 
 
 @pytest.mark.asyncio

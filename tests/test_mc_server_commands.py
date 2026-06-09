@@ -127,6 +127,16 @@ def test_mctime_target_parser_supports_player_name():
     )
 
 
+
+def test_mctime_target_parser_supports_relative_range_after_player_name():
+    parsed = mctime_command().parse("mctime Steve 7d")
+
+    assert parsed.matched
+    assert resolve_mctime_query(parsed.query("parts"), self_qq_id="10000") == (
+        MctimeQuery("player", "Steve", "7d")
+    )
+
+
 def test_mctime_target_parser_supports_player_name_with_range():
     parsed = mctime_command().parse("mct Letemps 上月")
 

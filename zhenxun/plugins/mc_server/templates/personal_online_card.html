@@ -91,11 +91,11 @@
         {{ icons.icon_tile("user") }}
         <div>
           <div class="player-name">{{ player_label }}</div>
-          <div class="player-meta">按 06:00 业务日统计，当前为{{ chart_granularity_label }}图表</div>
+          <div class="player-meta">按查询范围分桶统计，当前为{{ chart_granularity_label }}图表</div>
         </div>
       </div>
 
-      {% if has_online %}
+      {% if has_chart %}
       <div class="chart-shell">
         <div id="personal-online-chart" class="chart-container"></div>
       </div>
@@ -105,7 +105,7 @@
     </div>
   </div>
 
-  {% if has_online %}
+  {% if has_chart %}
   <script src="{{ asset('js/echarts.min.js') }}"></script>
   <script>
     const chartDom = document.getElementById("personal-online-chart");
@@ -126,7 +126,7 @@
       chart.setOption({
         backgroundColor: "transparent",
         animation: false,
-        grid: { top: 28, bottom: 34, left: 54, right: 20 },
+        grid: { top: 28, bottom: {{ chart_grid_bottom }}, left: 54, right: 20 },
         tooltip: {
           trigger: "axis",
           formatter: (params) => {
@@ -143,8 +143,21 @@
           type: "category",
           boundaryGap: false,
           data: {{ chart_labels | dump_json | safe }},
-          axisTick: { show: false },
-          axisLabel: { color: mutedColor, fontSize: 11, fontWeight: 500 },
+          axisTick: {
+            show: true,
+            alignWithLabel: true,
+            inside: true,
+            length: 6,
+            lineStyle: { color: borderColor, width: 1.4 }
+          },
+          axisLabel: {
+            color: mutedColor,
+            fontSize: {{ chart_axis_label_font_size }},
+            fontWeight: 500,
+            rotate: {{ chart_axis_label_rotate }},
+            interval: 0,
+            align: "right"
+          },
           axisLine: { lineStyle: { color: borderColor, width: 1 } }
         },
         yAxis: {
@@ -161,7 +174,7 @@
         },
         series: [{
           name: "在线时长",
-          type: "{{ 'bar' if chart_granularity == 'hourly' else 'line' }}",
+          type: "line",
           smooth: {{ 'false' if chart_granularity == 'hourly' else 'true' }},
           symbol: "circle",
           symbolSize: 7,

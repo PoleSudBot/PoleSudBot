@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 from zoneinfo import ZoneInfo
 
@@ -98,9 +98,38 @@ def test_parse_time_range_accepts_single_day_and_range():
     assert ranged.start == datetime(2026, 5, 1, 6, 0, 0, tzinfo=MC_TIMEZONE)
 
 
+def test_parse_time_range_accepts_relative_rolling_ranges():
+    current = datetime(2026, 6, 7, 9, 30, 0, tzinfo=MC_TIMEZONE)
+
+    one_day = parse_time_range("24H", now=current)
+    three_days = parse_time_range("3d", now=current)
+    one_month = parse_time_range("1m", now=current)
+    one_year = parse_time_range("1y", now=current)
+
+    assert one_day.label == "24h"
+    assert one_day.start == current - timedelta(hours=24)
+    assert one_day.end == current
+    assert one_day.end_is_current is True
+    assert one_day.bucket_mode == "rolling"
+    assert three_days.start == current - timedelta(days=3)
+    assert one_month.start == current - timedelta(days=30)
+    assert one_year.start == current - timedelta(days=365)
+
+
 def test_parse_time_range_rejects_reversed_range():
     with pytest.raises(ValueError, match="结束日期"):
         parse_time_range("2026-05-03..2026-05-01")
+
+
+def test_parse_time_range_rejects_invalid_relative_ranges():
+    cases = {
+        "0d": "大于 0",
+        "-1d": "时间范围支持",
+        "d": "时间范围支持",
+    }
+    for raw, message in cases.items():
+        with pytest.raises(ValueError, match=message):
+            parse_time_range(raw)
 
 
 def test_business_today_range_uses_six_oclock_boundary():
@@ -162,6 +191,8 @@ def test_is_time_range_word_accepts_shared_mc_stat_ranges():
     assert is_time_range_word("上周")
     assert is_time_range_word("last_month")
     assert is_time_range_word("2026-05-01..2026-05-03")
+    assert is_time_range_word("24h")
+    assert is_time_range_word("7D")
     assert not is_time_range_word("Steve")
 
 

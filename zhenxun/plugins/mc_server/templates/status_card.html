@@ -144,7 +144,99 @@
         <div class="empty">暂无可见玩家列表</div>
         {% endif %}
       </div>
+
+      {% if count_trend %}
+      <div class="mc-card">
+        <div class="section-head">
+          <h2 class="section-title">{{ icons.icon_tile("activity") }}在线趋势</h2>
+          <span class="level-badge">{{ count_trend.sample_count }} 个采样</span>
+        </div>
+        <div class="subtle">{{ count_trend.range_hint }}</div>
+        {% if count_trend.points %}
+        <div class="chart-shell">
+          <div id="status-count-chart" class="chart-container"></div>
+        </div>
+        {% else %}
+        <div class="empty">暂无人数采样</div>
+        {% endif %}
+      </div>
+      {% endif %}
     </div>
   </div>
+{% if count_trend and count_trend.points %}
+  <script src="{{ asset('js/echarts.min.js') }}"></script>
+  <script>
+    const statusChartDom = document.getElementById("status-count-chart");
+    if (statusChartDom) {
+      const chart = echarts.init(statusChartDom);
+      const rootStyle = getComputedStyle(document.documentElement);
+      const primaryColor = rootStyle.getPropertyValue("--color-primary-dark").trim() || "#d14775";
+      const mutedColor = rootStyle.getPropertyValue("--color-text-muted").trim() || "#9b7582";
+      const borderColor = rootStyle.getPropertyValue("--color-border").trim() || "#ffe0ea";
+      const formatTimeLabel = (value) => {
+        const date = new Date(value);
+        const pad = (item) => String(item).padStart(2, "0");
+        return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+      };
+
+      chart.setOption({
+        backgroundColor: "transparent",
+        animation: false,
+        grid: { top: 28, bottom: 68, left: 46, right: 20 },
+        tooltip: {
+          trigger: "axis",
+          formatter: (params) => {
+            const point = Array.isArray(params) ? params[0] : params;
+            const value = Array.isArray(point.value) ? point.value[1] : point.value;
+            const time = Array.isArray(point.value) ? point.value[0] : point.axisValue;
+            return `${formatTimeLabel(time)}<br/>在线人数：${value} 人`;
+          },
+          axisPointer: { type: "line", lineStyle: { color: borderColor, width: 1 } }
+        },
+        xAxis: {
+          type: "time",
+          boundaryGap: false,
+          axisTick: {
+            show: true,
+            alignWithLabel: true,
+            inside: true,
+            length: 6,
+            lineStyle: { color: borderColor, width: 1.4 }
+          },
+          axisLabel: {
+            color: mutedColor,
+            fontSize: 10,
+            fontWeight: 500,
+            rotate: 45,
+            hideOverlap: true,
+            formatter: (value) => formatTimeLabel(value),
+            align: "right"
+          },
+          axisLine: { lineStyle: { color: borderColor, width: 1 } }
+        },
+        yAxis: {
+          type: "value",
+          minInterval: 1,
+          axisTick: { show: false },
+          axisLabel: { color: mutedColor, fontSize: 11 },
+          axisLine: { show: true, lineStyle: { color: borderColor, width: 1 } },
+          splitLine: { lineStyle: { color: "rgba(209, 71, 117, 0.12)", type: "dashed" } }
+        },
+        series: [{
+          name: "在线人数",
+          type: "line",
+          smooth: true,
+          symbol: "circle",
+          symbolSize: 6,
+          data: {{ count_trend.series_points | dump_json | safe }},
+          lineStyle: { color: primaryColor, width: 3 },
+          itemStyle: { color: primaryColor, borderColor: "#fff", borderWidth: 2 },
+          areaStyle: { color: "rgba(255, 102, 153, 0.14)" },
+          emphasis: { focus: "series" }
+        }]
+      });
+    }
+  </script>
+  {% endif %}
 </body>
 </html>

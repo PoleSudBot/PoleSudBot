@@ -18,13 +18,14 @@ from .models import (
     McServerGroupBinding,
 )
 from .stats import (
-    active_business_day_count,
-    active_business_day_labels,
+    active_day_count,
+    active_day_labels,
     aggregate_daily_online_points,
     aggregate_hourly_online_points,
     aggregate_playtime,
     clip_online_segment,
     overlap_seconds,
+    should_use_hourly_online_points,
 )
 from .types import (
     PersonalOnlineData,
@@ -34,7 +35,6 @@ from .types import (
     TimeRange,
 )
 from .utils import (
-    business_day_count,
     business_today_range,
     normalize_datetime,
     now_local,
@@ -345,11 +345,7 @@ async def get_playtime_entries(
                 player_name=session.player_name,
                 qq_id=session.qq_id,
                 seconds=segment.seconds,
-                active_day_labels=active_business_day_labels(
-                    [segment],
-                    time_range.start,
-                    time_range.end,
-                ),
+                active_day_labels=active_day_labels([segment], time_range),
                 first_seen_at=first_seen_by_name.get(session.player_name.lower()),
                 last_seen_at=segment.ended_at,
             )
@@ -552,9 +548,9 @@ def _build_personal_online_data(
     time_range: TimeRange,
 ) -> PersonalOnlineData:
     total_seconds = sum(segment.seconds for segment in segments)
-    daily_points = aggregate_daily_online_points(segments, range_start, range_end)
+    daily_points = aggregate_daily_online_points(segments, time_range)
     chart_granularity = (
-        "hourly" if business_day_count(range_start, range_end) <= 5 else "daily"
+        "hourly" if should_use_hourly_online_points(time_range) else "daily"
     )
     chart_points = (
         aggregate_hourly_online_points(segments, range_start, range_end)
@@ -589,8 +585,7 @@ def _build_personal_online_data(
         chart_points=chart_points,
         chart_granularity=chart_granularity,
         total_seconds=total_seconds,
-        average_seconds=total_seconds
-        // max(active_business_day_count(segments, range_start, range_end), 1),
+        average_seconds=total_seconds // max(active_day_count(segments, time_range), 1),
         today_seconds=today_seconds,
         show_today_online=show_today_online,
     )

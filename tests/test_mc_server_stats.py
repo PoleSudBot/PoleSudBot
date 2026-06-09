@@ -6,12 +6,14 @@ from zoneinfo import ZoneInfo
 
 from zhenxun.plugins.mc_server.stats import (
     active_business_day_count,
+    aggregate_daily_online_points,
     aggregate_hourly_online_points,
     aggregate_playtime,
     aggregate_sample_points,
     average_business_day_count,
     clip_online_segment,
     overlap_seconds,
+    should_use_hourly_online_points,
 )
 from zhenxun.plugins.mc_server.types import PlaytimeRow, TimeRange
 from zhenxun.plugins.mc_server.utils import MC_TIMEZONE
@@ -178,6 +180,42 @@ def test_aggregate_hourly_online_points_keeps_short_range_precision():
         ("05-16 07:00", 3600),
         ("05-16 08:00", 900),
     ]
+
+
+
+
+def test_aggregate_daily_online_points_uses_rolling_day_buckets_with_zero_fill():
+    end = datetime(2026, 6, 9, 20, 0, 0, tzinfo=MC_TIMEZONE)
+    time_range = TimeRange(
+        "7d",
+        end - timedelta(days=7),
+        end,
+        end_is_current=True,
+        bucket_mode="rolling",
+    )
+
+    points = aggregate_daily_online_points([], time_range)
+
+    assert len(points) == 7
+    assert [point.label for point in points] == [
+        "06-03",
+        "06-04",
+        "06-05",
+        "06-06",
+        "06-07",
+        "06-08",
+        "06-09",
+    ]
+    assert [point.seconds for point in points] == [0, 0, 0, 0, 0, 0, 0]
+
+
+def test_should_use_hourly_online_points_uses_real_72_hour_threshold():
+    end = datetime(2026, 6, 9, 20, 0, 0, tzinfo=MC_TIMEZONE)
+    three_days = TimeRange("3d", end - timedelta(hours=72), end)
+    over_three_days = TimeRange("3d+", end - timedelta(hours=72, seconds=1), end)
+
+    assert should_use_hourly_online_points(three_days)
+    assert not should_use_hourly_online_points(over_three_days)
 
 
 def test_active_business_day_count_uses_only_days_with_real_playtime():

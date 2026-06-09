@@ -196,6 +196,51 @@ async def test_render_status_falls_back_to_text_when_template_fails(
     assert result.fallback_text == format_status_text(_status())
 
 
+
+@pytest.mark.asyncio
+async def test_render_status_passes_count_trend_payload(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured_payload = {}
+
+    async def fake_render_template(_path, payload, **_kwargs):
+        captured_payload.update(payload)
+        return b"image"
+
+    monkeypatch.setattr(renderer, "_render_template", fake_render_template)
+    monkeypatch.setattr(
+        renderer,
+        "_get_settings",
+        lambda: SimpleNamespace(render_enabled=True, max_chart_points=2),
+    )
+    trend = ChartData(
+        title="主服 过去24h 在线人数",
+        range_label="24h",
+        range_start=datetime(2026, 5, 15, 12, 0, 0),
+        range_end=datetime(2026, 5, 16, 12, 0, 0),
+        range_end_is_current=True,
+        points=[
+            SamplePoint(datetime(2026, 5, 15, 12, 0, 0), 1),
+            SamplePoint(datetime(2026, 5, 16, 0, 0, 0), 3),
+            SamplePoint(datetime(2026, 5, 16, 12, 0, 0), 2),
+        ],
+    )
+
+    result = await render_status(_status(), trend)
+
+    assert result.image == b"image"
+    assert captured_payload["count_trend"]["sample_count"] == 3
+    assert captured_payload["count_trend"]["labels"] == [
+        "05-15 12:00",
+        "05-16 12:00",
+    ]
+    assert captured_payload["count_trend"]["counts"] == [1, 2]
+    assert captured_payload["count_trend"]["series_points"] == [
+        [int(trend.points[0].captured_at.timestamp() * 1000), 1],
+        [int(trend.points[-1].captured_at.timestamp() * 1000), 2],
+    ]
+
+
 @pytest.mark.asyncio
 async def test_render_personal_online_falls_back_to_text_when_template_fails(
     monkeypatch: pytest.MonkeyPatch,
@@ -219,6 +264,83 @@ async def test_render_personal_online_falls_back_to_text_when_template_fails(
 
     assert result.image is None
     assert result.fallback_text == format_personal_online_text(data)
+
+
+
+@pytest.mark.asyncio
+async def test_render_personal_online_keeps_zero_chart_without_segments(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured_payload = {}
+
+    async def fake_render_template(_path, payload, **_kwargs):
+        captured_payload.update(payload)
+        return b"image"
+
+    monkeypatch.setattr(renderer, "_render_template", fake_render_template)
+    monkeypatch.setattr(
+        renderer,
+        "_get_settings",
+        lambda: SimpleNamespace(render_enabled=True),
+    )
+    data = _personal_online_data()
+    empty = PersonalOnlineData(
+        title="主服 7d 个人在线情况",
+        range_label="7d",
+        range_start=data.range_start,
+        range_end=data.range_end,
+        range_end_is_current=True,
+        qq_id="10000",
+        chart_points=[
+            OnlineDurationPoint(label="05-15", seconds=0),
+            OnlineDurationPoint(label="05-16", seconds=0),
+        ],
+        chart_granularity="daily",
+    )
+
+    result = await render_personal_online(empty)
+
+    assert result.image == b"image"
+    assert captured_payload["has_chart"] is True
+    assert captured_payload["has_online"] is False
+    assert captured_payload["chart_values"] == [0, 0]
+    assert captured_payload["chart_axis_label_rotate"] == 45
+    assert captured_payload["chart_axis_label_font_size"] == 10
+    assert captured_payload["chart_grid_bottom"] == 68
+
+
+
+def test_time_axis_templates_rotate_bottom_labels():
+    chart_template = (renderer._TEMPLATE_DIR / "chart_card.html").read_text(
+        encoding="utf-8"
+    )
+    status_template = (renderer._TEMPLATE_DIR / "status_card.html").read_text(
+        encoding="utf-8"
+    )
+    personal_template = (
+        renderer._TEMPLATE_DIR / "personal_online_card.html"
+    ).read_text(encoding="utf-8")
+
+    assert "rotate: 45" in chart_template
+    assert "bottom: 68" in chart_template
+    assert 'type: "time"' in chart_template
+    assert "series_points" in chart_template
+    assert "rotate: 45" in status_template
+    assert "bottom: 68" in status_template
+    assert 'type: "time"' in status_template
+    assert "series_points" in status_template
+    assert "rotate: {{ chart_axis_label_rotate }}" in personal_template
+    assert 'type: "category"' in personal_template
+    assert 'align: "right"' in personal_template
+    assert "alignWithLabel: true" in chart_template
+    assert "alignWithLabel: true" in status_template
+    assert "alignWithLabel: true" in personal_template
+    assert "length: 6" in chart_template
+    assert "length: 6" in status_template
+    assert "length: 6" in personal_template
+    assert "inside: true" in chart_template
+    assert "inside: true" in status_template
+    assert "inside: true" in personal_template
 
 
 @pytest.mark.asyncio
@@ -260,6 +382,14 @@ async def test_render_chart_summary_uses_full_points_after_downsample(
     assert captured_payload["sample_count"] == 5
     assert captured_payload["counts"][0] == 1
     assert captured_payload["counts"][-1] == 4
+    assert captured_payload["series_points"][0] == [
+        int(points[0].captured_at.timestamp() * 1000),
+        1,
+    ]
+    assert captured_payload["series_points"][-1] == [
+        int(points[-1].captured_at.timestamp() * 1000),
+        4,
+    ]
     rendered_counts = [point["count"] for point in captured_payload["points"]]
     assert rendered_counts[0] == 1
     assert rendered_counts[-1] == 4
@@ -334,4 +464,7 @@ async def test_render_personal_online_passes_chart_payload_without_segments(
     assert captured_payload["chart_labels"] == ["05-16 10:00", "05-16 11:00"]
     assert captured_payload["chart_values"] == [3600, 1800]
     assert captured_payload["chart_durations"] == ["1小时00分", "30分钟"]
+    assert captured_payload["chart_axis_label_rotate"] == 55
+    assert captured_payload["chart_axis_label_font_size"] == 9
+    assert captured_payload["chart_grid_bottom"] == 76
     assert "segment_rows" not in captured_payload

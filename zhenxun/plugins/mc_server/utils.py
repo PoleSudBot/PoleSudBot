@@ -17,6 +17,13 @@ _IPV6_PATTERN = re.compile(r"^\[([0-9A-Fa-f:.]+)](?::(\d+))?$")
 _DATE_RANGE_PATTERN = re.compile(
     r"^(?P<start>\d{4}-\d{2}-\d{2})(?:\.\.(?P<end>\d{4}-\d{2}-\d{2}))?$"
 )
+_RELATIVE_RANGE_PATTERN = re.compile(r"^(?P<amount>\d+)(?P<unit>[hdmy])$")
+_RELATIVE_UNIT_DURATIONS = {
+    "h": timedelta(hours=1),
+    "d": timedelta(days=1),
+    "m": timedelta(days=30),
+    "y": timedelta(days=365),
+}
 _RCON_LIST_COUNT_PATTERN = re.compile(
     r"There are (?P<online>\d+) of a max of (?P<max>\d+) players online",
     re.IGNORECASE,
@@ -201,6 +208,22 @@ def business_today_range(value: datetime | None = None) -> TimeRange:
     return TimeRange("今日", start, end, end_is_current=True)
 
 
+def relative_time_range(raw: str, *, now: datetime | None = None) -> TimeRange:
+    current = normalize_datetime(now) or now_local()
+    text = raw.strip().lower()
+    match = _RELATIVE_RANGE_PATTERN.match(text)
+    if not match:
+        raise ValueError("滚动时间范围格式应为正整数+h/d/m/y，例如 24h 或 7d")
+    amount = int(match.group("amount"))
+    if amount <= 0:
+        raise ValueError("滚动时间范围必须大于 0")
+
+    # 滚动范围按真实时间回退，不走 06:00 业务日，避免 24h/3d 被业务边界拉长或缩短。
+    unit = match.group("unit")
+    duration = _RELATIVE_UNIT_DURATIONS[unit] * amount
+    return TimeRange(text, current - duration, current, True, bucket_mode="rolling")
+
+
 def business_day_count(range_start: datetime, range_end: datetime) -> int:
     start = business_day_start(range_start)
     end = normalize_datetime(range_end) or now_local()
@@ -261,7 +284,11 @@ def should_show_today_online(
 def is_time_range_word(raw: str) -> bool:
     text = raw.strip()
     normalized = text.lower()
-    return normalized in TIME_RANGE_WORDS or bool(_DATE_RANGE_PATTERN.match(normalized))
+    return (
+        normalized in TIME_RANGE_WORDS
+        or bool(_DATE_RANGE_PATTERN.match(normalized))
+        or bool(_RELATIVE_RANGE_PATTERN.match(normalized))
+    )
 
 
 def _month_start(target_date: date) -> date:
@@ -284,6 +311,10 @@ def parse_time_range(
     business_date = business_anchor.date()
     week_start_date = business_date - timedelta(days=business_date.weekday())
     month_start_date = _month_start(business_date)
+
+    relative_match = _RELATIVE_RANGE_PATTERN.match(text)
+    if relative_match:
+        return relative_time_range(text, now=current)
 
     # 所有预设统计范围都按 06:00 业务边界切分，避免 mct/mcc 对“今日”等词各算各的。
     if text in {"", "本周目", "周目", "season"}:
@@ -319,7 +350,7 @@ def parse_time_range(
     if not match:
         raise ValueError(
             "时间范围支持 今日/昨日/本周/上周/本月/上月/本周目/"
-            "YYYY-MM-DD/YYYY-MM-DD..YYYY-MM-DD"
+            "24h/7d/1m/1y/YYYY-MM-DD/YYYY-MM-DD..YYYY-MM-DD"
         )
 
     start_date = date.fromisoformat(match.group("start"))

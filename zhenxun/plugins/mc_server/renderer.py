@@ -113,6 +113,41 @@ def chart_summary(points: list) -> tuple[int, float]:
     return peak, avg
 
 
+def _timestamp_ms(point_time) -> int:
+    # 时间轴按真实采样时间定位，传毫秒时间戳可避免 category 轴把稀疏采样均分。
+    return int(point_time.timestamp() * 1000)
+
+
+def _chart_payload(data: ChartData, max_points: int) -> dict:
+    points = downsample_points(data.points, max_points)
+    return {
+        "sample_count": len(data.points),
+        "labels": [point.captured_at.strftime("%m-%d %H:%M") for point in points],
+        "counts": [point.online_count for point in points],
+        "series_points": [
+            [_timestamp_ms(point.captured_at), point.online_count] for point in points
+        ],
+        "points": [
+            {
+                "timestamp": _timestamp_ms(point.captured_at),
+                "tooltip": point.captured_at.strftime("%m-%d %H:%M"),
+                "count": point.online_count,
+            }
+            for point in points
+        ],
+        "title": data.title,
+        "range_label": data.range_label,
+        "range_hint": _range_hint(
+            data.range_label,
+            data.range_start,
+            data.range_end,
+            end_is_current=data.range_end_is_current,
+        )
+        if data.range_start and data.range_end
+        else data.range_label,
+    }
+
+
 def _format_point_label(index: int, total: int, label: str) -> str:
     if total <= 1 or index in {0, total - 1}:
         return label
@@ -168,9 +203,13 @@ def format_personal_online_text(data: PersonalOnlineData) -> str:
     return "\n".join(lines)
 
 
-async def render_status(status: ServerStatus) -> RenderedMessage:
+async def render_status(
+    status: ServerStatus,
+    count_trend: ChartData | None = None,
+) -> RenderedMessage:
     fallback = format_status_text(status)
-    if not _get_settings().render_enabled:
+    settings = _get_settings()
+    if not settings.render_enabled:
         return RenderedMessage(image=None, fallback_text=fallback)
     try:
         return RenderedMessage(
@@ -193,8 +232,14 @@ async def render_status(status: ServerStatus) -> RenderedMessage:
                         }
                         for player in status.players
                     ],
+                    "count_trend": _chart_payload(
+                        count_trend,
+                        getattr(settings, "max_chart_points", 80),
+                    )
+                    if count_trend
+                    else None,
                 },
-                viewport_width=760,
+                viewport_width=820,
             ),
             fallback_text=fallback,
         )
@@ -250,36 +295,12 @@ async def render_chart(data: ChartData) -> RenderedMessage:
     if not settings.render_enabled:
         return RenderedMessage(image=None, fallback_text=fallback)
     max_points = settings.max_chart_points
-    points = downsample_points(data.points, max_points)
+    chart_payload = _chart_payload(data, max_points)
     try:
         return RenderedMessage(
             image=await _render_template(
                 _CHART_TEMPLATE,
-                {
-                    "title": data.title,
-                    "range_label": data.range_label,
-                    "range_hint": _range_hint(
-                        data.range_label,
-                        data.range_start,
-                        data.range_end,
-                        end_is_current=data.range_end_is_current,
-                    )
-                    if data.range_start and data.range_end
-                    else data.range_label,
-                    "sample_count": len(data.points),
-                    "labels": [
-                        point.captured_at.strftime("%m-%d %H:%M")
-                        for point in points
-                    ],
-                    "counts": [point.online_count for point in points],
-                    "points": [
-                        {
-                            "tooltip": point.captured_at.strftime("%m-%d %H:%M"),
-                            "count": point.online_count,
-                        }
-                        for point in points
-                    ],
-                },
+                chart_payload,
                 viewport_width=820,
             ),
             fallback_text=fallback,
@@ -295,6 +316,7 @@ async def render_personal_online(data: PersonalOnlineData) -> RenderedMessage:
         return RenderedMessage(image=None, fallback_text=fallback)
     chart_points = data.chart_points or data.daily_points
     chart_seconds = [point.seconds for point in chart_points]
+    is_hourly = data.chart_granularity == "hourly"
     try:
         return RenderedMessage(
             image=await _render_template(
@@ -322,7 +344,11 @@ async def render_personal_online(data: PersonalOnlineData) -> RenderedMessage:
                     "chart_granularity_label": "小时级"
                     if data.chart_granularity == "hourly"
                     else "每日",
+                    "has_chart": bool(chart_points),
                     "has_online": bool(data.segments),
+                    "chart_axis_label_rotate": 55 if is_hourly else 45,
+                    "chart_axis_label_font_size": 9 if is_hourly else 10,
+                    "chart_grid_bottom": 76 if is_hourly else 68,
                     "chart_labels": [point.label for point in chart_points],
                     "chart_values": chart_seconds,
                     "chart_durations": [
