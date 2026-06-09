@@ -5,6 +5,7 @@ import hashlib
 
 from tortoise.expressions import Q
 
+from .config import get_settings
 from .models import (
     McChatDedup,
     McLogCursor,
@@ -17,10 +18,11 @@ from .models import (
     McServerGroupBinding,
 )
 from .stats import (
+    active_business_day_count,
+    active_business_day_labels,
     aggregate_daily_online_points,
     aggregate_hourly_online_points,
     aggregate_playtime,
-    average_business_day_count,
     clip_online_segment,
     overlap_seconds,
 )
@@ -264,14 +266,22 @@ async def end_session(
         return None
     session.ended_at = occurred_at
     await session.save(update_fields=["ended_at", "updated_at"])
+    if await _delete_short_session(session):
+        return None
     return session
 
 
 async def close_active_sessions(server: McServer, *, occurred_at: datetime) -> int:
-    return await McOnlineSession.filter(
+    sessions = await McOnlineSession.filter(
         server=server,
         ended_at__isnull=True,
-    ).update(ended_at=occurred_at, updated_at=now_local())
+    ).all()
+    for session in sessions:
+        # 批量截断同样要走短段清理，避免重启或状态观测留下统计噪声。
+        session.ended_at = occurred_at
+        await session.save(update_fields=["ended_at", "updated_at"])
+        await _delete_short_session(session)
+    return len(sessions)
 
 
 async def list_active_sessions(server: McServer) -> list[McOnlineSession]:
@@ -319,6 +329,8 @@ async def get_playtime_entries(
 
     rows = []
     for session in sessions:
+        if _should_ignore_short_session(session):
+            continue
         # 将会话裁剪到查询窗口内，避免跨天/跨周目的长会话把范围外时长算进去。
         segment = clip_online_segment(
             session.started_at,
@@ -333,6 +345,11 @@ async def get_playtime_entries(
                 player_name=session.player_name,
                 qq_id=session.qq_id,
                 seconds=segment.seconds,
+                active_day_labels=active_business_day_labels(
+                    [segment],
+                    time_range.start,
+                    time_range.end,
+                ),
                 first_seen_at=first_seen_by_name.get(session.player_name.lower()),
                 last_seen_at=segment.ended_at,
             )
@@ -350,13 +367,9 @@ async def get_playtime_entries(
             player_name=entry.player_name,
             qq_id=entry.qq_id,
             seconds=entry.seconds,
-            average_seconds=entry.seconds
-            // average_business_day_count(
-                time_range,
-                entry.first_seen_at,
-                entry.last_seen_at,
-            ),
+            average_seconds=entry.seconds // max(entry.active_day_count, 1),
             today_seconds=today_seconds_by_name.get(entry.player_name.lower(), 0),
+            active_day_count=entry.active_day_count,
             first_seen_at=entry.first_seen_at,
             last_seen_at=entry.last_seen_at,
         )
@@ -377,6 +390,8 @@ async def get_total_online_seconds_by_player_names(
     for session in await (
         McOnlineSession.filter(server=server).filter(query_filter).all()
     ):
+        if _should_ignore_short_session(session):
+            continue
         # 进行中的 session 按当前时间截断，状态卡才能展示实时累计在线。
         seconds = overlap_seconds(
             session.started_at,
@@ -417,7 +432,6 @@ async def get_personal_online_data(
     if player_names:
         target_filter |= _player_name_filter(player_names)
 
-    first_seen_at = await _first_seen_for_filter(server, target_filter)
     sessions = await query.filter(target_filter).order_by("started_at").all()
     segments = _segments_from_sessions(sessions, time_range)
     for session in sessions:
@@ -435,7 +449,6 @@ async def get_personal_online_data(
         player_names=player_names,
         segments=segments,
         time_range=time_range,
-        first_seen_at=first_seen_at,
     )
 
 
@@ -461,7 +474,6 @@ async def get_personal_online_data_by_player_name(
     if not exists:
         raise ValueError(f"未找到玩家在线记录：{target_name}")
 
-    first_seen_at = await _first_seen_for_filter(server, name_filter)
     sessions = await (
         _online_sessions_in_range(server, time_range)
         .filter(name_filter)
@@ -483,7 +495,6 @@ async def get_personal_online_data_by_player_name(
         player_names=player_names,
         segments=segments,
         time_range=time_range,
-        first_seen_at=first_seen_at,
     )
 
 
@@ -515,6 +526,8 @@ def _segments_from_sessions(
 ) -> list[PersonalOnlineSegment]:
     segments = []
     for session in sessions:
+        if _should_ignore_short_session(session):
+            continue
         segment = clip_online_segment(
             session.started_at,
             session.ended_at,
@@ -537,7 +550,6 @@ def _build_personal_online_data(
     player_names: list[str],
     segments: list[PersonalOnlineSegment],
     time_range: TimeRange,
-    first_seen_at: datetime | None,
 ) -> PersonalOnlineData:
     total_seconds = sum(segment.seconds for segment in segments)
     daily_points = aggregate_daily_online_points(segments, range_start, range_end)
@@ -564,8 +576,6 @@ def _build_personal_online_data(
         if show_today_online
         else 0
     )
-    # 个人日均只平均到本范围内最后一次在线日；仍在线的 segment 已被裁剪到查询结束。
-    last_seen_at = max((segment.ended_at for segment in segments), default=None)
     return PersonalOnlineData(
         title=title,
         range_label=range_label,
@@ -580,7 +590,7 @@ def _build_personal_online_data(
         chart_granularity=chart_granularity,
         total_seconds=total_seconds,
         average_seconds=total_seconds
-        // average_business_day_count(time_range, first_seen_at, last_seen_at),
+        // max(active_business_day_count(segments, range_start, range_end), 1),
         today_seconds=today_seconds,
         show_today_online=show_today_online,
     )
@@ -600,6 +610,8 @@ async def _playtime_seconds_by_player_names(
         server,
         time_range,
     ).filter(query_filter).all():
+        if _should_ignore_short_session(session):
+            continue
         # 今日在线同样按查询窗口裁剪，确保进行中和跨日 session 与总时长口径一致。
         segment = clip_online_segment(
             session.started_at,
@@ -635,22 +647,37 @@ async def _first_seen_by_player_names(
     return result
 
 
-async def _first_seen_for_filter(server: McServer, query_filter: Q) -> datetime | None:
-    session = (
-        await McOnlineSession.filter(server=server)
-        .filter(query_filter)
-        .order_by("started_at")
-        .first()
-    )
-    return normalize_datetime(session.started_at) if session else None
-
-
 def _player_name_filter(player_names: list[str]) -> Q:
     names = _unique_non_empty(player_names)
     query_filter = Q(player_name__iexact=names[0])
     for name in names[1:]:
         query_filter |= Q(player_name__iexact=name)
     return query_filter
+
+
+def _session_seconds(session: McOnlineSession, ended_at: datetime | None = None) -> int:
+    started = normalize_datetime(session.started_at)
+    ended = normalize_datetime(ended_at or session.ended_at)
+    if not started or not ended or ended <= started:
+        return 0
+    return int((ended - started).total_seconds())
+
+
+def _should_ignore_short_session(session: McOnlineSession) -> bool:
+    if not session.ended_at:
+        return False
+    threshold = get_settings().min_online_session_seconds
+    if threshold <= 0:
+        return False
+    return _session_seconds(session) < threshold
+
+
+async def _delete_short_session(session: McOnlineSession) -> bool:
+    if not _should_ignore_short_session(session):
+        return False
+    # 低于阈值的闭合段视为误触/闪退噪声，直接移出统计本体。
+    await session.delete()
+    return True
 
 
 async def get_or_init_cursor(server: McServer, path: str, *, size: int) -> McLogCursor:

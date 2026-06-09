@@ -93,6 +93,7 @@ class PlaytimeEntry:
     qq_id: str = ""
     average_seconds: int = 0
     today_seconds: int = 0
+    active_day_count: int = 0
     first_seen_at: datetime | None = None
     last_seen_at: datetime | None = None
 
@@ -102,6 +103,7 @@ class PlaytimeRow:
     player_name: str
     qq_id: str
     seconds: int
+    active_day_labels: set[str] = field(default_factory=set)
     first_seen_at: datetime | None = None
     last_seen_at: datetime | None = None
 

@@ -80,14 +80,18 @@ def aggregate_playtime(rows: list[PlaytimeRow]) -> list[PlaytimeEntry]:
                 "player_name": player_name,
                 "qq_id": row.qq_id,
                 "seconds": 0,
+                "active_day_labels": set(),
                 "first_seen_at": first_seen_at,
                 "last_seen_at": last_seen_at,
             },
         )
         item["seconds"] = int(item["seconds"]) + row.seconds
+        active_day_labels = item["active_day_labels"]
+        if isinstance(active_day_labels, set):
+            active_day_labels.update(row.active_day_labels)
         if row.qq_id and not item["qq_id"]:
             item["qq_id"] = row.qq_id
-        # 同一 MC 名在绑定前后可能有不同 qq_id，日均口径要合并最早和最晚可观测在线点。
+        # 同一 MC 名在绑定前后可能有不同 qq_id，展示仍保留最早和最晚可观测在线点。
         if first_seen_at:
             current_first_seen = normalize_datetime(item["first_seen_at"])
             if current_first_seen is None or first_seen_at < current_first_seen:
@@ -101,6 +105,9 @@ def aggregate_playtime(rows: list[PlaytimeRow]) -> list[PlaytimeEntry]:
             player_name=str(item["player_name"]),
             qq_id=str(item["qq_id"]),
             seconds=int(item["seconds"]),
+            active_day_count=len(item["active_day_labels"])
+            if isinstance(item["active_day_labels"], set)
+            else 0,
             first_seen_at=item["first_seen_at"],
             last_seen_at=item["last_seen_at"],
         )
@@ -108,6 +115,36 @@ def aggregate_playtime(rows: list[PlaytimeRow]) -> list[PlaytimeEntry]:
         if int(item["seconds"]) > 0
     ]
     return sorted(entries, key=lambda item: (-item.seconds, item.player_name.lower()))
+
+
+def active_business_day_labels(
+    segments: list[PersonalOnlineSegment],
+    range_start: datetime,
+    range_end: datetime,
+) -> set[str]:
+    labels: set[str] = set()
+    for day_range in iter_business_days(range_start, range_end):
+        # 有效日只看当天是否存在真实在线秒数，不用首次/最后在线跨度填充分母。
+        seconds = sum(
+            overlap_seconds(
+                segment.started_at,
+                segment.ended_at,
+                day_range.start,
+                day_range.end,
+            )
+            for segment in segments
+        )
+        if seconds > 0:
+            labels.add(day_range.label)
+    return labels
+
+
+def active_business_day_count(
+    segments: list[PersonalOnlineSegment],
+    range_start: datetime,
+    range_end: datetime,
+) -> int:
+    return len(active_business_day_labels(segments, range_start, range_end))
 
 
 def average_business_day_count(

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from zhenxun.plugins.mc_server.stats import (
+    active_business_day_count,
     aggregate_hourly_online_points,
     aggregate_playtime,
     aggregate_sample_points,
@@ -96,6 +97,29 @@ def test_aggregate_playtime_sums_same_player_and_sorts_desc():
     assert entries[1].last_seen_at == last_seen
 
 
+def test_aggregate_playtime_merges_active_days_for_average_denominator():
+    rows = [
+        PlaytimeRow(
+            player_name="Steve",
+            qq_id="",
+            seconds=3600,
+            active_day_labels={"06-01"},
+        ),
+        PlaytimeRow(
+            player_name="steve",
+            qq_id="10000",
+            seconds=7200,
+            active_day_labels={"06-03"},
+        ),
+    ]
+
+    entries = aggregate_playtime(rows)
+
+    assert len(entries) == 1
+    assert entries[0].seconds == 10800
+    assert entries[0].active_day_count == 2
+
+
 def test_aggregate_playtime_merges_same_player_across_qq_changes():
     last_seen = datetime(2026, 5, 18, 20, 0, 0, tzinfo=MC_TIMEZONE)
     rows = [
@@ -154,6 +178,29 @@ def test_aggregate_hourly_online_points_keeps_short_range_precision():
         ("05-16 07:00", 3600),
         ("05-16 08:00", 900),
     ]
+
+
+def test_active_business_day_count_uses_only_days_with_real_playtime():
+    range_start = datetime(2026, 6, 1, 6, 0, 0, tzinfo=MC_TIMEZONE)
+    range_end = datetime(2026, 6, 8, 6, 0, 0, tzinfo=MC_TIMEZONE)
+    segments = [
+        clip_online_segment(
+            datetime(2026, 6, 1, 10, 0, 0, tzinfo=MC_TIMEZONE),
+            datetime(2026, 6, 1, 12, 0, 0, tzinfo=MC_TIMEZONE),
+            range_start,
+            range_end,
+        ),
+        clip_online_segment(
+            datetime(2026, 6, 3, 20, 0, 0, tzinfo=MC_TIMEZONE),
+            datetime(2026, 6, 3, 22, 0, 0, tzinfo=MC_TIMEZONE),
+            range_start,
+            range_end,
+        ),
+    ]
+
+    valid_segments = [item for item in segments if item]
+
+    assert active_business_day_count(valid_segments, range_start, range_end) == 2
 
 
 def test_average_business_day_count_stops_at_last_seen_day():

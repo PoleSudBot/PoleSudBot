@@ -546,6 +546,47 @@ async def test_handle_log_event_delays_leave_notice_and_uses_original_time(
 
 
 @pytest.mark.asyncio
+async def test_handle_log_event_omits_duration_when_short_session_is_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    left_at = datetime(2026, 5, 16, 20, 1, 0)
+    server = SimpleNamespace(id=1, group_id="123456")
+    binding = _FakeBinding()
+    binding.join_notify_enabled = True
+    event = SimpleNamespace(type="leave", player_name="Steve", occurred_at=left_at)
+    notices = []
+    service = McServerService()
+
+    async def fake_end_session(_server, _player_name: str, *, occurred_at):
+        _ = occurred_at
+        return None
+
+    async def fake_list_server_group_bindings(_server):
+        return [binding]
+
+    async def fake_send_notice_to_group(group_id: str, message: str):
+        notices.append((group_id, message))
+
+    monkeypatch.setattr(
+        mc_services,
+        "get_settings",
+        lambda: SimpleNamespace(rejoin_suppress_seconds=0.01),
+    )
+    monkeypatch.setattr(mc_services, "end_session", fake_end_session)
+    monkeypatch.setattr(
+        mc_services,
+        "list_server_group_bindings",
+        fake_list_server_group_bindings,
+    )
+    monkeypatch.setattr(service, "_send_notice_to_group", fake_send_notice_to_group)
+
+    await service._handle_log_event(server, event)
+    await asyncio.sleep(0.02)
+
+    assert notices == [("123456", "Steve 离开了游戏")]
+
+
+@pytest.mark.asyncio
 async def test_handle_log_event_suppresses_short_rejoin_and_keeps_session(
     monkeypatch: pytest.MonkeyPatch,
 ):
