@@ -27,6 +27,16 @@ from zhenxun.plugins.moesekai.providers.suite import (
 )
 from zhenxun.plugins.moesekai.screenshot import ScreenshotError
 
+FUTURE_RELEASE_AT_MS = 4_102_444_800_000
+PAST_RELEASE_AT_MS = 1_700_000_000_000
+
+
+def _auto_card(
+    card_id: int,
+    release_at: object = FUTURE_RELEASE_AT_MS,
+) -> dict[str, object]:
+    return {"id": card_id, "releaseAt": release_at}
+
 
 @pytest.mark.asyncio
 async def test_handle_update_uses_default_server(monkeypatch: pytest.MonkeyPatch):
@@ -2001,7 +2011,7 @@ async def test_dispatch_new_card_notifications_replays_pending_snapshot_without_
             base_key: {
                 "current_revision": base_key,
                 "current_version": None,
-                "cards": [{"id": 100}],
+                "cards": [_auto_card(100)],
                 "stamps": [],
             }
         }
@@ -2088,7 +2098,7 @@ async def test_dispatch_new_card_notifications_keeps_pending_snapshot_after_fail
         updated=True,
         download_success=True,
         current_revision=base_key,
-        added_records={"cards": [{"id": 100}], "stamps": []},
+        added_records={"cards": [_auto_card(100)], "stamps": []},
     )
     pending_payload: dict[str, dict[str, dict[str, object]]] = {}
     replay_round = {"value": 0}
@@ -2159,7 +2169,7 @@ async def test_dispatch_new_card_notifications_keeps_pending_snapshot_after_fail
             base_key: {
                 "current_revision": base_key,
                 "current_version": None,
-                "cards": [{"id": 100}],
+                "cards": [_auto_card(100)],
                 "stamps": [],
             }
         }
@@ -2171,6 +2181,165 @@ async def test_dispatch_new_card_notifications_keeps_pending_snapshot_after_fail
         results=[],
     )
 
+    assert pending_payload == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cards",
+    [
+        [_auto_card(100, PAST_RELEASE_AT_MS)],
+        [_auto_card(100, PAST_RELEASE_AT_MS), _auto_card(101, FUTURE_RELEASE_AT_MS)],
+        [_auto_card(100, "invalid")],
+        [_auto_card(100, 0)],
+        [{"id": 100}],
+    ],
+)
+async def test_dispatch_new_card_notifications_drops_stale_pending_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    cards: list[dict[str, object]],
+):
+    base_key = "rev-expired"
+    pending_payload = {
+        "jp": {
+            base_key: {
+                "current_revision": base_key,
+                "current_version": None,
+                "cards": cards,
+                "stamps": [{"id": 200}],
+            }
+        }
+    }
+
+    class DummyPendingStore:
+        def load(self, default):
+            return copy.deepcopy(pending_payload or default)
+
+        def save(self, payload):
+            pending_payload.clear()
+            pending_payload.update(copy.deepcopy(payload))
+
+    async def fail_toggles(**_kwargs):
+        raise AssertionError("releaseAt 校验失败时不应继续加载群开关")
+
+    monkeypatch.setattr(service_module, "_NEW_CARD_PENDING_STATE", DummyPendingStore())
+    monkeypatch.setattr(
+        service_module,
+        "list_enabled_group_feature_toggles",
+        fail_toggles,
+    )
+
+    await service_module.moesekai_app.dispatch_new_card_notifications(
+        bot=SimpleNamespace(),
+        results=[],
+    )
+
+    assert pending_payload == {}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_new_card_notifications_sends_stamps_with_unreleased_card_batch(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    base_key = "rev-stamp"
+    summary_key = f"{base_key}:summary"
+    card_key = f"{base_key}:card:100"
+    stamp_key = f"{base_key}:stamp:200"
+    result = service_module.RegionUpdateResult(
+        server="jp",
+        updated=True,
+        download_success=True,
+        current_revision=base_key,
+        added_records={
+            "cards": [_auto_card(100)],
+            "stamps": [{"id": 200}],
+        },
+    )
+    pending_payload: dict[str, dict[str, dict[str, object]]] = {}
+
+    class DummyPendingStore:
+        def load(self, default):
+            return copy.deepcopy(pending_payload or default)
+
+        def save(self, payload):
+            pending_payload.clear()
+            pending_payload.update(copy.deepcopy(payload))
+
+    async def fake_toggles(*, feature_name: str, server: str):
+        assert feature_name == service_module.FEATURE_NEW_CARD_REMINDER
+        assert server == "jp"
+        return [SimpleNamespace(platform="qq", group_id="group-a")]
+
+    async def fake_sent_keys(**_kwargs):
+        return {("qq", "group-a"): set()}
+
+    async def fake_batches(*, server: str, specs):
+        assert server == "jp"
+        assert [spec.key for spec in specs] == [summary_key, card_key, stamp_key]
+        yield [
+            service_module._NewCardReminderPreparedItem(
+                key=summary_key,
+                kind="summary",
+                message="summary",
+                estimated_bytes=1,
+            ),
+            service_module._NewCardReminderPreparedItem(
+                key=card_key,
+                kind="card",
+                message="card",
+                estimated_bytes=1,
+            ),
+            service_module._NewCardReminderPreparedItem(
+                key=stamp_key,
+                kind="stamp",
+                message="stamp",
+                estimated_bytes=1,
+            ),
+        ]
+
+    plain_calls: list[list[str]] = []
+
+    async def fake_send_plain_items(
+        *,
+        bot,
+        server: str,
+        revision: str | None,
+        target_state,
+        items,
+        batch_index: int,
+        mark_sent: bool = True,
+    ):
+        plain_calls.append([item.key for item in items])
+        target_state.pending_keys.difference_update(item.key for item in items)
+
+    monkeypatch.setattr(service_module, "_NEW_CARD_PENDING_STATE", DummyPendingStore())
+    monkeypatch.setattr(
+        service_module,
+        "list_enabled_group_feature_toggles",
+        fake_toggles,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "list_notification_record_keys_by_groups",
+        fake_sent_keys,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_iter_new_card_batches",
+        fake_batches,
+    )
+    monkeypatch.setattr(
+        service_module.moesekai_app,
+        "_send_new_card_plain_items",
+        fake_send_plain_items,
+    )
+
+    await service_module.moesekai_app.dispatch_new_card_notifications(
+        bot=SimpleNamespace(),
+        results=[result],
+    )
+
+    assert plain_calls == [[summary_key], [card_key], [stamp_key]]
     assert pending_payload == {}
 
 
@@ -2614,7 +2783,7 @@ async def test_dispatch_new_card_notifications_filters_pending_keys_per_group(
         updated=True,
         download_success=True,
         current_revision=base_key,
-        added_records={"cards": [{"id": 100}], "stamps": []},
+        added_records={"cards": [_auto_card(100)], "stamps": []},
     )
     pending_payload: dict[str, dict[str, dict[str, object]]] = {}
 
@@ -2721,7 +2890,7 @@ async def test_dispatch_new_card_notifications_failed_group_does_not_block_other
         updated=True,
         download_success=True,
         current_revision=base_key,
-        added_records={"cards": [{"id": 100}, {"id": 101}], "stamps": []},
+        added_records={"cards": [_auto_card(100), _auto_card(101)], "stamps": []},
     )
     pending_payload: dict[str, dict[str, dict[str, object]]] = {}
 

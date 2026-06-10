@@ -1273,6 +1273,46 @@ class MoeSekaiApplication:
     def _new_card_stamp_record_key(self, base_key: str, stamp_id: int | str) -> str:
         return f"{base_key}:stamp:{stamp_id}"
 
+    @staticmethod
+    def _new_card_release_at_ms(card: dict[str, Any]) -> int | None:
+        try:
+            release_at = int(card.get("releaseAt") or 0)
+        except (TypeError, ValueError):
+            return None
+        return release_at if release_at > 0 else None
+
+    def _new_card_unreleased_batch_skip_reason(
+        self,
+        cards: list[dict[str, Any]],
+        *,
+        now_ms: int,
+    ) -> str | None:
+        if not cards:
+            return "no_cards"
+
+        invalid_count = 0
+        released_count = 0
+        earliest_release_at: int | None = None
+        for card in cards:
+            release_at = self._new_card_release_at_ms(card)
+            if release_at is None:
+                invalid_count += 1
+                continue
+            if earliest_release_at is None or release_at < earliest_release_at:
+                earliest_release_at = release_at
+            if release_at <= now_ms:
+                released_count += 1
+
+        if invalid_count or released_count:
+            # 自动提醒只服务“未上线前预览”语义；任一卡牌过期或无法确认时，
+            # 都放弃整个 revision，避免未来生日卡把已上线活动卡批次重新补发出来。
+            return (
+                f"invalid_release_at={invalid_count} "
+                f"released_cards={released_count} "
+                f"earliest_release_at={earliest_release_at or '-'}"
+            )
+        return None
+
     def _normalize_new_card_pending_state(self, payload: Any) -> dict[str, dict[str, dict[str, Any]]]:
         if not isinstance(payload, dict):
             return {}
@@ -2369,6 +2409,30 @@ class MoeSekaiApplication:
                 version=result.current_version,
             )
             if not cards and not stamps:
+                self._delete_new_card_pending_snapshot(
+                    pending_state,
+                    server=result.server,
+                    base_key=base_key,
+                )
+                continue
+
+            skip_reason = self._new_card_unreleased_batch_skip_reason(
+                cards,
+                now_ms=int(time.time() * 1000),
+            )
+            if skip_reason:
+                # 表情提醒没有独立时效，始终随同批新卡；新卡批次已过期时清掉 pending，
+                # 防止 Bot 恢复或风控解除后继续补发已经失去意义的抽卡提醒。
+                logger.info(
+                    (
+                        f"MoeSekai 新卡提醒跳过：{server_label(result.server)} "
+                        f"releaseAt 校验未通过 reason={skip_reason} "
+                        f"cards={len(cards)} stamps={len(stamps)} "
+                        f"version={result.current_version or '-'} "
+                        f"revision={result.current_revision or '-'}"
+                    ),
+                    MODULE_NAME,
+                )
                 self._delete_new_card_pending_snapshot(
                     pending_state,
                     server=result.server,
