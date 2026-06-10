@@ -55,6 +55,17 @@ render_personal_online = renderer.render_personal_online
 render_status = renderer.render_status
 
 
+@pytest.fixture(autouse=True)
+def _stub_player_heads(monkeypatch: pytest.MonkeyPatch):
+    async def fake_player_head_uri_map(players):
+        return {
+            player.name.lower(): f"head://{player.name.lower()}"
+            for player in players
+        }
+
+    monkeypatch.setattr(renderer, "_player_head_uri_map", fake_player_head_uri_map)
+
+
 def _status() -> ServerStatus:
     return ServerStatus(
         name="主服",
@@ -67,6 +78,7 @@ def _status() -> ServerStatus:
         players=[
             PlayerStatus(
                 name="Steve",
+                uuid="uuid-steve",
                 online_seconds=3660,
                 total_seconds=9000,
                 position="world (1.0, 64.0, 2.0)",
@@ -229,6 +241,7 @@ async def test_render_status_passes_count_trend_payload(
     result = await render_status(_status(), trend)
 
     assert result.image == b"image"
+    assert captured_payload["players"][0]["head_uri"] == "head://steve"
     assert captured_payload["count_trend"]["sample_count"] == 3
     assert captured_payload["count_trend"]["labels"] == [
         "05-15 12:00",
@@ -433,6 +446,7 @@ async def test_render_playtime_includes_average_duration(
     assert result.image == b"image"
     assert captured_payload["range_hint"] == "26-05-11 06:00 ~ "
     assert captured_payload["show_today_online"] is True
+    assert captured_payload["items"][0]["head_uri"] == "head://steve"
     assert captured_payload["items"][0]["average_duration"] == "1小时00分"
     assert captured_payload["items"][0]["today_duration"] == "30分钟"
 
@@ -458,6 +472,9 @@ async def test_render_personal_online_passes_chart_payload_without_segments(
 
     assert result.image == b"image"
     assert captured_payload["range_hint"] == "26-05-16 10:00 ~ "
+    assert captured_payload["player_heads"] == [
+        {"name": "Steve", "head_uri": "head://steve"}
+    ]
     assert captured_payload["show_today_online"] is False
     assert captured_payload["average_duration"] == "1小时30分"
     assert captured_payload["chart_granularity"] == "hourly"

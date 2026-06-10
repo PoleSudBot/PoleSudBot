@@ -17,11 +17,37 @@
     }
 
     .player-name {
+      display: flex;
+      align-items: center;
+      gap: 9px;
       min-width: 0;
       color: var(--color-text-dark);
       font-size: 16px;
       line-height: 1.25;
       font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .player-head-group {
+      display: inline-flex;
+      align-items: center;
+      flex: 0 0 auto;
+      min-width: 0;
+    }
+
+    .player-head {
+      width: 28px;
+      height: 28px;
+      border-radius: 2px;
+      image-rendering: pixelated;
+    }
+
+    .player-head-group .player-head + .player-head {
+      margin-left: -7px;
+    }
+
+    .player-name-text {
+      min-width: 0;
       overflow-wrap: anywhere;
     }
 
@@ -90,7 +116,16 @@
       <div class="player-panel">
         {{ icons.icon_tile("user") }}
         <div>
-          <div class="player-name">{{ player_label }}</div>
+          <div class="player-name">
+            {% if player_heads %}
+            <span class="player-head-group">
+              {% for player in player_heads[:4] %}
+              {% if player.head_uri %}<img class="player-head" src="{{ player.head_uri }}" alt="">{% endif %}
+              {% endfor %}
+            </span>
+            {% endif %}
+            <span class="player-name-text">{{ player_label }}</span>
+          </div>
           <div class="player-meta">按查询范围分桶统计，当前为{{ chart_granularity_label }}图表</div>
         </div>
       </div>

@@ -461,6 +461,11 @@ mcw PlayerName @用户
 | `MC_RCON_LEVEL` | `9` | 群内执行任意 RCON 命令所需真寻权限等级。 |
 | `MC_CHAT_FORMAT` | `[{sender}] {message}` | 群消息同步到游戏内的显示格式。 |
 | `MC_RENDER_ENABLED` | `True` | 是否优先使用 htmlrender 渲染图片。 |
+| `MC_PLAYER_HEADS_ENABLED` | `True` | 是否在状态卡、排行卡、个人在线卡中显示玩家头像。 |
+| `MC_PLAYER_HEAD_CACHE_SECONDS` | `604800` | 成功获取玩家头像后的缓存时间，最小按 60 秒处理。 |
+| `MC_PLAYER_HEAD_FAILURE_CACHE_SECONDS` | `600` | 头像获取失败后的回退缓存时间，最小按 30 秒处理。 |
+| `MC_MOJANG_PROFILE_URL_TEMPLATE` | `https://api.mojang.com/users/profiles/minecraft/{name}` | 按玩家名查询 Mojang UUID 的接口模板。 |
+| `MC_MOJANG_SESSION_URL_TEMPLATE` | `https://sessionserver.mojang.com/session/minecraft/profile/{uuid}` | 按 UUID 查询 Mojang 皮肤信息的接口模板。 |
 | `MC_MAX_CHART_POINTS` | `96` | 人数图最多渲染的数据点数量。 |
 | `MC_SERVER_PRESETS` | `{}` | 服务器预设表，供 `mcbind <预设名>` 绑定到共享服务器。 |
 
@@ -476,6 +481,8 @@ mcw PlayerName @用户
 ```text
 [QQ/{sender}] {message}
 ```
+
+玩家头像只用于图片卡片，不会改变进服、退服、聊天互通等文本播报。插件会先尝试状态来源里的 UUID；如果离线服返回的 UUID 无法查询到 Mojang 皮肤，会继续用玩家名查询正版 UUID。玩家名不是正版账号、外部接口不可用或皮肤图片解析失败时，会回退到插件内置的占位头像。
 
 `MC_SERVER_PRESETS` 的每个预设支持以下字段：
 

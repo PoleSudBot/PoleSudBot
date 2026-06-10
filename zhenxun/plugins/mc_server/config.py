@@ -34,6 +34,11 @@ class McServerSettings:
     rcon_level: int
     chat_format: str
     render_enabled: bool
+    player_heads_enabled: bool
+    player_head_cache_seconds: int
+    player_head_failure_cache_seconds: int
+    mojang_profile_url_template: str
+    mojang_session_url_template: str
     max_chart_points: int
     server_presets: dict[str, McServerPreset]
 
@@ -126,6 +131,46 @@ REGISTER_CONFIGS = [
         default_value=True,
         help="是否优先使用htmlrender渲染MC状态与统计图片",
         type=bool,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MC_PLAYER_HEADS_ENABLED",
+        value=True,
+        default_value=True,
+        help="是否在MC图片卡片中显示玩家头像",
+        type=bool,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MC_PLAYER_HEAD_CACHE_SECONDS",
+        value=604800,
+        default_value=604800,
+        help="MC玩家头像成功缓存时间（秒）",
+        type=int,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MC_PLAYER_HEAD_FAILURE_CACHE_SECONDS",
+        value=600,
+        default_value=600,
+        help="MC玩家头像失败回退缓存时间（秒）",
+        type=int,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MC_MOJANG_PROFILE_URL_TEMPLATE",
+        value="https://api.mojang.com/users/profiles/minecraft/{name}",
+        default_value="https://api.mojang.com/users/profiles/minecraft/{name}",
+        help="Mojang玩家名查询UUID接口模板，可用 {name}",
+        type=str,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="MC_MOJANG_SESSION_URL_TEMPLATE",
+        value="https://sessionserver.mojang.com/session/minecraft/profile/{uuid}",
+        default_value="https://sessionserver.mojang.com/session/minecraft/profile/{uuid}",
+        help="Mojang UUID查询皮肤接口模板，可用 {uuid}",
+        type=str,
     ),
     RegisterConfig(
         module=MODULE_NAME,
@@ -246,6 +291,31 @@ def get_settings() -> McServerSettings:
         rcon_level=_as_int(raw.get("MC_RCON_LEVEL", 9), 9, 1),
         chat_format=str(raw.get("MC_CHAT_FORMAT", "[{sender}] {message}")),
         render_enabled=_as_bool(raw.get("MC_RENDER_ENABLED", True), True),
+        player_heads_enabled=_as_bool(raw.get("MC_PLAYER_HEADS_ENABLED", True), True),
+        player_head_cache_seconds=_as_int(
+            raw.get("MC_PLAYER_HEAD_CACHE_SECONDS", 604800),
+            604800,
+            60,
+        ),
+        player_head_failure_cache_seconds=_as_int(
+            raw.get("MC_PLAYER_HEAD_FAILURE_CACHE_SECONDS", 600),
+            600,
+            30,
+        ),
+        mojang_profile_url_template=_as_text(
+            raw.get(
+                "MC_MOJANG_PROFILE_URL_TEMPLATE",
+                "https://api.mojang.com/users/profiles/minecraft/{name}",
+            ),
+            "https://api.mojang.com/users/profiles/minecraft/{name}",
+        ),
+        mojang_session_url_template=_as_text(
+            raw.get(
+                "MC_MOJANG_SESSION_URL_TEMPLATE",
+                "https://sessionserver.mojang.com/session/minecraft/profile/{uuid}",
+            ),
+            "https://sessionserver.mojang.com/session/minecraft/profile/{uuid}",
+        ),
         max_chart_points=_as_int(raw.get("MC_MAX_CHART_POINTS", 96), 96, 12),
         server_presets=_parse_server_presets(raw.get("MC_SERVER_PRESETS", {})),
     )

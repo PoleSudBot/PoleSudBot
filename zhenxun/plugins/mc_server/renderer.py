@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 
 from zhenxun.services.log import logger
@@ -9,6 +10,7 @@ from .constants import MODULE_NAME
 from .types import (
     ChartData,
     PersonalOnlineData,
+    PlayerStatus,
     PlaytimeEntry,
     RenderedMessage,
     ServerStatus,
@@ -212,6 +214,10 @@ async def render_status(
     if not settings.render_enabled:
         return RenderedMessage(image=None, fallback_text=fallback)
     try:
+        head_uris = await _player_head_uri_map(
+            PlayerStatus(name=player.name, uuid=player.uuid)
+            for player in status.players
+        )
         return RenderedMessage(
             image=await _render_template(
                 _STATUS_TEMPLATE,
@@ -222,6 +228,7 @@ async def render_status(
                     "players": [
                         {
                             "name": player.name,
+                            "head_uri": head_uris.get(player.name.lower(), ""),
                             "position": player.position,
                             "online": format_duration(player.online_seconds)
                             if player.online_seconds
@@ -258,6 +265,10 @@ async def render_playtime(
         return RenderedMessage(image=None, fallback_text=fallback)
     show_today = should_show_today_online(time_range)
     try:
+        shown_entries = entries[:20]
+        head_uris = await _player_head_uri_map(
+            PlayerStatus(name=entry.player_name) for entry in shown_entries
+        )
         return RenderedMessage(
             image=await _render_template(
                 _TIME_TEMPLATE,
@@ -270,6 +281,7 @@ async def render_playtime(
                         {
                             "rank": index,
                             "name": entry.player_name,
+                            "head_uri": head_uris.get(entry.player_name.lower(), ""),
                             "duration": format_duration(entry.seconds),
                             "average_duration": format_duration(
                                 entry.average_seconds
@@ -277,7 +289,7 @@ async def render_playtime(
                             "today_duration": format_duration(entry.today_seconds),
                             "seconds": entry.seconds,
                         }
-                        for index, entry in enumerate(entries[:20], 1)
+                        for index, entry in enumerate(shown_entries, 1)
                     ],
                 },
                 viewport_width=720,
@@ -318,6 +330,7 @@ async def render_personal_online(data: PersonalOnlineData) -> RenderedMessage:
     chart_seconds = [point.seconds for point in chart_points]
     is_hourly = data.chart_granularity == "hourly"
     try:
+        player_heads = await _personal_player_heads(data.player_names)
         return RenderedMessage(
             image=await _render_template(
                 _PERSONAL_TEMPLATE,
@@ -333,6 +346,7 @@ async def render_personal_online(data: PersonalOnlineData) -> RenderedMessage:
                     "player_label": "、".join(data.player_names)
                     if data.player_names
                     else f"QQ {data.qq_id}",
+                    "player_heads": player_heads,
                     "total_duration": format_duration(data.total_seconds),
                     "average_duration": format_duration(data.average_seconds),
                     "today_duration": format_duration(data.today_seconds),
@@ -364,6 +378,30 @@ async def render_personal_online(data: PersonalOnlineData) -> RenderedMessage:
     except RenderingError as exc:
         logger.warning("MC个人在线图渲染失败，回退文字", MODULE_NAME, e=exc)
         return RenderedMessage(image=None, fallback_text=fallback)
+
+
+async def _player_head_uri_map(players: Iterable[PlayerStatus]) -> dict[str, str]:
+    """为模板解析玩家头像，失败时返回空映射以保持图片主体可渲染。"""
+    try:
+        from .player_heads import PlayerHeadRequest, resolve_player_head_uris
+
+        return await resolve_player_head_uris(
+            PlayerHeadRequest(name=player.name, uuid=player.uuid) for player in players
+        )
+    except Exception as exc:
+        logger.warning("MC玩家头像批量解析失败", MODULE_NAME, e=exc)
+        return {}
+
+
+async def _personal_player_heads(player_names: list[str]) -> list[dict[str, str]]:
+    # 个人卡可能合并多个绑定玩家，头像列表按展示名称顺序保持一致。
+    head_uris = await _player_head_uri_map(
+        PlayerStatus(name=player_name) for player_name in player_names
+    )
+    return [
+        {"name": player_name, "head_uri": head_uris.get(player_name.lower(), "")}
+        for player_name in player_names
+    ]
 
 
 async def _render_template(path: Path, payload: dict, *, viewport_width: int) -> bytes:

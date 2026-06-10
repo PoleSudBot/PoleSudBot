@@ -25,7 +25,7 @@
 
     .player-row {
       display: grid;
-      grid-template-columns: minmax(120px, 170px) 1fr minmax(112px, 150px) minmax(112px, 150px);
+      grid-template-columns: minmax(138px, 184px) 1fr minmax(112px, 150px) minmax(112px, 150px);
       gap: 12px;
       align-items: center;
       min-height: 48px;
@@ -38,10 +38,27 @@
     }
 
     .player-name {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+      gap: 8px;
       color: var(--color-text-dark);
       font-size: 15px;
       line-height: 1.22;
       font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .player-head {
+      flex: 0 0 auto;
+      width: 24px;
+      height: 24px;
+      border-radius: 2px;
+      image-rendering: pixelated;
+    }
+
+    .player-name-text {
+      min-width: 0;
       overflow-wrap: anywhere;
     }
 
@@ -127,7 +144,10 @@
         <div class="player-list">
           {% for player in players %}
           <div class="player-row">
-            <div class="player-name">{{ player.name }}</div>
+            <div class="player-name">
+              {% if player.head_uri %}<img class="player-head" src="{{ player.head_uri }}" alt="">{% endif %}
+              <span class="player-name-text">{{ player.name }}</span>
+            </div>
             <div class="player-detail">{{ player.position or "无坐标数据" }}</div>
             <div class="player-time">
               <span class="time-label">当前在线</span>
