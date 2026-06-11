@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 import hashlib
 
@@ -40,6 +41,12 @@ from .utils import (
     now_local,
     should_show_today_online,
 )
+
+
+@dataclass(frozen=True)
+class ClosedSessionSnapshot:
+    started_at: datetime
+    ended_at: datetime
 
 
 def normalize_server_identity(host: str, port: int) -> str:
@@ -253,7 +260,7 @@ async def end_session(
     player_name: str,
     *,
     occurred_at: datetime,
-) -> McOnlineSession | None:
+) -> McOnlineSession | ClosedSessionSnapshot | None:
     player = await McPlayer.get_or_none(server=server, name=player_name)
     if not player:
         return None
@@ -263,11 +270,16 @@ async def end_session(
         ended_at__isnull=True,
     )
     if not session:
-        return None
+        return await _get_recent_closed_session_snapshot(
+            server,
+            player,
+            occurred_at=occurred_at,
+        )
     session.ended_at = occurred_at
     await session.save(update_fields=["ended_at", "updated_at"])
+    snapshot = _build_closed_session_snapshot(session)
     if await _delete_short_session(session):
-        return None
+        return snapshot
     return session
 
 
@@ -282,6 +294,54 @@ async def close_active_sessions(server: McServer, *, occurred_at: datetime) -> i
         await session.save(update_fields=["ended_at", "updated_at"])
         await _delete_short_session(session)
     return len(sessions)
+
+
+async def _get_recent_closed_session_snapshot(
+    server: McServer,
+    player: McPlayer,
+    *,
+    occurred_at: datetime,
+) -> ClosedSessionSnapshot | None:
+    # 状态轮询可能先于日志 leave 关闭在线段，只在很短时间内复用这次关闭结果。
+    latest = await (
+        McOnlineSession.filter(
+            server=server,
+            player=player,
+            ended_at__not_isnull=True,
+        )
+        .order_by("-ended_at")
+        .first()
+    )
+    if not latest or not latest.ended_at:
+        return None
+    ended_at = normalize_datetime(latest.ended_at)
+    event_at = normalize_datetime(occurred_at)
+    if not ended_at or not event_at:
+        return None
+    if abs((ended_at - event_at).total_seconds()) > _recent_session_tolerance_seconds():
+        return None
+    return _build_closed_session_snapshot(latest)
+
+
+def _recent_session_tolerance_seconds() -> int:
+    settings = get_settings()
+    # 这个窗口只用于识别同一轮状态观测/日志处理的竞态，不用于匹配历史记录。
+    return max(
+        int(settings.poll_interval_seconds) * 2
+        + int(settings.rejoin_suppress_seconds),
+        int(settings.rejoin_suppress_seconds),
+        30,
+    )
+
+
+def _build_closed_session_snapshot(
+    session: McOnlineSession,
+) -> ClosedSessionSnapshot | None:
+    started_at = normalize_datetime(session.started_at)
+    ended_at = normalize_datetime(session.ended_at)
+    if not started_at or not ended_at:
+        return None
+    return ClosedSessionSnapshot(started_at=started_at, ended_at=ended_at)
 
 
 async def list_active_sessions(server: McServer) -> list[McOnlineSession]:
