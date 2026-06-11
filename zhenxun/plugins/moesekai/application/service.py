@@ -689,30 +689,20 @@ class MoeSekaiApplication:
             return 0
 
     async def _attach_best30_jackets(self, server: str, result: B30Result) -> int:
-        async def build_jacket_uri(assetbundle_name: str) -> str:
-            if not assetbundle_name:
-                return ""
-            content = await asset_provider.get_music_jacket(
-                server,
-                assetbundle_name,
-                timeout=8,
-            )
-            if not content:
-                return ""
-            encoded = base64.b64encode(content).decode("ascii")
-            return f"data:image/png;base64,{encoded}"
-
-        tasks = [
-            build_jacket_uri(entry.assetbundle_name)
-            for entry in result.entries
-        ]
-        if not tasks:
+        assetbundles = [entry.assetbundle_name for entry in result.entries]
+        if not assetbundles:
             return 0
-        jacket_uris = await asyncio.gather(*tasks, return_exceptions=True)
+        # B30 一次需要多张曲绘；批量入口统一处理并发、去重和资源层 fallback。
+        jacket_contents = await asset_provider.get_music_jackets(
+            server,
+            assetbundles,
+            timeout=8,
+        )
         missing_count = 0
-        for entry, jacket_uri in zip(result.entries, jacket_uris, strict=True):
-            if isinstance(jacket_uri, str) and jacket_uri:
-                entry.jacket_uri = jacket_uri
+        for entry, content in zip(result.entries, jacket_contents, strict=True):
+            if content:
+                encoded = base64.b64encode(content).decode("ascii")
+                entry.jacket_uri = f"data:image/png;base64,{encoded}"
             else:
                 missing_count += 1
         return missing_count

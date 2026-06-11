@@ -340,14 +340,14 @@ async def test_build_best30_image_uses_master_title_and_fixed_sources(
     async def fake_avatar(*_args, **_kwargs):
         return ""
 
-    async def fake_get_music_jacket(
+    async def fake_get_music_jackets(
         server: str,
-        assetbundle_name: str,
+        assetbundle_names: list[str],
         *,
         timeout: float,
     ):
-        assert (server, assetbundle_name, timeout) == ("jp", "jacket_671", 8)
-        return b"jacket"
+        assert (server, assetbundle_names, timeout) == ("jp", ["jacket_671"], 8)
+        return [b"jacket"]
 
     async def fake_render_best30_image(**kwargs):
         result = kwargs["result"]
@@ -390,8 +390,8 @@ async def test_build_best30_image_uses_master_title_and_fixed_sources(
     )
     monkeypatch.setattr(
         service_module.asset_provider,
-        "get_music_jacket",
-        fake_get_music_jacket,
+        "get_music_jackets",
+        fake_get_music_jackets,
     )
     monkeypatch.setattr(
         service_module,
