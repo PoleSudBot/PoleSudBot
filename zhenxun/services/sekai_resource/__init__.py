@@ -8,7 +8,7 @@ from .aliases import (
 )
 from .asset_cache import AssetCacheProvider, asset_cache_provider
 from .asset_fetcher import AssetFetcher, asset_fetcher
-from .assets import AssetProvider, asset_provider
+from .assets import AssetFetchRequest, AssetProvider, asset_provider
 from .b30_constants import (
     B30ConstantsProvider,
     ChartConstant,
@@ -43,6 +43,7 @@ __all__ = [
     "AliasProvider",
     "AliasResolveResult",
     "AssetCacheProvider",
+    "AssetFetchRequest",
     "AssetFetcher",
     "AssetProvider",
     "B30ConstantsProvider",

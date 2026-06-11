@@ -137,6 +137,30 @@ def test_resource_settings_falls_back_when_new_namespace_is_registered_default(
         resource_config.get_settings.cache_clear()
 
 
+def test_resource_settings_reads_asset_fetch_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fake_config = _FakeResourceConfig(
+        {
+            "sekai_resource": {
+                "SEKAI_RESOURCE_ASSET_BATCH_FETCH_CONCURRENCY": 16,
+                "SEKAI_RESOURCE_ASSET_SOURCE_FETCH_CONCURRENCY": 6,
+                "SEKAI_RESOURCE_ASSET_SOURCE_FETCH_ALL": True,
+            },
+        }
+    )
+
+    monkeypatch.setattr(resource_config, "Config", fake_config)
+    resource_config.get_settings.cache_clear()
+    try:
+        settings = resource_config.get_settings()
+        assert settings.asset_batch_fetch_concurrency == 16
+        assert settings.asset_source_fetch_concurrency == 6
+        assert settings.asset_source_fetch_all is True
+    finally:
+        resource_config.get_settings.cache_clear()
+
+
 def _full_master_payload(
     *,
     card_ids: list[int] | None = None,

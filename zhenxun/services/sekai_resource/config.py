@@ -305,6 +305,9 @@ class SekaiResourceSettings(BaseModel):
     master_check_interval_seconds: int = 180
     master_check_mode: Literal["revision", "version", "hybrid"] = "revision"
     asset_miss_cache_ttl_seconds: int = 21_600
+    asset_batch_fetch_concurrency: int = 12
+    asset_source_fetch_concurrency: int = 4
+    asset_source_fetch_all: bool = False
     github_token: str = ""
     asset_source_order: list[str] = Field(
         default_factory=lambda: DEFAULT_ASSET_SOURCE_ORDER.copy()
@@ -332,6 +335,14 @@ class SekaiResourceSettings(BaseModel):
     @classmethod
     def _normalize_ttl_seconds(cls, value: int) -> int:
         return max(0, value)
+
+    @field_validator(
+        "asset_batch_fetch_concurrency",
+        "asset_source_fetch_concurrency",
+    )
+    @classmethod
+    def _normalize_fetch_concurrency(cls, value: int) -> int:
+        return max(1, int(value))
 
     @field_validator("master_check_interval_seconds")
     @classmethod
@@ -367,6 +378,30 @@ REGISTER_CONFIGS = [
         default_value=REGISTER_DEFAULTS.asset_miss_cache_ttl_seconds,
         help="SekaiResource 资源 404 负缓存有效期，秒；0 表示不缓存缺失状态",
         type=int,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="SEKAI_RESOURCE_ASSET_BATCH_FETCH_CONCURRENCY",
+        value=REGISTER_DEFAULTS.asset_batch_fetch_concurrency,
+        default_value=REGISTER_DEFAULTS.asset_batch_fetch_concurrency,
+        help="SekaiResource 批量静态资源下载并发数",
+        type=int,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="SEKAI_RESOURCE_ASSET_SOURCE_FETCH_CONCURRENCY",
+        value=REGISTER_DEFAULTS.asset_source_fetch_concurrency,
+        default_value=REGISTER_DEFAULTS.asset_source_fetch_concurrency,
+        help="SekaiResource 单个静态资源多源竞速并发数",
+        type=int,
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="SEKAI_RESOURCE_ASSET_SOURCE_FETCH_ALL",
+        value=REGISTER_DEFAULTS.asset_source_fetch_all,
+        default_value=REGISTER_DEFAULTS.asset_source_fetch_all,
+        help="SekaiResource 单个静态资源是否同时请求全部候选源",
+        type=bool,
     ),
     RegisterConfig(
         module=MODULE_NAME,
@@ -505,7 +540,7 @@ def _get_compat_config(
     key: str,
     default: Any,
     *,
-    legacy_key: str,
+    legacy_key: str | None = None,
     legacy_keys: list[str] | None = None,
     legacy_default: Any = _SENTINEL,
 ) -> Any:
@@ -517,7 +552,8 @@ def _get_compat_config(
         return value
 
     # 新配置只是注册默认值时继续读取旧键，避免升级后用户配置被默认值遮蔽。
-    for candidate in [legacy_key, *(legacy_keys or [])]:
+    candidates = ([legacy_key] if legacy_key else []) + (legacy_keys or [])
+    for candidate in candidates:
         legacy_value = Config.get_config(LEGACY_MODULE_NAME, candidate, _SENTINEL)
         if legacy_value is _SENTINEL:
             continue
@@ -564,6 +600,18 @@ def get_settings() -> SekaiResourceSettings:
             "SEKAI_RESOURCE_ASSET_MISS_CACHE_TTL_SECONDS",
             defaults.asset_miss_cache_ttl_seconds,
             legacy_key="MOESEKAI_ASSET_MISS_CACHE_TTL_SECONDS",
+        ),
+        "asset_batch_fetch_concurrency": _get_compat_config(
+            "SEKAI_RESOURCE_ASSET_BATCH_FETCH_CONCURRENCY",
+            defaults.asset_batch_fetch_concurrency,
+        ),
+        "asset_source_fetch_concurrency": _get_compat_config(
+            "SEKAI_RESOURCE_ASSET_SOURCE_FETCH_CONCURRENCY",
+            defaults.asset_source_fetch_concurrency,
+        ),
+        "asset_source_fetch_all": _get_compat_config(
+            "SEKAI_RESOURCE_ASSET_SOURCE_FETCH_ALL",
+            defaults.asset_source_fetch_all,
         ),
         "github_token": _get_compat_config(
             "SEKAI_RESOURCE_GITHUB_TOKEN",

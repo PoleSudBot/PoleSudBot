@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import os
 import time
@@ -38,7 +39,8 @@ from zhenxun.plugins.moesekai.storage.state import JsonStateStore
 import zhenxun.services.sekai_resource.asset_cache as service_asset_cache_module
 from zhenxun.services.sekai_resource.asset_cache import AssetCacheProvider
 from zhenxun.services.sekai_resource.asset_fetcher import asset_fetcher
-from zhenxun.services.sekai_resource.assets import AssetProvider
+import zhenxun.services.sekai_resource.assets as service_assets_module
+from zhenxun.services.sekai_resource.assets import AssetFetchRequest, AssetProvider
 from zhenxun.services.sekai_resource.master_data import MasterDataProvider
 from zhenxun.utils.exception import AllURIsFailedError
 
@@ -546,6 +548,150 @@ def test_asset_provider_training_rules():
             "specialTrainingCosts": [],
         }
     )
+
+
+def _asset_provider_for_test(tmp_path) -> AssetProvider:
+    return AssetProvider(
+        AssetCacheProvider(
+            PathBinaryFileStore(tmp_path / "assets"),
+            JsonStateStore(tmp_path / "asset_index.json"),
+            JsonStateStore(tmp_path / "asset_miss.json"),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_asset_provider_races_asset_sources(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    provider = _asset_provider_for_test(tmp_path)
+    started: list[str] = []
+    second_started = asyncio.Event()
+    release_primary = asyncio.Event()
+
+    monkeypatch.setattr(
+        service_assets_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            asset_source_order=["uni", "haruki-main"],
+            audio_format_priority=["mp3"],
+            asset_batch_fetch_concurrency=4,
+            asset_source_fetch_concurrency=2,
+            asset_source_fetch_all=False,
+        ),
+    )
+
+    async def fake_fetch_content(url: str, *, timeout: float):
+        started.append(url)
+        if len(started) == 2:
+            second_started.set()
+        if "assets-direct" in url:
+            await release_primary.wait()
+            raise httpx.ReadTimeout("primary timeout")
+        return b"fast-jacket"
+
+    monkeypatch.setattr(
+        service_assets_module.asset_fetcher,
+        "fetch_content",
+        fake_fetch_content,
+    )
+
+    content = await provider.get_music_jacket("jp", "music_test", timeout=8)
+
+    assert content == b"fast-jacket"
+    assert second_started.is_set()
+    assert any("assets-direct" in url for url in started)
+    assert any("haruki" in url for url in started)
+
+
+@pytest.mark.asyncio
+async def test_asset_provider_deduplicates_inflight_requests(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    provider = _asset_provider_for_test(tmp_path)
+    calls = 0
+
+    monkeypatch.setattr(
+        service_assets_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            asset_source_order=["uni"],
+            audio_format_priority=["mp3"],
+            asset_batch_fetch_concurrency=4,
+            asset_source_fetch_concurrency=1,
+            asset_source_fetch_all=False,
+        ),
+    )
+
+    async def fake_fetch_content(_url: str, *, timeout: float):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.01)
+        return b"shared-image"
+
+    monkeypatch.setattr(
+        service_assets_module.asset_fetcher,
+        "fetch_content",
+        fake_fetch_content,
+    )
+
+    left, right = await asyncio.gather(
+        provider.get_music_jacket("jp", "music_shared", timeout=8),
+        provider.get_music_jacket("jp", "music_shared", timeout=8),
+    )
+
+    assert left == b"shared-image"
+    assert right == b"shared-image"
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_asset_provider_fetch_many_respects_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    provider = _asset_provider_for_test(tmp_path)
+    active = 0
+    max_active = 0
+
+    monkeypatch.setattr(
+        service_assets_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            asset_source_order=["uni"],
+            audio_format_priority=["mp3"],
+            asset_batch_fetch_concurrency=2,
+            asset_source_fetch_concurrency=1,
+            asset_source_fetch_all=False,
+        ),
+    )
+
+    async def fake_fetch_content(url: str, *, timeout: float):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return url.encode()
+
+    monkeypatch.setattr(
+        service_assets_module.asset_fetcher,
+        "fetch_content",
+        fake_fetch_content,
+    )
+
+    results = await provider.fetch_many_contents(
+        [
+            AssetFetchRequest("jp", "music_jacket", f"music_{index}", timeout=8)
+            for index in range(4)
+        ],
+        concurrency=2,
+    )
+
+    assert all(result for result in results)
+    assert max_active == 2
 
 
 def test_asset_cache_provider_supports_positive_and_negative_cache(

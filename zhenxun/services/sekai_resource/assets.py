@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -15,9 +18,22 @@ from .runtime import logger
 AssetSourceName = Literal["uni", "haruki-main", "haruki-jp-dedicated", "legacy-viewer"]
 
 
+@dataclass(frozen=True)
+class AssetFetchRequest:
+    server: str
+    kind: str
+    assetbundle: str
+    timeout: float = 20
+
+
 class AssetProvider:
     def __init__(self, cache_provider=asset_cache_provider) -> None:
         self._cache_provider = cache_provider
+        self._inflight_lock = asyncio.Lock()
+        self._inflight_tasks: dict[
+            tuple[str, str, str, float],
+            asyncio.Task[bytes | None],
+        ] = {}
 
     @staticmethod
     def _has_training_costs(card: dict[str, object]) -> bool:
@@ -177,6 +193,143 @@ class AssetProvider:
         paths = self._cache_relative_paths(server, kind=kind, assetbundle=assetbundle)
         return paths[0] if paths else None
 
+    @staticmethod
+    def _inflight_key(
+        server: str,
+        *,
+        kind: str,
+        assetbundle: str,
+        timeout: float,
+    ) -> tuple[str, str, str, float]:
+        return (
+            str(server).strip().lower(),
+            str(kind).strip(),
+            str(assetbundle).strip(),
+            float(timeout),
+        )
+
+    async def _fetch_candidate(
+        self,
+        candidate: str,
+        *,
+        timeout: float,
+    ) -> tuple[str, bytes | None, Exception | None]:
+        try:
+            content = await asset_fetcher.fetch_content(candidate, timeout=timeout)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                self._cache_provider.record_missing(candidate)
+            return candidate, None, exc
+        except httpx.RequestError as exc:
+            return candidate, None, exc
+        self._cache_provider.clear_missing(candidate)
+        return candidate, content, None
+
+    @staticmethod
+    def _source_fetch_limit(url_count: int) -> int:
+        settings = get_settings()
+        if settings.asset_source_fetch_all:
+            return max(1, url_count)
+        return max(1, min(int(settings.asset_source_fetch_concurrency), url_count))
+
+    async def _fetch_first_from_candidates(
+        self,
+        urls: list[str],
+        *,
+        timeout: float,
+    ) -> tuple[str | None, bytes | None, Exception | None]:
+        last_error: Exception | None = None
+        remaining = iter(urls)
+        pending: set[asyncio.Task[tuple[str, bytes | None, Exception | None]]] = set()
+
+        def start_next() -> None:
+            try:
+                candidate = next(remaining)
+            except StopIteration:
+                return
+            pending.add(
+                asyncio.create_task(self._fetch_candidate(candidate, timeout=timeout))
+            )
+
+        # 同一资源的多个源站互相独立；这里做有限竞速，避免首选源超时拖住整张图。
+        for _ in range(self._source_fetch_limit(len(urls))):
+            start_next()
+
+        while pending:
+            done, pending = await asyncio.wait(
+                pending,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in done:
+                try:
+                    candidate, content, error = task.result()
+                except Exception:
+                    for pending_task in pending:
+                        pending_task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    raise
+                if content is not None:
+                    for pending_task in pending:
+                        pending_task.cancel()
+                    await asyncio.gather(*pending, return_exceptions=True)
+                    return candidate, content, None
+                if error is not None:
+                    last_error = error
+                start_next()
+
+        return None, None, last_error
+
+    async def _fetch_first_content_uncached(
+        self,
+        server: str,
+        *,
+        kind: str,
+        assetbundle: str,
+        timeout: float,
+    ) -> bytes | None:
+        for relative_path in self._cache_relative_paths(
+            server,
+            kind=kind,
+            assetbundle=assetbundle,
+        ):
+            if cached := self._cache_provider.get_by_relative_path(relative_path):
+                return cached
+        urls = [
+            url
+            for url in self.build_candidate_urls(
+                server,
+                kind=kind,
+                assetbundle=assetbundle,
+            )
+            if not self._cache_provider.is_known_missing(url)
+        ]
+        if not urls:
+            return None
+
+        candidate, content, last_error = await self._fetch_first_from_candidates(
+            urls,
+            timeout=timeout,
+        )
+        if content is None or candidate is None:
+            if last_error:
+                logger.warning("SekaiResource 资源抓取失败", MODULE_NAME, e=last_error)
+            return None
+        if relative_path := self._resolve_cache_relative_path(
+            server,
+            kind=kind,
+            assetbundle=assetbundle,
+            source_url=candidate,
+        ):
+            self._cache_provider.set_by_relative_path(
+                relative_path,
+                content,
+                server=server,
+                kind=kind,
+                assetbundle=assetbundle,
+                source_url=candidate,
+            )
+        return content
+
     async def fetch_first_content(
         self,
         server: str,
@@ -192,42 +345,73 @@ class AssetProvider:
         ):
             if cached := self._cache_provider.get_by_relative_path(relative_path):
                 return cached
-        urls = self.build_candidate_urls(server, kind=kind, assetbundle=assetbundle)
-        if not urls:
-            return None
-        last_error: Exception | None = None
-        for candidate in urls:
-            if self._cache_provider.is_known_missing(candidate):
-                continue
-            try:
-                content = await asset_fetcher.fetch_content(candidate, timeout=timeout)
-            except httpx.HTTPStatusError as exc:
-                last_error = exc
-                if exc.response.status_code == 404:
-                    self._cache_provider.record_missing(candidate)
-                continue
-            except httpx.RequestError as exc:
-                last_error = exc
-                continue
-            self._cache_provider.clear_missing(candidate)
-            if relative_path := self._resolve_cache_relative_path(
-                server,
-                kind=kind,
-                assetbundle=assetbundle,
-                source_url=candidate,
-            ):
-                self._cache_provider.set_by_relative_path(
-                    relative_path,
-                    content,
-                    server=server,
-                    kind=kind,
-                    assetbundle=assetbundle,
-                    source_url=candidate,
+        key = self._inflight_key(
+            server,
+            kind=kind,
+            assetbundle=assetbundle,
+            timeout=timeout,
+        )
+        async with self._inflight_lock:
+            task = self._inflight_tasks.get(key)
+            if task is None or task.done():
+                # 多个插件同时要同一资源时共用一个下载任务，避免批量并发放大重复请求。
+                task = asyncio.create_task(
+                    self._fetch_first_content_uncached(
+                        server,
+                        kind=kind,
+                        assetbundle=assetbundle,
+                        timeout=timeout,
+                    )
                 )
-            return content
-        if last_error:
-            logger.warning("SekaiResource 资源抓取失败", MODULE_NAME, e=last_error)
-        return None
+                self._inflight_tasks[key] = task
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done():
+                async with self._inflight_lock:
+                    if self._inflight_tasks.get(key) is task:
+                        self._inflight_tasks.pop(key, None)
+
+    async def fetch_many_contents(
+        self,
+        requests: Sequence[AssetFetchRequest],
+        *,
+        concurrency: int | None = None,
+    ) -> list[bytes | None]:
+        if not requests:
+            return []
+        limit = max(1, int(concurrency or get_settings().asset_batch_fetch_concurrency))
+        semaphore = asyncio.Semaphore(limit)
+
+        async def fetch_one(request: AssetFetchRequest) -> bytes | None:
+            async with semaphore:
+                return await self.fetch_first_content(
+                    request.server,
+                    kind=request.kind,
+                    assetbundle=request.assetbundle,
+                    timeout=request.timeout,
+                )
+
+        return list(await asyncio.gather(*(fetch_one(request) for request in requests)))
+
+    async def get_music_jackets(
+        self,
+        server: str,
+        assetbundles: Sequence[str],
+        *,
+        timeout: float = 20,
+        concurrency: int | None = None,
+    ) -> list[bytes | None]:
+        requests = [
+            AssetFetchRequest(
+                server=server,
+                kind="music_jacket",
+                assetbundle=assetbundle,
+                timeout=timeout,
+            )
+            for assetbundle in assetbundles
+        ]
+        return await self.fetch_many_contents(requests, concurrency=concurrency)
 
     def get_first_url(self, server: str, *, kind: str, assetbundle: str) -> str | None:
         urls = self.build_candidate_urls(server, kind=kind, assetbundle=assetbundle)
