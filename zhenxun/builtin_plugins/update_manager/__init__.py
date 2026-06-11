@@ -237,6 +237,19 @@ async def get_repositories(fetch: bool = False):
     return ApiResult.ok(repos)
 
 
+@router.get("/repositories/{repo_id}/status", dependencies=[authentication()])
+async def get_repository_status(repo_id: str, fetch: bool = False):
+    """读取单个仓库状态，支持前端按行独立刷新。"""
+    _validate_repo_ids([repo_id])
+    if fetch:
+        status = await job_store.run_exclusive(
+            lambda: service.scan_repository(repo_id, fetch=True)
+        )
+    else:
+        status = await service.scan_repository(repo_id, fetch=False)
+    return ApiResult.ok(status)
+
+
 @router.get("/repositories/{repo_id}/commits", dependencies=[authentication()])
 async def get_repository_commits(repo_id: str, fetch: bool = True, limit: int = 30):
     """按需读取目标分支 commit 历史。"""

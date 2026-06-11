@@ -66,6 +66,11 @@ class UpdateManagerService:
 
         return await asyncio.gather(*(scan(repo) for repo in repos))
 
+    async def scan_repository(self, repo_id: str, *, fetch: bool = False) -> RepoStatus:
+        """采集单个仓库状态，供 WebUI 按行独立刷新。"""
+        repo = self._repo_by_id(repo_id)
+        return await get_repo_status(self.runner, repo, fetch=fetch)
+
     async def update_repositories(
         self,
         *,

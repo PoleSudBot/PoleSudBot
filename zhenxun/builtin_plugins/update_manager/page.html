@@ -245,6 +245,10 @@
 
     tr:last-child td { border-bottom: 0; }
 
+    tr.repo-row.busy {
+      background: #fffafd;
+    }
+
     .repo-name {
       font-weight: 650;
       color: #1f2937;
@@ -310,6 +314,27 @@
     .badge.kind { color: #be185d; background: #fce7f3; }
     .badge.running { color: #be185d; background: #fce7f3; }
     .badge.latest { color: #0369a1; background: #e0f2fe; }
+
+    .spinner {
+      width: 12px;
+      height: 12px;
+      border: 2px solid currentColor;
+      border-right-color: transparent;
+      border-radius: 999px;
+      animation: spin 0.8s linear infinite;
+      flex: 0 0 auto;
+    }
+
+    .status-line {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 5px;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
 
     .muted { color: var(--text-muted); }
     .mono { font-family: var(--font-mono); }
@@ -484,11 +509,6 @@
       gap: 10px;
     }
 
-    .loading {
-      opacity: 0.72;
-      pointer-events: none;
-    }
-
     @media (max-width: 980px) {
       .grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -659,9 +679,10 @@ let repos = [];
 let upstreamResults = [];
 let expandedRepos = new Set();
 let commitCache = {};
-let loadingCommits = new Set();
+// 按仓库记录正在进行的操作，让状态刷新和更新任务只影响对应行。
+let repoOps = new Map();
+let selectedRepos = new Set();
 let settings = null;
-let busy = false;
 
 function showError(message) {
   const el = document.getElementById("error");
@@ -669,21 +690,12 @@ function showError(message) {
   el.style.display = message ? "block" : "none";
 }
 
-function setBusy(value) {
-  busy = value;
-  document.getElementById("repoPanel").classList.toggle("loading", value);
-}
-
-async function runTaskAction(action) {
-  if (busy) return;
+async function runPanelAction(action) {
   showError("");
-  setBusy(true);
   try {
     await action();
   } catch (err) {
     showError(err.message);
-  } finally {
-    setBusy(false);
   }
 }
 
@@ -761,6 +773,10 @@ async function logout() {
   } finally {
     repos = [];
     upstreamResults = [];
+    expandedRepos = new Set();
+    commitCache = {};
+    repoOps = new Map();
+    selectedRepos = new Set();
     settings = null;
     showLogin();
   }
@@ -822,6 +838,10 @@ async function toggleAutoUpdate() {
 }
 
 function statusBadge(item) {
+  const op = repoOp(item.repo.id);
+  if (op) {
+    return `<span class="badge muted"><span class="spinner"></span>${escapeHtml(op.label)}</span>`;
+  }
   if (item.error) return `<span class="badge bad">采集失败</span>`;
   if (!item.exists || !item.is_git_repo) return `<span class="badge bad">不可用</span>`;
   if (item.update_block_reason) return `<span class="badge warn">被阻断</span>`;
@@ -830,7 +850,46 @@ function statusBadge(item) {
 }
 
 function statusText(item) {
+  const op = repoOp(item.repo.id);
+  if (op?.detail) return op.detail;
   return item.error || item.update_block_reason || (item.behind > 0 ? "可快进更新" : "已是目标分支最新");
+}
+
+function repoOp(repoId) {
+  return repoOps.get(repoId) || null;
+}
+
+function repoBusy(repoId) {
+  return repoOps.has(repoId);
+}
+
+function setRepoOp(repoId, label, detail = "") {
+  repoOps.set(repoId, { label, detail });
+  renderRepos();
+}
+
+function clearRepoOp(repoId) {
+  repoOps.delete(repoId);
+  renderRepos();
+}
+
+function updateRepoStatus(status) {
+  const index = repos.findIndex((item) => item.repo.id === status.repo.id);
+  if (index === -1) {
+    repos.push(status);
+  } else {
+    repos[index] = status;
+  }
+}
+
+function syncSelectedFromDom() {
+  document.querySelectorAll(".repo-check").forEach((el) => {
+    if (el.checked) {
+      selectedRepos.add(el.value);
+    } else {
+      selectedRepos.delete(el.value);
+    }
+  });
 }
 
 function kindLabel(kind) {
@@ -937,15 +996,19 @@ function renderStats() {
 }
 
 function renderRepos() {
+  syncSelectedFromDom();
   const rows = filteredRepos().map((item) => {
     const repoId = item.repo.id;
     const expanded = expandedRepos.has(repoId);
+    const busy = repoBusy(repoId);
+    const checked = selectedRepos.has(repoId) ? "checked" : "";
+    const disabled = busy ? "disabled" : "";
     return `
-    <tr>
+    <tr class="repo-row ${busy ? "busy" : ""}">
       <td>
         <span class="select-cell">
-          <input type="checkbox" class="repo-check table-check" value="${escapeHtml(repoId)}">
-          <button class="toggle-commits ${expanded ? "open" : ""}" title="查看 commit 记录" onclick="toggleCommits('${escapeHtml(repoId)}')">${expanded ? "▾" : "▸"}</button>
+          <input type="checkbox" class="repo-check table-check" value="${escapeHtml(repoId)}" onchange="syncSelectedFromDom()" ${checked} ${disabled}>
+          <button class="toggle-commits ${expanded ? "open" : ""}" title="查看 commit 记录" onclick="toggleCommits('${escapeHtml(repoId)}')" ${disabled}>${expanded ? "▾" : "▸"}</button>
         </span>
       </td>
       <td>
@@ -959,7 +1022,7 @@ function renderRepos() {
       <td class="mono">${item.ahead} / ${item.behind}</td>
       <td>
         ${statusBadge(item)}
-        <div class="muted">${escapeHtml(statusText(item))}</div>
+        <div class="muted status-line">${escapeHtml(statusText(item))}</div>
       </td>
     </tr>
     ${expanded ? renderCommitPanel(item) : ""}
@@ -974,8 +1037,9 @@ function renderRepos() {
 function renderCommitPanel(item) {
   const repoId = item.repo.id;
   const cached = commitCache[repoId];
-  if (loadingCommits.has(repoId)) {
-    return `<tr class="commit-panel"><td colspan="6" class="muted">正在加载 commit 记录...</td></tr>`;
+  const op = repoOp(repoId);
+  if (op) {
+    return `<tr class="commit-panel"><td colspan="6" class="muted">${escapeHtml(op.detail || op.label)}</td></tr>`;
   }
   if (!cached) {
     return `<tr class="commit-panel"><td colspan="6" class="muted">尚未加载 commit 记录</td></tr>`;
@@ -1021,13 +1085,15 @@ function renderCommitActions(repoId, commit, isCurrent, isFuture) {
   const hash = escapeHtml(commit.hash);
   const label = isFuture ? "更新至此版本" : "回退到此版本";
   const forceLabel = isFuture ? "强制更新至此版本" : "";
+  const disabled = repoBusy(repoId) ? "disabled" : "";
   return `
-    <button class="secondary" onclick="checkoutCommit('${escapeHtml(repoId)}', '${hash}', false, '${label}')">${label}</button>
-    ${forceLabel ? `<button class="danger" onclick="checkoutCommit('${escapeHtml(repoId)}', '${hash}', true, '${forceLabel}')">${forceLabel}</button>` : ""}
+    <button class="secondary" onclick="checkoutCommit('${escapeHtml(repoId)}', '${hash}', false, '${label}')" ${disabled}>${label}</button>
+    ${forceLabel ? `<button class="danger" onclick="checkoutCommit('${escapeHtml(repoId)}', '${hash}', true, '${forceLabel}')" ${disabled}>${forceLabel}</button>` : ""}
   `;
 }
 
 async function toggleCommits(repoId) {
+  if (repoBusy(repoId)) return;
   if (expandedRepos.has(repoId)) {
     expandedRepos.delete(repoId);
     renderRepos();
@@ -1039,43 +1105,116 @@ async function toggleCommits(repoId) {
 }
 
 async function loadCommits(repoId, fetch = true) {
-  loadingCommits.add(repoId);
-  renderRepos();
+  if (repoBusy(repoId)) return;
+  setRepoOp(repoId, "加载中", "正在加载 commit 记录");
   try {
     commitCache[repoId] = await api(`/repositories/${encodeURIComponent(repoId)}/commits?fetch=${fetch}&limit=30`);
+    // commit 接口可能刷新了 origin refs，这里立刻重算主表状态，避免远程最新和 Ahead/Behind 脱节。
+    const status = await api(`/repositories/${encodeURIComponent(repoId)}/status?fetch=false`);
+    updateRepoStatus(status);
   } catch (err) {
     showError(err.message);
   } finally {
-    loadingCommits.delete(repoId);
-    renderRepos();
+    clearRepoOp(repoId);
   }
 }
 
-async function loadRepos(fetch = false, options = {}) {
-  const keepBusy = Boolean(options.keepBusy);
-  if (busy && !keepBusy) return;
-  showError("");
-  if (!keepBusy) setBusy(true);
+async function refreshRepoStatus(repoId, fetch, label, detail) {
+  setRepoOp(repoId, label, detail);
   try {
-    repos = await api("/repositories?fetch=" + fetch);
-    document.getElementById("lastRefresh").textContent =
-      (fetch ? "检测完成：" : "读取完成：") + new Date().toLocaleString();
-    renderRepos();
+    const status = await api(`/repositories/${encodeURIComponent(repoId)}/status?fetch=${fetch}`);
+    updateRepoStatus(status);
+    return status;
   } catch (err) {
     showError(err.message);
+    return null;
   } finally {
-    if (!keepBusy) setBusy(false);
+    clearRepoOp(repoId);
   }
+}
+
+async function loadRepos(fetch = false) {
+  showError("");
+  if (!fetch) {
+    try {
+      repos = await api("/repositories?fetch=" + fetch);
+      document.getElementById("lastRefresh").textContent =
+        "读取完成：" + new Date().toLocaleString();
+      renderRepos();
+    } catch (err) {
+      showError(err.message);
+    }
+    return;
+  }
+
+  if (!repos.length) {
+    await loadRepos(false);
+  }
+  await Promise.all(
+    repos
+      .map((item) => item.repo.id)
+      .filter((repoId) => !repoBusy(repoId))
+      .map((repoId) => refreshRepoStatus(repoId, true, "检测中", "正在刷新 origin 状态"))
+  );
+  document.getElementById("lastRefresh").textContent =
+    "检测完成：" + new Date().toLocaleString();
 }
 
 function selectedRepoIds() {
-  return [...document.querySelectorAll(".repo-check:checked")].map((el) => el.value);
+  syncSelectedFromDom();
+  const knownIds = new Set(repos.map((item) => item.repo.id));
+  return [...selectedRepos].filter((repoId) => knownIds.has(repoId));
 }
 
 function toggleAll(checked) {
-  document.querySelectorAll(".repo-check").forEach((el) => {
-    el.checked = checked;
+  const visibleIds = filteredRepos().map((item) => item.repo.id);
+  visibleIds.forEach((repoId) => {
+    if (repoBusy(repoId)) return;
+    if (checked) {
+      selectedRepos.add(repoId);
+    } else {
+      selectedRepos.delete(repoId);
+    }
   });
+  renderRepos();
+}
+
+async function refreshRepoAfterWrite(repoId) {
+  await refreshRepoStatus(repoId, false, "刷新中", "正在读取更新后的仓库状态");
+  if (expandedRepos.has(repoId)) {
+    await loadCommits(repoId, false);
+  }
+}
+
+async function runRepoUpdate(repoId, force) {
+  setRepoOp(repoId, force ? "强制更新中" : "更新中", "正在执行 origin 更新任务");
+  try {
+    const job = await api("/repositories/update", {
+      method: "POST",
+      body: JSON.stringify({ repo_ids: [repoId], force }),
+    });
+    await waitJob(job.id);
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    clearRepoOp(repoId);
+  }
+  await refreshRepoAfterWrite(repoId);
+}
+
+async function runSelectedUpdates(repoIds, force) {
+  // 前端逐仓库提交任务，既显示排队顺序，也保留后端 Git 写锁的串行保护。
+  repoIds.forEach((repoId) => {
+    if (!repoBusy(repoId)) {
+      setRepoOp(repoId, "排队中", "等待执行更新任务");
+    }
+  });
+  for (const repoId of repoIds) {
+    if (!repoBusy(repoId) || repoOp(repoId)?.label === "排队中") {
+      await runRepoUpdate(repoId, force);
+    }
+  }
+  await loadJobs();
 }
 
 async function updateSelected() {
@@ -1085,13 +1224,8 @@ async function updateSelected() {
     return;
   }
   if (!confirm("确认对选中仓库执行 origin ff-only 更新？")) return;
-  await runTaskAction(async () => {
-    const job = await api("/repositories/update", {
-      method: "POST",
-      body: JSON.stringify({ repo_ids }),
-    });
-    await waitJob(job.id);
-    await loadRepos(false, { keepBusy: true });
+  await runPanelAction(async () => {
+    await runSelectedUpdates(repo_ids, false);
   });
 }
 
@@ -1102,37 +1236,35 @@ async function forceUpdateSelected() {
     return;
   }
   if (!confirm("确认强制更新选中仓库？这会丢弃已跟踪文件的本地修改，但不会清理未跟踪缓存文件。")) return;
-  await runTaskAction(async () => {
-    const job = await api("/repositories/update", {
-      method: "POST",
-      body: JSON.stringify({ repo_ids, force: true }),
-    });
-    await waitJob(job.id);
-    await loadRepos(false, { keepBusy: true });
+  await runPanelAction(async () => {
+    await runSelectedUpdates(repo_ids, true);
   });
 }
 
 async function checkoutCommit(repoId, commitHash, force, label) {
+  if (repoBusy(repoId)) return;
   const warning = force
     ? "这会执行强制重置，丢弃已跟踪文件的本地修改，但不会清理未跟踪缓存文件。"
     : "如果存在已跟踪文件的本地修改，操作会被后端阻断。";
   if (!confirm(`确认${label}？\n${warning}`)) return;
-  await runTaskAction(async () => {
-    const job = await api("/repositories/checkout", {
-      method: "POST",
-      body: JSON.stringify({ repo_id: repoId, commit_hash: commitHash, force }),
-    });
-    await waitJob(job.id);
-    await loadRepos(false, { keepBusy: true });
-    if (expandedRepos.has(repoId)) {
-      await loadCommits(repoId, true);
+  await runPanelAction(async () => {
+    setRepoOp(repoId, "切换中", "正在切换仓库版本");
+    try {
+      const job = await api("/repositories/checkout", {
+        method: "POST",
+        body: JSON.stringify({ repo_id: repoId, commit_hash: commitHash, force }),
+      });
+      await waitJob(job.id);
+    } finally {
+      clearRepoOp(repoId);
     }
+    await refreshRepoAfterWrite(repoId);
   });
 }
 
 async function checkUpstream() {
   const repo_ids = selectedRepoIds().filter((id) => id.startsWith("plugin:"));
-  await runTaskAction(async () => {
+  await runPanelAction(async () => {
     const job = await api("/repositories/upstream-check", {
       method: "POST",
       body: JSON.stringify({ repo_ids: repo_ids.length ? repo_ids : null }),
@@ -1150,13 +1282,13 @@ async function addPlugin() {
     return;
   }
   if (!confirm("确认新增第三方插件？这会 clone 仓库并创建或连接组织 origin。")) return;
-  await runTaskAction(async () => {
+  await runPanelAction(async () => {
     const job = await api("/plugins/add", {
       method: "POST",
       body: JSON.stringify({ repo_url }),
     });
     await waitJob(job.id);
-    await loadRepos(false, { keepBusy: true });
+    await loadRepos(false);
   });
 }
 

@@ -352,6 +352,23 @@ async def test_repo_status_reports_fetch_failure_without_raising(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_service_scan_repository_fetches_single_repo_status(tmp_path: Path):
+    (tmp_path / ".git").mkdir(parents=True)
+    runner = FakeRunner()
+    settings = ManagerSettings(project_root=tmp_path)
+    service = UpdateManagerService(settings=settings, runner=runner)
+
+    status = await service.scan_repository("root", fetch=True)
+
+    assert status.repo.id == "root"
+    assert status.behind == 2
+    assert any(
+        command[1] == ("fetch", "origin", "--prune")
+        for command in runner.commands
+    )
+
+
+@pytest.mark.asyncio
 async def test_force_update_ignores_tracked_dirty_without_clean(tmp_path: Path):
     repo_path = tmp_path / "repo"
     (repo_path / ".git").mkdir(parents=True)
