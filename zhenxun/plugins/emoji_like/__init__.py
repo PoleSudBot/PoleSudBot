@@ -4,8 +4,8 @@ import nonebot
 from nonebot import on_message
 from nonebot.plugin import PluginMetadata
 
-from .emoji_map import extract_emoji_query
-from .service import apply_emoji_like
+from .emoji_map import extract_emoji_queries
+from .service import apply_emoji_like_id
 
 __plugin_meta__ = PluginMetadata(
     name="贴表情",
@@ -14,20 +14,23 @@ __plugin_meta__ = PluginMetadata(
 回复一条消息后发送单个 emoji，或发送 `贴<emoji>`，例如：
 
 - `㊗️`
+- `㊗️❤️`
 - `👍`
 - `贴㊗️`
+- `贴 128077`
+- `贴 ㊗️ 128077 ❤️`
 - `贴✨`
 
-仅支持单个 emoji；组合 emoji 或协议端不支持时会静默跳过。
+仅支持单码位 emoji；组合 emoji 或协议端不支持时会静默跳过。
     """.strip(),
     supported_adapters={"~onebot.v11"},
     extra={
         "author": "k1yuyu",
-        "version": "0.1.0",
+        "version": "0.1.1",
         "menu_type": "一些工具",
         "commands": [
             {
-                "command": "[回复消息] 贴<emoji>",
+                "command": "[回复消息] <emoji> / 贴<emoji|数字ID>",
                 "description": "给被回复消息贴表情",
             }
         ],
@@ -61,7 +64,7 @@ if _nonebot_ready():
         async def _rule(bot: Bot, event: MessageEvent, session: Uninfo) -> bool:
             if PlatformUtils.get_platform(session) != "qq":
                 return False
-            if extract_emoji_query(event.message.extract_plain_text()) is None:
+            if not extract_emoji_queries(event.message.extract_plain_text()):
                 return False
             return bool(await reply_fetch(event, bot))
 
@@ -77,37 +80,33 @@ if _nonebot_ready():
     async def _(bot: Bot, event: MessageEvent, session: Uninfo):
         """解析用户输入并调用 NapCat 扩展接口给被回复消息贴表情。"""
 
-        result = extract_emoji_query(event.message.extract_plain_text())
-        if result is None:
+        results = extract_emoji_queries(event.message.extract_plain_text())
+        if not results:
             return
 
         reply = await reply_fetch(event, bot)
         if reply is None:
             return
 
-        try:
-            result = await apply_emoji_like(
-                bot,
-                reply.id,
-                result.normalized,
-            )
-        except ActionFailed as exc:
-            logger.warning(
-                (
-                    "贴表情失败: "
-                    f"message_id={reply.id}, emoji_id={result.emoji_id}, err={exc}"
-                ),
+        pasted_ids: list[str] = []
+        for result in results:
+            try:
+                await apply_emoji_like_id(bot, reply.id, result)
+            except ActionFailed as exc:
+                logger.warning(
+                    (
+                        "贴表情失败: "
+                        f"message_id={reply.id}, emoji_id={result.emoji_id}, err={exc}"
+                    ),
+                    "贴表情",
+                    session=session,
+                )
+                continue
+            pasted_ids.append(result.emoji_id)
+
+        if pasted_ids:
+            logger.info(
+                f"贴表情: message_id={reply.id}, emoji_ids={pasted_ids}",
                 "贴表情",
                 session=session,
             )
-            return
-
-        logger.info(
-            (
-                "贴表情: "
-                f"message_id={reply.id}, emoji={result.normalized}, "
-                f"emoji_id={result.emoji_id}"
-            ),
-            "贴表情",
-            session=session,
-        )

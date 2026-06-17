@@ -5,6 +5,14 @@ import unicodedata
 
 VARIATION_SELECTOR_16 = "\ufe0f"
 COMMAND_PREFIX = "贴"
+MAX_UINT32 = 0xFFFFFFFF
+ZERO_WIDTH_JOINER = "\u200d"
+KEYCAP_COMBINING_MARK = "\u20e3"
+EMOJI_MODIFIER_START = 0x1F3FB
+EMOJI_MODIFIER_END = 0x1F3FF
+REGIONAL_INDICATOR_START = 0x1F1E6
+REGIONAL_INDICATOR_END = 0x1F1FF
+LEGACY_SINGLE_CODEPOINT_EMOJIS = {"©", "®"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,9 +33,27 @@ def normalize_emoji_key(value: str) -> str:
 
 
 def _is_single_symbol_emoji(value: str) -> bool:
-    """只允许单个 Unicode 符号码位，避免把中文、字母或组合序列误转成 id。"""
+    """只允许单个 Unicode 符号码位，避免把普通符号误转成 id。"""
 
-    return len(value) == 1 and unicodedata.category(value).startswith("S")
+    # 低码点 legacy emoji 需要显式放行，否则 ©️/®️ 会被码点阈值误排除。
+    if value in LEGACY_SINGLE_CODEPOINT_EMOJIS:
+        return True
+    return (
+        len(value) == 1
+        and ord(value) > 256
+        and unicodedata.category(value).startswith("S")
+    )
+
+
+def _is_sequence_marker(value: str) -> bool:
+    """识别肤色、国旗、键帽和 ZWJ 这类 NapCat 单个 id 无法可靠表达的序列组件。"""
+
+    codepoint = ord(value)
+    return (
+        value in {ZERO_WIDTH_JOINER, KEYCAP_COMBINING_MARK}
+        or EMOJI_MODIFIER_START <= codepoint <= EMOJI_MODIFIER_END
+        or REGIONAL_INDICATOR_START <= codepoint <= REGIONAL_INDICATOR_END
+    )
 
 
 def lookup_emoji_id(raw_query: str) -> EmojiLookupResult | None:
@@ -47,17 +73,62 @@ def lookup_emoji_id(raw_query: str) -> EmojiLookupResult | None:
     )
 
 
-def extract_emoji_query(raw_text: str) -> EmojiLookupResult | None:
-    """从回复消息文本中识别裸 emoji 或兼容入口“贴<emoji>”。"""
+def lookup_emoji_ids(raw_query: str) -> list[EmojiLookupResult]:
+    """把连续的单码位 emoji 拆成多个可贴表情结果。"""
+
+    query = raw_query.strip()
+    if not query:
+        return []
+
+    normalized = normalize_emoji_key(query)
+    if not normalized or any(_is_sequence_marker(char) for char in normalized):
+        return []
+
+    results: list[EmojiLookupResult] = []
+    for char in normalized:
+        if not _is_single_symbol_emoji(char):
+            return []
+        results.append(
+            EmojiLookupResult(
+                query=char,
+                normalized=char,
+                emoji_id=str(ord(char)),
+            )
+        )
+    return results
+
+
+def lookup_numeric_emoji_id(raw_query: str) -> EmojiLookupResult | None:
+    """只把“贴”前缀后的十进制数字解析为直通 emoji_id。"""
+
+    query = raw_query.strip()
+    if not query.isdecimal():
+        return None
+
+    emoji_int_id = int(query)
+    if emoji_int_id > MAX_UINT32:
+        return None
+    return EmojiLookupResult(
+        query=query,
+        normalized=query,
+        emoji_id=str(emoji_int_id),
+    )
+
+
+def extract_emoji_queries(raw_text: str) -> list[EmojiLookupResult]:
+    """从回复消息文本中识别裸 emoji、兼容入口“贴<emoji>”或“贴 <数字>”。"""
 
     text = raw_text.strip()
     if not text:
-        return None
+        return []
 
-    result = lookup_emoji_id(text)
-    if result is not None:
-        return result
+    if not text.startswith(COMMAND_PREFIX):
+        return lookup_emoji_ids(text)
 
-    if text.startswith(COMMAND_PREFIX):
-        return lookup_emoji_id(text.removeprefix(COMMAND_PREFIX).strip())
-    return None
+    results: list[EmojiLookupResult] = []
+    for token in text.removeprefix(COMMAND_PREFIX).strip().split():
+        if result := lookup_numeric_emoji_id(token):
+            results.append(result)
+        else:
+            results.extend(lookup_emoji_ids(token))
+    return results
