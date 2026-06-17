@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -8,6 +9,7 @@ from nonebot_plugin_alconna import Alconna, Args, At, CommandMeta, MultiVar, Tex
 from .utils import is_time_range_word
 
 MCTIME_SELF_WORDS = {"me", "我", "自己"}
+MC_PLAYER_NAME_PATTERN = r"^[A-Za-z0-9_]{3,16}$"
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,11 @@ def resolve_mctime_query(
 
 def _is_range_start(word: str) -> bool:
     return is_time_range_word(word)
+
+
+def is_mc_player_name(value: str) -> bool:
+    # 白名单会直达 RCON，先按 Java 用户名规则挡掉疑似闲聊的短别名误触发。
+    return re.fullmatch(MC_PLAYER_NAME_PATTERN, value) is not None
 
 
 def mcbind_command() -> Alconna:

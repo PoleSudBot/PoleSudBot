@@ -9,6 +9,7 @@ from zhenxun.utils.message import MessageUtils
 
 from .command_schema import (
     first_at_from_parts,
+    is_mc_player_name,
     mcbind_command,
     mcbluemap_command,
     mcchart_command,
@@ -556,6 +557,9 @@ async def _(bot: Bot, event: Event, parts: Match[tuple[Text | At, ...]]):
     player_name = text_words[0] if text_words else ""
     if not player_name:
         await _finish_text("用法：mcwhitelist <玩家名> [@用户]")
+    if not is_mc_player_name(player_name):
+        # 非法玩家名更可能是 mcw 短别名误触发的闲聊，静默放过避免打扰群聊。
+        return
 
     target_qq = _first_at_from_parts(arg_parts) or str(group_event.user_id)
     if target_qq != str(group_event.user_id):

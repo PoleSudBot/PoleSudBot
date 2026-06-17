@@ -4,6 +4,7 @@ from nonebot_plugin_alconna import At, Text
 
 from zhenxun.plugins.mc_server.command_schema import (
     MctimeQuery,
+    is_mc_player_name,
     mcbind_command,
     mcchart_command,
     mcinfo_command,
@@ -88,6 +89,14 @@ def test_mcwhitelist_parses_text_parts():
 
     assert parsed.matched
     assert _texts(parsed.query("parts")) == ["Steve"]
+
+
+def test_mcwhitelist_player_name_rule_matches_java_username_boundary():
+    for player_name in ["Steve", "Steve123", "Steve_1", "abc", "A" * 16]:
+        assert is_mc_player_name(player_name)
+
+    for player_name in ["St", "A" * 17, "史蒂夫", "Steve-1", "y怎么不收💰"]:
+        assert not is_mc_player_name(player_name)
 
 
 def test_mctime_target_parser_keeps_ranking_range_without_target():

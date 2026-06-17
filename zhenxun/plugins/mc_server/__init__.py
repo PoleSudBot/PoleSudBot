@@ -50,6 +50,7 @@ _USAGE = """
 - `mcwhitelist <玩家名> @用户`
   管理员代别人添加白名单并绑定 QQ。
 
+玩家名需为 3-16 位英文、数字或下划线。
 绑定后，个人在线图和部分展示会优先使用该 QQ 与玩家名的关系。
 
 ### 管理者入口
@@ -106,7 +107,7 @@ if _nonebot_ready():
         usage=_USAGE,
         extra=PluginExtraData(
             author="k1yuyu",
-            version="0.4.4",
+            version="0.4.5",
             menu_type="游戏相关",
             configs=REGISTER_CONFIGS,
             commands=[
@@ -144,7 +145,7 @@ if _nonebot_ready():
                 ),
                 Command(
                     command="mcwhitelist/mcw",
-                    params=["玩家名"],
+                    params=["玩家名(3-16位英文/数字/下划线)"],
                     description="添加白名单并绑定QQ",
                 ),
             ],
