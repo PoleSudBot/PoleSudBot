@@ -7,6 +7,10 @@ nonebot.init()
 from zhenxun.plugins.moesekai import __plugin_meta__
 
 
+def test_metadata_does_not_register_rate_limits():
+    assert not __plugin_meta__.extra.get("limits")
+
+
 def test_usage_contains_markdown_sections_and_examples():
     usage = __plugin_meta__.usage or ""
     assert "## 🌟 快速开始" in usage

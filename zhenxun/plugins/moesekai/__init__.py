@@ -141,7 +141,7 @@ __plugin_meta__ = PluginMetadata(
 """.strip(),
     extra={
         "author": "k1yuyu",
-        "version": "3.3.1",
+        "version": "3.3.2",
         "menu_type": "游戏相关",
         "configs": [
             c.model_dump() if hasattr(c, "model_dump") else c.dict()
@@ -169,7 +169,6 @@ pjsk 查询绑定 <uid|qq> ...
 pjsk test live提醒 [区服] [live_id]
 pjsk test 新卡上线提醒 [区服] [card_id...]
 """.strip(),
-        "limits": [{"cd": 3, "result": "操作太快啦，请 {cd} 秒后再试~"}],
     },
 )
 
