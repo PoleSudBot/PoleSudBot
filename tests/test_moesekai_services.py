@@ -1990,9 +1990,7 @@ async def test_prepare_new_card_summary_item_uses_generic_summary_lines(
 
     expected = "\n".join(
         [
-            f"{service_module.server_label('jp')} 新卡上线/表情更新",
-            "Revision：rev-summary",
-            "检测到新卡/表情更新",
+            "检测到 日服 新卡/表情更新，上传中..",
         ]
     )
     assert str(item.message) == expected

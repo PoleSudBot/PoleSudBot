@@ -1386,12 +1386,6 @@ class MoeSekaiApplication:
         if not server_state:
             state.pop(server, None)
 
-    def _new_card_summary_lines(self, revision: str | None) -> list[str]:
-        return [
-            f"Revision：{revision or '-'}",
-            "检测到新卡/表情更新",
-        ]
-
     @staticmethod
     def _new_card_setting_value(
         settings: Any,
@@ -1789,12 +1783,7 @@ class MoeSekaiApplication:
         revision: str | None,
         key: str,
     ) -> _NewCardReminderPreparedItem:
-        summary_text = "\n".join(
-            [
-                f"{server_label(server)} 新卡上线/表情更新",
-                *self._new_card_summary_lines(revision),
-            ]
-        )
+        summary_text = f"检测到 {server_label(server)} 新卡/表情更新，上传中.."
         return _NewCardReminderPreparedItem(
             key=key,
             kind="summary",
