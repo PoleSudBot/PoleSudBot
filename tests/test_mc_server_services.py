@@ -733,6 +733,74 @@ async def test_handle_log_event_suppresses_short_rejoin_and_keeps_session(
 
 
 @pytest.mark.asyncio
+async def test_pending_leave_drains_log_before_confirming_rejoin(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    started_at = datetime(2026, 5, 16, 20, 0, 0)
+    left_at = started_at + timedelta(minutes=5)
+    rejoined_at = left_at + timedelta(seconds=3)
+    server = SimpleNamespace(id=1, group_id="123456")
+    binding = _FakeBinding()
+    binding.join_notify_enabled = True
+    service = McServerService()
+    starts = []
+    ended_sessions = []
+    notices = []
+    drained = []
+
+    async def fake_start_session(_server, player_name: str, *, occurred_at):
+        starts.append((player_name, occurred_at))
+        return None
+
+    async def fake_end_session(_server, player_name: str, *, occurred_at):
+        ended_sessions.append((player_name, occurred_at))
+        return SimpleNamespace(started_at=started_at, ended_at=occurred_at)
+
+    async def fake_list_server_group_bindings(_server):
+        return [binding]
+
+    async def fake_send_notice_to_group(group_id: str, message: str):
+        notices.append((group_id, message))
+
+    async def fake_process_log(_server):
+        drained.append(_server)
+        await service._handle_log_event(
+            _server,
+            SimpleNamespace(
+                type="join",
+                player_name="Steve",
+                occurred_at=rejoined_at,
+            ),
+        )
+
+    monkeypatch.setattr(
+        mc_services,
+        "get_settings",
+        lambda: SimpleNamespace(rejoin_suppress_seconds=0.01),
+    )
+    monkeypatch.setattr(mc_services, "start_session", fake_start_session)
+    monkeypatch.setattr(mc_services, "end_session", fake_end_session)
+    monkeypatch.setattr(
+        mc_services,
+        "list_server_group_bindings",
+        fake_list_server_group_bindings,
+    )
+    monkeypatch.setattr(service, "_send_notice_to_group", fake_send_notice_to_group)
+    monkeypatch.setattr(service, "process_log", fake_process_log)
+
+    await service._handle_log_event(
+        server,
+        SimpleNamespace(type="leave", player_name="Steve", occurred_at=left_at),
+    )
+    await asyncio.sleep(0.03)
+
+    assert drained == [server]
+    assert starts == [("Steve", rejoined_at)]
+    assert ended_sessions == []
+    assert notices == []
+
+
+@pytest.mark.asyncio
 async def test_handle_log_event_counts_online_from_first_join_after_short_rejoin(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -1054,3 +1122,27 @@ async def test_process_log_reads_from_start_after_inode_change(
     assert cursor.offset == log_path.stat().st_size
     assert cursor.inode == str(log_path.stat().st_ino)
     assert [event.player_name for event in handled_events] == ["Steve"]
+
+
+@pytest.mark.asyncio
+async def test_process_log_locked_serializes_same_server(monkeypatch: pytest.MonkeyPatch):
+    server = SimpleNamespace(id=1, log_path="")
+    service = McServerService()
+    active = 0
+    max_active = 0
+
+    async def fake_process_log(_server):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+
+    monkeypatch.setattr(service, "process_log", fake_process_log)
+
+    await asyncio.gather(
+        service._process_log_locked(server),
+        service._process_log_locked(server),
+    )
+
+    assert max_active == 1

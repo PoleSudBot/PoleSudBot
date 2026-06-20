@@ -101,6 +101,7 @@ class McServerService:
         self._polling = False
         self._startup_sessions_closed = False
         self._pending_leaves: dict[tuple[int, str], _PendingLeave] = {}
+        self._log_locks: dict[str, asyncio.Lock] = {}
 
     async def bind_group_server(self, group_id: str, address: str) -> str:
         rendered = await self.bind_group_server_with_status(group_id, address)
@@ -538,13 +539,27 @@ class McServerService:
                         f"MC服务器监听连接断开：{status.error or '无法连接'}",
                         switch=SWITCH_CONN,
                     )
-            await self.process_log(server)
+            await self._process_log_locked(server)
         return PollResult(checked=checked, notified=notified)
 
+    def _log_lock_key(self, server: McServer) -> str:
+        server_id = getattr(server, "id", None)
+        return str(server_id) if server_id is not None else f"object:{id(server)}"
+
+    async def _process_log_locked(self, server: McServer) -> None:
+        key = self._log_lock_key(server)
+        lock = self._log_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._log_locks[key] = lock
+        async with lock:
+            await self.process_log(server)
+
     async def process_log(self, server: McServer) -> None:
-        if not server.log_path:
+        log_path = getattr(server, "log_path", "")
+        if not log_path:
             return
-        path = Path(server.log_path)
+        path = Path(log_path)
         if not path.exists():
             return
         stat_result = path.stat()
@@ -738,7 +753,9 @@ class McServerService:
         )
         if not pending:
             return False
-        pending.task.cancel()
+        # 补读日志时可能由 pending task 自己读到重进事件，此时只移除 pending 标记。
+        if pending.task is not asyncio.current_task():
+            pending.task.cancel()
         return True
 
     def _schedule_pending_leave(
@@ -765,6 +782,11 @@ class McServerService:
         key = self._pending_leave_key(server, player_name)
         try:
             await asyncio.sleep(get_settings().rejoin_suppress_seconds)
+            # 到点前再消费一次新增日志，避免玩家已重进但常规轮询尚未读到日志。
+            await self._process_log_locked(server)
+            pending = self._pending_leaves.get(key)
+            if not pending or pending.task is not asyncio.current_task():
+                return
             session = await end_session(
                 server,
                 player_name,

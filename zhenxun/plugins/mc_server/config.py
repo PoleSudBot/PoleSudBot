@@ -87,8 +87,8 @@ REGISTER_CONFIGS = [
     RegisterConfig(
         module=MODULE_NAME,
         key="MC_REJOIN_SUPPRESS_SECONDS",
-        value=30,
-        default_value=30,
+        value=90,
+        default_value=90,
         help="玩家短时间重进时抑制进退服播报的窗口（秒）",
         type=int,
     ),
@@ -282,7 +282,7 @@ def get_settings() -> McServerSettings:
             raw.get("MC_BIND_FLOW_TIMEOUT_SECONDS", 120), 120, 30
         ),
         rejoin_suppress_seconds=_as_int(
-            raw.get("MC_REJOIN_SUPPRESS_SECONDS", 30), 30, 5
+            raw.get("MC_REJOIN_SUPPRESS_SECONDS", 90), 90, 5
         ),
         min_online_session_seconds=_as_int(
             raw.get("MC_MIN_ONLINE_SESSION_SECONDS", 180), 180, 0
