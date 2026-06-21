@@ -333,16 +333,20 @@ def load_rollpig_plugin_module(
     fake_texts.FOOD_PIG_IDS = set()
     fake_texts.HUMAN_PIG_ID = "human"
     fake_texts.EATEN_PIG_ID = "eaten"
+    fake_texts.SOLD_PIG_ID = "sold-out"
     fake_texts.FORCE_ROAST_KEYWORDS = []
     fake_texts.SUPER_FORCE_ROAST_KEYWORD = "super"
     fake_texts.TODAY_ROAST_HUMAN_BLOCK_TEXTS = [""]
     fake_texts.TODAY_ROAST_EATEN_BLOCK_TEXTS = [""]
+    fake_texts.TODAY_ROAST_SOLD_BLOCK_TEXTS = [""]
     fake_texts.TODAY_ROAST_FOOD_BLOCK_TEXTS = [""]
     fake_texts.TARGET_HUMAN_BLOCK_TEXTS = [""]
     fake_texts.TARGET_EATEN_BLOCK_TEXTS = [""]
+    fake_texts.TARGET_SOLD_BLOCK_TEXTS = [""]
     fake_texts.TARGET_FOOD_BLOCK_TEXTS = [""]
     fake_texts.BACKFIRE_HUMAN_TEXTS = ["{attacker}{target}"]
     fake_texts.BACKFIRE_EATEN_TEXTS = ["{attacker}{target}"]
+    fake_texts.BACKFIRE_SOLD_TEXTS = ["{attacker}{target}"]
     fake_texts.BACKFIRE_FOOD_TEXTS = ["{attacker}{target}"]
     fake_texts.BACKFIRE_NO_PIG_TEXTS = ["{attacker}{target}"]
     fake_texts.BACKFIRE_GENERIC_TEXTS = ["{attacker}{target}"]
@@ -657,5 +661,95 @@ def test_pigsty_growth_summary_keeps_repeat_and_streak_notes(monkeypatch):
 
     assert {"label": "最高等级", "value": "EX Lv. 2"} in stats
     assert any("本命猪" in note and "EX Lv. 2" in note for note in notes)
-    assert any("高等级小猪" in note and "×3" in note for note in notes)
+    assert any("高等级小猪" in note and "EX Lv.2" in note for note in notes)
+    assert all("×3" not in note for note in notes)
     assert any("连续重复：2 次" in note for note in notes)
+
+
+def test_pigsty_footer_matches_upstream_summary_copy(monkeypatch):
+    module = load_rollpig_plugin_module(
+        monkeypatch,
+        fake_store=object(),
+        fake_data_manager=object(),
+        group_members=[],
+    )
+
+    assert module.build_my_pigsty_footer(0) == "发送「今日小猪」开始收集。"
+    assert (
+        module.build_my_pigsty_footer(1)
+        == "完整图鉴图还在施工，先把成长进度记牢。"
+    )
+
+
+def test_rollpig_resource_json_accepts_utf8_bom(monkeypatch, tmp_path):
+    module = load_rollpig_plugin_module(
+        monkeypatch,
+        fake_store=object(),
+        fake_data_manager=object(),
+        group_members=[],
+    )
+    resource_file = tmp_path / "pig.json"
+    resource_file.write_text(
+        '\ufeff[{"id": "bom-pig", "name": "BOM"}]', encoding="utf-8"
+    )
+
+    assert module.load_resource_json(resource_file, []) == [
+        {"id": "bom-pig", "name": "BOM"}
+    ]
+
+
+def test_rollpig_rules_extend_special_shape_ids(monkeypatch):
+    module = load_rollpig_plugin_module(
+        monkeypatch,
+        fake_store=object(),
+        fake_data_manager=object(),
+        group_members=[],
+    )
+    module.PIG_RULES = {
+        "food_pigs": ["cake-pig"],
+        "human_pigs": ["guest-human"],
+        "eaten_pigs": ["missing-pig"],
+        "sold_pigs": ["auctioned-pig"],
+    }
+
+    assert module.is_food_pig({"id": "cake-pig"})
+    assert module.is_human_pig({"id": "guest-human"})
+    assert module.is_eaten_pig({"id": "missing-pig"})
+    assert module.is_sold_pig({"id": "auctioned-pig"})
+    assert module.is_sold_pig({"id": "sold-out"})
+
+
+def test_builtin_special_rule_ids_have_pig_entries(monkeypatch):
+    module = load_rollpig_plugin_module(
+        monkeypatch,
+        fake_store=object(),
+        fake_data_manager=object(),
+        group_members=[],
+    )
+
+    # pig_rules.json 只做本地分类；缺条目会让账本 ID 被当作异常数据。
+    for key in ("food_pigs", "human_pigs", "eaten_pigs", "sold_pigs"):
+        assert all(
+            module.get_pig_by_id(pig_id) for pig_id in module._read_rule_ids(key)
+        )
+
+
+def test_backfire_roast_skips_terminal_shapes(monkeypatch):
+    module = load_rollpig_plugin_module(
+        monkeypatch,
+        fake_store=object(),
+        fake_data_manager=object(),
+        group_members=[],
+    )
+    module.PIG_RULES = {
+        "food_pigs": ["food-pig"],
+        "human_pigs": [],
+        "eaten_pigs": [],
+        "sold_pigs": [],
+    }
+
+    assert module.can_backfire_roast({"id": "pig"})
+    assert not module.can_backfire_roast({"id": "human"})
+    assert not module.can_backfire_roast({"id": "eaten"})
+    assert not module.can_backfire_roast({"id": "sold-out"})
+    assert not module.can_backfire_roast({"id": "food-pig"})

@@ -55,12 +55,12 @@ from .store.models import DailyRollResult, DrawState, RoastEvent
 from .summary_service import build_daily_summary
 from .texts import (
     BACKFIRE_NO_PIG_TEXTS, BACKFIRE_GENERIC_TEXTS,
-    BACKFIRE_HUMAN_TEXTS, BACKFIRE_EATEN_TEXTS, BACKFIRE_FOOD_TEXTS,
+    BACKFIRE_HUMAN_TEXTS, BACKFIRE_EATEN_TEXTS, BACKFIRE_SOLD_TEXTS, BACKFIRE_FOOD_TEXTS,
     DAILY_ROLL_DUPLICATE_LEVEL_UP_TEXTS,
     DAILY_ROLL_DUPLICATE_SAME_LEVEL_TEXTS,
     DAILY_ROLL_NEW_PIG_TEXTS,
     DAILY_SUMMARY_EMPTY_TEXTS, DAILY_SUMMARY_HEADER, DAILY_SUMMARY_FOOTER,
-    EATEN_PIG_ID,
+    EATEN_PIG_ID, SOLD_PIG_ID,
     ESCAPE_TEXTS,
     FOOD_PIG_IDS, HUMAN_PIG_ID,
     FORCE_ROAST_KEYWORDS, SUPER_FORCE_ROAST_KEYWORD,
@@ -71,9 +71,11 @@ from .texts import (
     SUPER_FORCE_ROAST_PREFIX_TEXTS, FORCE_ROAST_PREFIX_TEXTS,
     TARGET_HUMAN_BLOCK_TEXTS,
     TARGET_EATEN_BLOCK_TEXTS,
+    TARGET_SOLD_BLOCK_TEXTS,
     TARGET_FOOD_BLOCK_TEXTS,
     TODAY_ROAST_HUMAN_BLOCK_TEXTS,
     TODAY_ROAST_EATEN_BLOCK_TEXTS,
+    TODAY_ROAST_SOLD_BLOCK_TEXTS,
     TODAY_ROAST_FOOD_BLOCK_TEXTS,
     TOMORROW_TEXTS,
 )
@@ -226,6 +228,7 @@ __plugin_meta__ = PluginMetadata(
 
 PLUGIN_DIR = Path(__file__).parent
 PIGINFO_PATH = PLUGIN_DIR / "resource" / "pig.json"
+PIG_RULES_PATH = PLUGIN_DIR / "resource" / "pig_rules.json"
 IMAGE_DIR = PLUGIN_DIR / "resource" / "image"
 RES_DIR = PLUGIN_DIR / "resource"
 PIGHUB_IMAGE_BASE_URL = "https://pighub.top/data/"
@@ -240,13 +243,14 @@ def load_resource_json(path, default):
     if not path.exists():
         return default
     try:
-        return json.loads(path.read_text("utf-8"))
+        return json.loads(path.read_text("utf-8-sig"))
     except Exception as e:
         logger.error(f"资源文件读取失败: {path} error={e}")
         return default
 
 
 PIG_LIST = load_resource_json(PIGINFO_PATH, [])
+PIG_RULES = load_resource_json(PIG_RULES_PATH, {})
 RANKING_CONCURRENCY_LIMIT = 8
 PANEL_AVATAR_CONCURRENCY_LIMIT = 8
 DEFAULT_RANK_LIMIT = 5
@@ -274,15 +278,59 @@ def get_pig_by_id(pig_id: Optional[str]) -> Optional[dict]:
 
 
 def is_food_pig(pig_data: Optional[dict]) -> bool:
-    return bool(pig_data and pig_data.get("id") in FOOD_PIG_IDS)
+    return bool(pig_data and pig_data.get("id") in get_food_pig_ids())
+
+
+def _read_rule_ids(key: str) -> list[str]:
+    """从本地 pig_rules.json 读取特殊形态 ID，规则文件异常时保持内置常量可用。"""
+    values = PIG_RULES.get(key, []) if isinstance(PIG_RULES, dict) else []
+    if not isinstance(values, list):
+        logger.warning(f"pig_rules.{key} 必须是列表，已忽略")
+        return []
+    return [str(value) for value in values if str(value)]
+
+
+def get_food_pig_ids() -> list[str]:
+    """合并内置熟食列表和本地规则文件，避免新增熟食绕过烧烤拦截。"""
+    return list(dict.fromkeys([*FOOD_PIG_IDS, *_read_rule_ids("food_pigs")]))
+
+
+def get_human_pig_ids() -> list[str]:
+    """合并内置人类形态和本地规则文件，保留后续扩展特殊人形的空间。"""
+    return list(dict.fromkeys([HUMAN_PIG_ID, *_read_rule_ids("human_pigs")]))
+
+
+def get_eaten_pig_ids() -> list[str]:
+    """合并内置“吃掉了”形态和本地规则文件，避免特殊终态被继续加工。"""
+    return list(dict.fromkeys([EATEN_PIG_ID, *_read_rule_ids("eaten_pigs")]))
+
+
+def get_sold_pig_ids() -> list[str]:
+    """合并内置“卖掉了”形态和本地规则文件，让售罄终态走独立拦截。"""
+    return list(dict.fromkeys([SOLD_PIG_ID, *_read_rule_ids("sold_pigs")]))
 
 
 def is_human_pig(pig_data: Optional[dict]) -> bool:
-    return bool(pig_data and pig_data.get("id") == HUMAN_PIG_ID)
+    return bool(pig_data and pig_data.get("id") in get_human_pig_ids())
 
 
 def is_eaten_pig(pig_data: Optional[dict]) -> bool:
-    return bool(pig_data and pig_data.get("id") == EATEN_PIG_ID)
+    return bool(pig_data and pig_data.get("id") in get_eaten_pig_ids())
+
+
+def is_sold_pig(pig_data: Optional[dict]) -> bool:
+    return bool(pig_data and pig_data.get("id") in get_sold_pig_ids())
+
+
+def can_backfire_roast(attacker_pig: Optional[dict]) -> bool:
+    """判断反噬时攻击者是否还能被做成食物；特殊终态只走文字反噬。"""
+    return bool(
+        attacker_pig
+        and not is_food_pig(attacker_pig)
+        and not is_human_pig(attacker_pig)
+        and not is_eaten_pig(attacker_pig)
+        and not is_sold_pig(attacker_pig)
+    )
 
 
 def get_expert_level(copies: int) -> int:
@@ -363,10 +411,7 @@ def build_pigsty_growth_notes(draw_state: DrawState) -> list[str]:
         for pig_id, progress in repeat_items:
             pig = get_pig_by_id(pig_id)
             pig_name = pig.get("name", pig_id) if pig else pig_id
-            parts.append(
-                f"【{pig_name}】EX Lv.{get_expert_level(progress.copies)}"
-                f"×{progress.copies}"
-            )
+            parts.append(f"【{pig_name}】EX Lv.{get_expert_level(progress.copies)}")
         notes.append("高等级小猪：" + "、".join(parts))
 
     if draw_state.duplicate_streak > 0:
@@ -421,6 +466,9 @@ def pick_backfire_text(attacker_name: str, target_name: str, attacker_pig: Optio
     elif is_eaten_pig(attacker_pig):
         pool = BACKFIRE_EATEN_TEXTS
         shape = "吃掉了"
+    elif is_sold_pig(attacker_pig):
+        pool = BACKFIRE_SOLD_TEXTS
+        shape = "卖掉了"
     elif is_food_pig(attacker_pig):
         pool = BACKFIRE_FOOD_TEXTS
         shape = attacker_pig.get("name", "熟食")
@@ -733,8 +781,15 @@ def build_my_pigsty_text(
     ]
     if ranking_note:
         lines.append(ranking_note)
-    lines.append("继续加油，争取成为猪王！" if user_count > 0 else "今天先去抽一只小猪，猪圈就热闹起来了。")
+    lines.append(build_my_pigsty_footer(user_count))
     return "\n".join(lines)
+
+
+def build_my_pigsty_footer(user_count: int) -> str:
+    """生成猪圈底部提示，让文本兜底和 PSB 面板使用同一份文案。"""
+    if user_count <= 0:
+        return "发送「今日小猪」开始收集。"
+    return "完整图鉴图还在施工，先把成长进度记牢。"
 
 
 def build_my_pigsty_ranking_note(
@@ -1264,6 +1319,13 @@ async def _(event: Event):
         )
         return
 
+    if is_sold_pig(original_pig):
+        await cmd_roast.finish(
+            MessageSegment.reply(event.message_id)
+            + random.choice(TODAY_ROAST_SOLD_BLOCK_TEXTS)
+        )
+        return
+
     if is_food_pig(original_pig):
         await cmd_roast.finish(
             MessageSegment.reply(event.message_id)
@@ -1271,7 +1333,7 @@ async def _(event: Event):
         )
         return
 
-    food_id = random.choice(FOOD_PIG_IDS)
+    food_id = random.choice(get_food_pig_ids())
     food_pig_template = get_pig_by_id(food_id)
     if not food_pig_template:
         await cmd_roast.finish("食材配置缺失，请检查 pig.json。")
@@ -1369,7 +1431,7 @@ async def _(bot: Bot, event: GroupMessageEvent):
 
     # 检测目标是否是 Bot 自身 → 特殊反噬，不消耗 CD，纯文本回复
     if target_id == str(event.self_id):
-        food_id = random.choice(FOOD_PIG_IDS)
+        food_id = random.choice(get_food_pig_ids())
         food_pig = get_pig_by_id(food_id)
         food_name = food_pig["name"] if food_pig else "美食"
         bot_text = random.choice(ROAST_BOT_TEXTS).format(
@@ -1439,6 +1501,13 @@ async def _(bot: Bot, event: GroupMessageEvent):
         )
         return
 
+    if is_sold_pig(target_pig):
+        await cmd_roast_member.finish(
+            MessageSegment.reply(event.message_id)
+            + random.choice(TARGET_SOLD_BLOCK_TEXTS).format(target=target_full_display)
+        )
+        return
+
     if is_food_pig(target_pig):
         await cmd_roast_member.finish(
             MessageSegment.reply(event.message_id)
@@ -1472,7 +1541,7 @@ async def _(bot: Bot, event: GroupMessageEvent):
 
     # --- 后门模式：必定成功 ---
     if force_mode in {"normal", "super"}:
-        food_id = random.choice(FOOD_PIG_IDS)
+        food_id = random.choice(get_food_pig_ids())
         food_pig_template = get_pig_by_id(food_id)
         if not food_pig_template:
             await cmd_roast_member.finish("食材配置缺失，请联系管理员修复 pig.json。")
@@ -1513,7 +1582,7 @@ async def _(bot: Bot, event: GroupMessageEvent):
 
     # === 成功 (60%) ===
     if roll <= 60:
-        food_id = random.choice(FOOD_PIG_IDS)
+        food_id = random.choice(get_food_pig_ids())
         food_pig_template = get_pig_by_id(food_id)
         if not food_pig_template:
             await cmd_roast_member.finish("食材配置缺失，请联系管理员修复 pig.json。")
@@ -1567,8 +1636,8 @@ async def _(bot: Bot, event: GroupMessageEvent):
 
     # === 反噬 (10%) ===
     else:
-        if attacker_pig and (not is_food_pig(attacker_pig)) and (not is_human_pig(attacker_pig)):
-            food_id = random.choice(FOOD_PIG_IDS)
+        if can_backfire_roast(attacker_pig):
+            food_id = random.choice(get_food_pig_ids())
             food_pig_template = get_pig_by_id(food_id)
             if not food_pig_template:
                 await cmd_roast_member.finish("食材配置缺失，请联系管理员修复 pig.json。")
@@ -1730,6 +1799,16 @@ async def _(bot: Bot, event: GroupMessageEvent):
         )
         return
 
+    if is_sold_pig(target_pig):
+        sold_text = random.choice(TARGET_SOLD_BLOCK_TEXTS).format(
+            target=target_full_display
+        )
+        await cmd_random_roast.finish(
+            MessageSegment.reply(event.message_id)
+            + f"系统随机选中了{target_full_display}。\n{sold_text}"
+        )
+        return
+
     if is_food_pig(target_pig):
         await cmd_random_roast.finish(
             MessageSegment.reply(event.message_id)
@@ -1746,7 +1825,7 @@ async def _(bot: Bot, event: GroupMessageEvent):
 
     # 成功 (60%)
     if roll <= 60:
-        food_id = random.choice(FOOD_PIG_IDS)
+        food_id = random.choice(get_food_pig_ids())
         food_pig_template = get_pig_by_id(food_id)
         if not food_pig_template:
             await cmd_random_roast.finish("食材配置缺失，请联系管理员修复 pig.json。")
@@ -1800,8 +1879,8 @@ async def _(bot: Bot, event: GroupMessageEvent):
 
     # 反噬 (10%)
     else:
-        if attacker_pig and (not is_food_pig(attacker_pig)) and (not is_human_pig(attacker_pig)):
-            food_id = random.choice(FOOD_PIG_IDS)
+        if can_backfire_roast(attacker_pig):
+            food_id = random.choice(get_food_pig_ids())
             food_pig_template = get_pig_by_id(food_id)
             if not food_pig_template:
                 await cmd_random_roast.finish("食材配置缺失。")
@@ -1954,7 +2033,7 @@ async def _(bot: Bot, event: Event):
     notes = build_pigsty_growth_notes(draw_state)
     if ranking_note:
         notes.insert(0, ranking_note)
-    footer = "继续加油，争取成为猪王！" if user_count > 0 else "今天先去抽一只小猪，猪圈就热闹起来了。"
+    footer = build_my_pigsty_footer(user_count)
     await send_rendered_panel(
         cmd_sty,
         event,
