@@ -14,8 +14,10 @@ ROLLPIG_PLUGIN_DIR = (
     / "nonebot_plugin_rollpig"
 )
 ROLLPIG_DATA_MANAGER_PATH = ROLLPIG_PLUGIN_DIR / "data_manager.py"
+ROLLPIG_CONFIG_PATH = ROLLPIG_PLUGIN_DIR / "config.py"
 ROLLPIG_PLUGIN_INIT_PATH = ROLLPIG_PLUGIN_DIR / "__init__.py"
 ROLLPIG_RANKING_PATH = ROLLPIG_PLUGIN_DIR / "ranking.py"
+ROLLPIG_RESOURCE_MANAGER_PATH = ROLLPIG_PLUGIN_DIR / "resource_manager.py"
 
 
 class FakeLogger:
@@ -67,6 +69,56 @@ class FakeScheduler:
             return func
 
         return decorator
+
+
+class FakeDriver:
+    config = types.SimpleNamespace(superusers=set())
+
+    def on_startup(self, func):
+        return func
+
+
+class FakeResourceManager:
+    def __init__(self):
+        self.pig_list = [
+            {"id": "pig", "name": "普通小猪"},
+            {"id": "human", "name": "人类"},
+            {"id": "eaten", "name": "吃掉了"},
+            {"id": "sold-out", "name": "卖掉了"},
+            {"id": "cake-pig", "name": "蛋糕猪"},
+            {"id": "guest-human", "name": "客人人类"},
+            {"id": "auctioned-pig", "name": "拍卖猪"},
+        ]
+        self.rules = {
+            "food_pigs": ["cake-pig"],
+            "human_pigs": ["guest-human"],
+            "eaten_pigs": ["eaten"],
+            "sold_pigs": ["sold-out", "auctioned-pig"],
+            "roast_excluded_pigs": [],
+        }
+
+    def reload(self):
+        return None
+
+    def find_image_file(self, _pig_id):
+        return None
+
+    def get_pig_by_id(self, pig_id):
+        return next(
+            (item for item in self.pig_list if item["id"] == pig_id),
+            None,
+        )
+
+    def get_rule_ids(self, key):
+        return list(self.rules.get(key, []))
+
+    async def sync_from_remote(self, *, force=False):
+        return types.SimpleNamespace(
+            updated=force,
+            skipped=not force,
+            resource_version="test",
+            message="小猪资源同步完成：test" if force else "资源已是最新版本",
+        )
 
 
 class FakePigProgress:
@@ -184,6 +236,68 @@ def load_rollpig_data_manager_module(
     return module, data_file
 
 
+def load_rollpig_resource_manager_module(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    fake_nonebot = types.ModuleType("nonebot")
+    fake_nonebot.__path__ = []
+    fake_nonebot_log = types.ModuleType("nonebot.log")
+    fake_nonebot_log.logger = FakeLogger()
+    fake_nonebot.log = fake_nonebot_log
+
+    package_name = f"rollpig_resource_testpkg_{uuid.uuid4().hex}"
+    fake_package = types.ModuleType(package_name)
+    fake_package.__path__ = [str(ROLLPIG_PLUGIN_DIR)]
+
+    fake_config = types.ModuleType(f"{package_name}.config")
+    fake_config.get_proxy = lambda: None
+    fake_config.get_resource_manifest_url = lambda: None
+    fake_config.get_resource_max_file_size = lambda: 10 * 1024 * 1024
+    fake_config.get_resource_sync_enabled = lambda: False
+    fake_config.get_resource_sync_timeout = lambda: 10.0
+    fake_config.get_private_resource_manifest_url = lambda: None
+    fake_config.get_private_resource_token = lambda: None
+
+    fake_localstore = types.ModuleType("nonebot_plugin_localstore")
+    fake_localstore.get_plugin_data_dir = lambda: tmp_path / "cache"
+
+    monkeypatch.setitem(sys.modules, "nonebot", fake_nonebot)
+    monkeypatch.setitem(sys.modules, "nonebot.log", fake_nonebot_log)
+    monkeypatch.setitem(sys.modules, "nonebot_plugin_localstore", fake_localstore)
+    monkeypatch.setitem(sys.modules, package_name, fake_package)
+    monkeypatch.setitem(sys.modules, f"{package_name}.config", fake_config)
+
+    module = load_module_from_path(
+        f"{package_name}.resource_manager",
+        ROLLPIG_RESOURCE_MANAGER_PATH,
+    )
+    return module
+
+
+def load_rollpig_config_module(
+    monkeypatch: pytest.MonkeyPatch,
+    config_values: dict,
+):
+    fake_zhenxun = types.ModuleType("zhenxun")
+    fake_zhenxun.__path__ = []
+    fake_configs = types.ModuleType("zhenxun.configs")
+    fake_configs.__path__ = []
+    fake_config_module = types.ModuleType("zhenxun.configs.config")
+    fake_config_module.Config = types.SimpleNamespace(
+        get=lambda _module_name: dict(config_values)
+    )
+
+    monkeypatch.setitem(sys.modules, "zhenxun", fake_zhenxun)
+    monkeypatch.setitem(sys.modules, "zhenxun.configs", fake_configs)
+    monkeypatch.setitem(sys.modules, "zhenxun.configs.config", fake_config_module)
+
+    return load_module_from_path(
+        f"rollpig_config_test_{uuid.uuid4().hex}",
+        ROLLPIG_CONFIG_PATH,
+    )
+
+
 def load_rollpig_plugin_module(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -198,9 +312,7 @@ def load_rollpig_plugin_module(
     fake_nonebot.log = fake_nonebot_log
     fake_nonebot.on_command = lambda *_args, **_kwargs: FakeMatcher()
     fake_nonebot.require = lambda *_args, **_kwargs: None
-    fake_nonebot.get_driver = lambda: types.SimpleNamespace(
-        config=types.SimpleNamespace(superusers=set())
-    )
+    fake_nonebot.get_driver = lambda: FakeDriver()
 
     def _raise_no_bot():
         raise ValueError("no bot")
@@ -291,6 +403,9 @@ def load_rollpig_plugin_module(
 
     fake_config = types.ModuleType(f"{package_name}.config")
     fake_config.Config = type("Config", (), {})
+    fake_config.DEFAULT_PRIVATE_RESOURCE_MANIFEST_URL = (
+        "https://pig.felislab.cc/resources/rollpig-pjsk/manifest.json"
+    )
     fake_config.GroupSettings = type("GroupSettings", (), {})
     fake_config.MODULE_NAME = "nonebot_plugin_rollpig"
     fake_config.get_proxy = lambda: None
@@ -298,6 +413,14 @@ def load_rollpig_plugin_module(
     fake_config.get_growth_max_expert_level = lambda: 5
     fake_config.get_growth_pity_weight_cap = lambda: 4.0
     fake_config.get_growth_pity_weight_step = lambda: 0.5
+    fake_config.get_resource_sync_enabled = lambda: False
+    fake_config.get_resource_sync_interval_hours = lambda: 24
+    fake_config.get_resource_sync_on_startup = lambda: True
+    fake_config.get_private_resource_manifest_url = lambda: None
+    fake_config.get_private_resource_token = lambda: None
+
+    fake_resource_manager = types.ModuleType(f"{package_name}.resource_manager")
+    fake_resource_manager.pig_resource_manager = FakeResourceManager()
 
     fake_roast_manager = types.ModuleType(f"{package_name}.roast_manager")
     fake_roast_manager.roast_manager = object()
@@ -367,6 +490,11 @@ def load_rollpig_plugin_module(
 
     monkeypatch.setitem(sys.modules, f"{package_name}.config", fake_config)
     monkeypatch.setitem(sys.modules, f"{package_name}.ranking", _ranking_module)
+    monkeypatch.setitem(
+        sys.modules,
+        f"{package_name}.resource_manager",
+        fake_resource_manager,
+    )
     monkeypatch.setitem(
         sys.modules,
         f"{package_name}.roast_manager",
@@ -682,20 +810,182 @@ def test_pigsty_footer_matches_upstream_summary_copy(monkeypatch):
 
 
 def test_rollpig_resource_json_accepts_utf8_bom(monkeypatch, tmp_path):
-    module = load_rollpig_plugin_module(
-        monkeypatch,
-        fake_store=object(),
-        fake_data_manager=object(),
-        group_members=[],
-    )
+    module = load_rollpig_resource_manager_module(monkeypatch, tmp_path)
+    manager = module.RollPigResourceManager()
     resource_file = tmp_path / "pig.json"
     resource_file.write_text(
         '\ufeff[{"id": "bom-pig", "name": "BOM"}]', encoding="utf-8"
     )
 
-    assert module.load_resource_json(resource_file, []) == [
+    assert manager._read_pig_json(resource_file) == [
         {"id": "bom-pig", "name": "BOM"}
     ]
+
+
+def test_rollpig_private_resource_url_can_be_disabled(monkeypatch):
+    default_module = load_rollpig_config_module(monkeypatch, {})
+    disabled_module = load_rollpig_config_module(
+        monkeypatch,
+        {"PRIVATE_RESOURCE_MANIFEST_URL": "   "},
+    )
+    custom_module = load_rollpig_config_module(
+        monkeypatch,
+        {"PRIVATE_RESOURCE_MANIFEST_URL": "https://example.com/private.json"},
+    )
+
+    assert (
+        default_module.get_private_resource_manifest_url()
+        == default_module.DEFAULT_PRIVATE_RESOURCE_MANIFEST_URL
+    )
+    assert disabled_module.get_private_resource_manifest_url() is None
+    assert (
+        custom_module.get_private_resource_manifest_url()
+        == "https://example.com/private.json"
+    )
+
+
+def test_rollpig_resource_merge_retains_legacy_ids_and_images(monkeypatch, tmp_path):
+    module = load_rollpig_resource_manager_module(monkeypatch, tmp_path)
+    builtin_dir = tmp_path / "builtin"
+    builtin_image_dir = builtin_dir / "image"
+    staging_dir = tmp_path / "staging"
+    (staging_dir / "images").mkdir(parents=True)
+    builtin_image_dir.mkdir(parents=True)
+
+    builtin_dir.joinpath("pig.json").write_text(
+        json.dumps(
+            [
+                {"id": "old-pig", "name": "旧猪"},
+                {"id": "same-pig", "name": "旧同名"},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    builtin_dir.joinpath("pig_rules.json").write_text(
+        json.dumps({"food_pigs": ["old-pig"]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    builtin_image_dir.joinpath("old-pig.png").write_bytes(b"legacy-image")
+    staging_dir.joinpath("pig.json").write_text(
+        json.dumps(
+            [
+                {"id": "same-pig", "name": "新同名"},
+                {"id": "new-pig", "name": "新猪"},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    staging_dir.joinpath("pig_rules.json").write_text(
+        json.dumps({"sold_pigs": ["new-pig"]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(module, "BUILTIN_PIG_JSON", builtin_dir / "pig.json")
+    monkeypatch.setattr(module, "BUILTIN_RULES_JSON", builtin_dir / "pig_rules.json")
+    monkeypatch.setattr(module, "BUILTIN_IMAGE_DIR", builtin_image_dir)
+    manager = module.RollPigResourceManager()
+
+    manager._merge_with_existing_snapshot(staging_dir)
+
+    merged_pigs = json.loads(staging_dir.joinpath("pig.json").read_text("utf-8"))
+    merged_rules = json.loads(staging_dir.joinpath("pig_rules.json").read_text("utf-8"))
+
+    # 云端缺失旧 ID 时仍保留旧资源，防止本地账本历史 pig_id 渲染失效。
+    assert [item["id"] for item in merged_pigs] == ["same-pig", "new-pig", "old-pig"]
+    assert merged_pigs[0]["name"] == "新同名"
+    assert merged_rules["food_pigs"] == ["old-pig"]
+    assert merged_rules["sold_pigs"] == ["new-pig"]
+    assert staging_dir.joinpath("images", "old-pig.png").read_bytes() == b"legacy-image"
+
+
+def test_rollpig_private_overlay_adds_pigs_rules_and_image_priority(
+    monkeypatch,
+    tmp_path,
+):
+    module = load_rollpig_resource_manager_module(monkeypatch, tmp_path)
+    manager = module.RollPigResourceManager()
+    public_image_dir = tmp_path / "public_images"
+    private_dir = tmp_path / "private"
+    private_image_dir = private_dir / "images"
+    public_image_dir.mkdir()
+    private_image_dir.mkdir(parents=True)
+    public_image_dir.joinpath("public-pig.png").write_bytes(b"public")
+    private_image_dir.joinpath("private-pig.png").write_bytes(b"private")
+    private_dir.joinpath("pig.json").write_text(
+        json.dumps([{"id": "private-pig", "name": "私有猪"}], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    private_dir.joinpath("pig_rules.json").write_text(
+        json.dumps({"sold_pigs": ["private-pig"]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    manager.pig_list = [{"id": "public-pig", "name": "公有猪"}]
+    manager.pig_map = {"public-pig": manager.pig_list[0]}
+    manager.rules = {
+        "food_pigs": [],
+        "human_pigs": [],
+        "eaten_pigs": [],
+        "sold_pigs": [],
+        "roast_excluded_pigs": [],
+    }
+    manager.image_dirs = [public_image_dir]
+
+    manager._apply_private_overlay(private_dir, resource_version="private-v1")
+
+    assert manager.get_pig_by_id("private-pig")["name"] == "私有猪"
+    assert manager.get_rule_ids("sold_pigs") == ["private-pig"]
+    assert manager.find_image_file("private-pig") == (
+        private_image_dir / "private-pig.png"
+    )
+    assert manager.find_image_file("public-pig") == public_image_dir / "public-pig.png"
+    assert manager.resource_version.endswith("+private-v1")
+
+
+def test_rollpig_private_overlay_rejects_duplicate_pig_ids(monkeypatch, tmp_path):
+    module = load_rollpig_resource_manager_module(monkeypatch, tmp_path)
+    manager = module.RollPigResourceManager()
+    private_dir = tmp_path / "private"
+    private_dir.mkdir()
+    private_dir.joinpath("pig.json").write_text(
+        json.dumps([{"id": "public-pig", "name": "重复猪"}], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    manager.pig_list = [{"id": "public-pig", "name": "公有猪"}]
+    manager.pig_map = {"public-pig": manager.pig_list[0]}
+    manager.rules = {key: [] for key in module.RULE_KEYS}
+    manager.image_dirs = []
+
+    with pytest.raises(ValueError, match="pig_overrides"):
+        manager._apply_private_overlay(private_dir, resource_version="private-v1")
+
+
+def test_rollpig_private_overlay_explicit_overrides(monkeypatch, tmp_path):
+    module = load_rollpig_resource_manager_module(monkeypatch, tmp_path)
+    manager = module.RollPigResourceManager()
+    private_dir = tmp_path / "private"
+    private_dir.mkdir()
+    private_dir.joinpath("pig.json").write_text("[]", encoding="utf-8")
+    private_dir.joinpath("pig_overrides.json").write_text(
+        json.dumps(
+            [{"id": "public-pig", "name": "覆盖猪", "analysis": "已覆盖"}],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    manager.pig_list = [{"id": "public-pig", "name": "公有猪"}]
+    manager.pig_map = {"public-pig": manager.pig_list[0]}
+    manager.rules = {key: [] for key in module.RULE_KEYS}
+    manager.image_dirs = []
+
+    manager._apply_private_overlay(private_dir, resource_version="private-v1")
+
+    assert manager.get_pig_by_id("public-pig")["name"] == "覆盖猪"
+    assert manager.get_pig_by_id("public-pig")["analysis"] == "已覆盖"
 
 
 def test_rollpig_rules_extend_special_shape_ids(monkeypatch):
@@ -705,11 +995,12 @@ def test_rollpig_rules_extend_special_shape_ids(monkeypatch):
         fake_data_manager=object(),
         group_members=[],
     )
-    module.PIG_RULES = {
+    module.pig_resource_manager.rules = {
         "food_pigs": ["cake-pig"],
         "human_pigs": ["guest-human"],
         "eaten_pigs": ["missing-pig"],
         "sold_pigs": ["auctioned-pig"],
+        "roast_excluded_pigs": [],
     }
 
     assert module.is_food_pig({"id": "cake-pig"})
@@ -741,11 +1032,12 @@ def test_backfire_roast_skips_terminal_shapes(monkeypatch):
         fake_data_manager=object(),
         group_members=[],
     )
-    module.PIG_RULES = {
+    module.pig_resource_manager.rules = {
         "food_pigs": ["food-pig"],
         "human_pigs": [],
         "eaten_pigs": [],
         "sold_pigs": [],
+        "roast_excluded_pigs": [],
     }
 
     assert module.can_backfire_roast({"id": "pig"})

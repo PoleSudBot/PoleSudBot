@@ -1,4 +1,3 @@
-import json
 import random
 import datetime
 import time
@@ -35,14 +34,19 @@ from .ranking import (
 
 from .config import (
     Config,
+    DEFAULT_PRIVATE_RESOURCE_MANIFEST_URL,
     GroupSettings,
     MODULE_NAME,
     get_growth_max_expert_level,
     get_growth_pity_weight_cap,
     get_growth_pity_weight_step,
     get_proxy,
+    get_resource_sync_enabled,
+    get_resource_sync_interval_hours,
+    get_resource_sync_on_startup,
     get_storage_backend,
 )
+from .resource_manager import pig_resource_manager
 from .roast_manager import roast_manager
 from .runtime import (
     is_daily_summary_push_enabled,
@@ -121,7 +125,7 @@ __plugin_meta__ = PluginMetadata(
     config=Config,
     extra={
         "author": "Felis2026",
-        "version": "0.6.0",
+        "version": "0.6.2",
         "configs": [
             {
                 "module": MODULE_NAME,
@@ -219,6 +223,70 @@ __plugin_meta__ = PluginMetadata(
                 "help": "连续重复后未解锁小猪的最大权重加成",
                 "type": float,
             },
+            {
+                "module": MODULE_NAME,
+                "key": "RESOURCE_SYNC_ENABLED",
+                "value": False,
+                "default_value": False,
+                "help": "是否启用静态小猪资源同步",
+                "type": bool,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "RESOURCE_MANIFEST_URL",
+                "value": None,
+                "default_value": None,
+                "help": "静态小猪资源 manifest URL",
+                "type": str,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "RESOURCE_SYNC_ON_STARTUP",
+                "value": True,
+                "default_value": True,
+                "help": "启动后是否后台同步小猪资源",
+                "type": bool,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "RESOURCE_SYNC_INTERVAL_HOURS",
+                "value": 24,
+                "default_value": 24,
+                "help": "小猪资源定时同步间隔（小时）",
+                "type": int,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "RESOURCE_SYNC_TIMEOUT",
+                "value": 10.0,
+                "default_value": 10.0,
+                "help": "小猪资源同步请求超时时间（秒）",
+                "type": float,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "RESOURCE_MAX_FILE_SIZE",
+                "value": 10 * 1024 * 1024,
+                "default_value": 10 * 1024 * 1024,
+                "help": "小猪资源单文件下载大小上限（字节）",
+                "type": int,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "PRIVATE_RESOURCE_MANIFEST_URL",
+                "value": DEFAULT_PRIVATE_RESOURCE_MANIFEST_URL,
+                "default_value": DEFAULT_PRIVATE_RESOURCE_MANIFEST_URL,
+                "help": "私有小猪资源 overlay manifest URL；设为空字符串可关闭",
+                "type": str,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "PRIVATE_RESOURCE_TOKEN",
+                "value": None,
+                "default_value": None,
+                "help": "私有小猪资源 Bearer Token",
+                "type": str,
+            },
         ],
         "group_config_model": GroupSettings,
     },
@@ -227,30 +295,17 @@ __plugin_meta__ = PluginMetadata(
 # ================= 资源路径 =================
 
 PLUGIN_DIR = Path(__file__).parent
-PIGINFO_PATH = PLUGIN_DIR / "resource" / "pig.json"
-PIG_RULES_PATH = PLUGIN_DIR / "resource" / "pig_rules.json"
-IMAGE_DIR = PLUGIN_DIR / "resource" / "image"
 RES_DIR = PLUGIN_DIR / "resource"
+ASSET_DIR = RES_DIR / "assets"
 PIGHUB_IMAGE_BASE_URL = "https://pighub.top/data/"
 PIGHUB_TTL_SECONDS = 6 * 3600  # PigHub 图库缓存有效期（6小时）
 
 pighub_images: list = []
 pighub_last_loaded: float = 0.0
+resource_sync_tasks: set[asyncio.Task] = set()
 
-# ================= 资源加载 =================
-
-def load_resource_json(path, default):
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text("utf-8-sig"))
-    except Exception as e:
-        logger.error(f"资源文件读取失败: {path} error={e}")
-        return default
-
-
-PIG_LIST = load_resource_json(PIGINFO_PATH, [])
-PIG_RULES = load_resource_json(PIG_RULES_PATH, {})
+PIG_LIST = pig_resource_manager.pig_list
+PIG_RULES = pig_resource_manager.rules
 RANKING_CONCURRENCY_LIMIT = 8
 PANEL_AVATAR_CONCURRENCY_LIMIT = 8
 DEFAULT_RANK_LIMIT = 5
@@ -259,22 +314,20 @@ LOCAL_RANKING_UNSUPPORTED_TEXT = "当前模式暂不支持查看猪王争霸榜�
 
 # ================= 工具函数 =================
 
+def reload_rollpig_resources() -> None:
+    """刷新资源管理器快照，并同步旧接口使用的全局引用。"""
+    global PIG_LIST, PIG_RULES
+    pig_resource_manager.reload()
+    PIG_LIST = pig_resource_manager.pig_list
+    PIG_RULES = pig_resource_manager.rules
+
+
 def find_image_file(pig_id: str) -> Path | None:
-    exts = ["png", "jpg", "jpeg", "webp", "gif"]
-    for ext in exts:
-        file = IMAGE_DIR / f"{pig_id}.{ext}"
-        if file.exists():
-            return file
-    return None
+    return pig_resource_manager.find_image_file(pig_id)
 
 
 def get_pig_by_id(pig_id: Optional[str]) -> Optional[dict]:
-    if not pig_id:
-        return None
-    for p in PIG_LIST:
-        if p["id"] == pig_id:
-            return p
-    return None
+    return pig_resource_manager.get_pig_by_id(pig_id)
 
 
 def is_food_pig(pig_data: Optional[dict]) -> bool:
@@ -282,12 +335,41 @@ def is_food_pig(pig_data: Optional[dict]) -> bool:
 
 
 def _read_rule_ids(key: str) -> list[str]:
-    """从本地 pig_rules.json 读取特殊形态 ID，规则文件异常时保持内置常量可用。"""
-    values = PIG_RULES.get(key, []) if isinstance(PIG_RULES, dict) else []
-    if not isinstance(values, list):
-        logger.warning(f"pig_rules.{key} 必须是列表，已忽略")
-        return []
-    return [str(value) for value in values if str(value)]
+    """从当前资源快照读取特殊形态 ID，快照异常时保持内置常量可用。"""
+    return pig_resource_manager.get_rule_ids(key)
+
+
+async def sync_rollpig_resources(*, force: bool = False) -> str:
+    """同步公有资源与私有 overlay；这里只处理图鉴与图片，不触碰本地账本。"""
+    public_result = await pig_resource_manager.sync_from_remote(force=force)
+    private_result = await pig_resource_manager.sync_private_from_remote(force=force)
+    reload_rollpig_resources()
+
+    messages = [
+        result.message
+        for result in (public_result, private_result)
+        if result.message
+    ]
+    return "；".join(messages) or "小猪资源无需更新。"
+
+
+async def run_rollpig_resource_sync(reason: str, *, force: bool = False) -> None:
+    """后台资源同步失败时只记录日志，避免网络问题影响抽猪主流程。"""
+    try:
+        message = await sync_rollpig_resources(force=force)
+        logger.info(f"[小猪资源同步] {reason}: {message}")
+    except Exception as error:
+        logger.warning(f"[小猪资源同步] {reason}失败: {error}")
+
+
+@get_driver().on_startup
+async def _():
+    """启动后按配置后台刷新资源，让 Bot 启动不被静态资源网络请求阻塞。"""
+    if not get_resource_sync_enabled() or not get_resource_sync_on_startup():
+        return
+    task = asyncio.create_task(run_rollpig_resource_sync("startup"))
+    resource_sync_tasks.add(task)
+    task.add_done_callback(resource_sync_tasks.discard)
 
 
 def get_food_pig_ids() -> list[str]:
@@ -1078,7 +1160,7 @@ async def send_rendered_pig(
     name = pig_data.get("name", "未知小猪")
     desc = pig_data.get("description", "")
     analysis = pig_data.get("analysis", "你今天是只神秘小猪。")
-    new_icon_file = IMAGE_DIR / "new.png"
+    new_icon_file = ASSET_DIR / "new.png"
     new_icon_uri = new_icon_file.as_uri() if new_icon_file.exists() else ""
 
     pic = None
@@ -1110,6 +1192,26 @@ async def send_rendered_pig(
 
 # 1. 今日小猪
 cmd_today = on_command("今天是什么小猪", aliases={"今日小猪", "jrxz"}, block=True)
+cmd_sync_resources = on_command(
+    "同步小猪资源",
+    aliases={"刷新小猪资源", "刷新小猪图鉴"},
+    permission=SUPERUSER,
+    block=True,
+)
+
+
+@cmd_sync_resources.handle()
+async def _(event: Event):
+    try:
+        message = await sync_rollpig_resources(force=True)
+    except Exception as error:
+        logger.warning(f"[小猪资源同步] manual 失败: {error}")
+        await cmd_sync_resources.finish(
+            MessageSegment.reply(event.message_id) + f"小猪资源同步失败：{error}"
+        )
+        return
+    await cmd_sync_resources.finish(MessageSegment.reply(event.message_id) + message)
+
 
 @cmd_today.handle()
 @guard_group_enabled(cmd_today)
@@ -2200,6 +2302,18 @@ async def _(event: Event):
 
 require("nonebot_plugin_apscheduler")
 from nonebot_plugin_apscheduler import scheduler
+
+
+@scheduler.scheduled_job(
+    "interval",
+    hours=get_resource_sync_interval_hours(),
+    id="rollpig_resource_sync",
+)
+async def rollpig_resource_sync_job():
+    """定时刷新静态资源；未启用时直接跳过，保持默认不联网。"""
+    if not get_resource_sync_enabled():
+        return
+    await run_rollpig_resource_sync("interval")
 
 
 def build_daily_summary_text(summary: dict) -> str:

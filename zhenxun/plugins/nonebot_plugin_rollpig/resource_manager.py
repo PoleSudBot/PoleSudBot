@@ -1,0 +1,739 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+import hashlib
+import json
+from pathlib import Path
+import re
+import shutil
+import time
+from typing import Any
+from urllib.parse import urljoin
+
+import httpx
+from nonebot.log import logger
+import nonebot_plugin_localstore as localstore
+
+from .config import (
+    get_private_resource_manifest_url,
+    get_private_resource_token,
+    get_proxy,
+    get_resource_manifest_url,
+    get_resource_max_file_size,
+    get_resource_sync_enabled,
+    get_resource_sync_timeout,
+)
+
+PLUGIN_DIR = Path(__file__).parent
+BUILTIN_RESOURCE_DIR = PLUGIN_DIR / "resource"
+BUILTIN_PIG_JSON = BUILTIN_RESOURCE_DIR / "pig.json"
+BUILTIN_RULES_JSON = BUILTIN_RESOURCE_DIR / "pig_rules.json"
+BUILTIN_IMAGE_DIR = BUILTIN_RESOURCE_DIR / "image"
+
+CACHE_ROOT = localstore.get_plugin_data_dir() / "resources"
+ACTIVE_RESOURCE_DIR = CACHE_ROOT / "active"
+ACTIVE_IMAGE_DIR = ACTIVE_RESOURCE_DIR / "images"
+PREVIOUS_RESOURCE_DIR = CACHE_ROOT / "previous"
+STATE_FILE = CACHE_ROOT / "state.json"
+PRIVATE_RESOURCE_DIR = CACHE_ROOT / "private_active"
+PRIVATE_IMAGE_DIR = PRIVATE_RESOURCE_DIR / "images"
+PRIVATE_PREVIOUS_RESOURCE_DIR = CACHE_ROOT / "private_previous"
+PRIVATE_STATE_FILE = CACHE_ROOT / "private_state.json"
+
+PIG_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+ALLOWED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+RULE_KEYS = (
+    "food_pigs",
+    "human_pigs",
+    "eaten_pigs",
+    "sold_pigs",
+    "roast_excluded_pigs",
+)
+
+
+@dataclass
+class ResourceSyncResult:
+    updated: bool
+    skipped: bool
+    resource_version: str = ""
+    message: str = ""
+
+
+class RollPigResourceManager:
+    def __init__(self) -> None:
+        self.pig_list: list[dict[str, Any]] = []
+        self.pig_map: dict[str, dict[str, Any]] = {}
+        self.rules: dict[str, list[str]] = {}
+        self.image_dirs: list[Path] = []
+        self.resource_version = "builtin"
+
+    def reload(self) -> None:
+        """加载当前可用资源快照；缓存坏掉时回退内置资源，避免阻断 Bot 启动。"""
+        if (ACTIVE_RESOURCE_DIR / "pig.json").exists():
+            try:
+                self._load_from_dir(
+                    ACTIVE_RESOURCE_DIR,
+                    resource_version=self._read_state_version(),
+                    image_dirs=[ACTIVE_IMAGE_DIR, BUILTIN_IMAGE_DIR],
+                )
+                self._load_private_overlay()
+                return
+            except Exception as error:
+                logger.warning(f"rollpig 资源缓存读取失败，回退内置资源: {error}")
+
+        self._load_from_dir(
+            BUILTIN_RESOURCE_DIR,
+            resource_version="builtin",
+            image_dirs=[BUILTIN_IMAGE_DIR],
+        )
+        self._load_private_overlay()
+
+    def _load_from_dir(
+        self,
+        resource_dir: Path,
+        *,
+        resource_version: str,
+        image_dirs: list[Path],
+    ) -> None:
+        pig_list = self._read_pig_json(resource_dir / "pig.json")
+        rules = self._normalize_rules(
+            self._read_rules_json(resource_dir / "pig_rules.json")
+        )
+        self._validate_pig_list(pig_list)
+        self.pig_list = pig_list
+        self.pig_map = {str(item["id"]): item for item in pig_list}
+        self.rules = rules
+        self.image_dirs = image_dirs
+        self.resource_version = resource_version or "cache"
+        logger.info(
+            f"rollpig 资源已加载: version={self.resource_version}, pigs={len(pig_list)}"
+        )
+
+    def _load_private_overlay(self) -> None:
+        """叠加私有资源缓存；私有包异常时保留当前公有/内置资源继续运行。"""
+        if not get_private_resource_manifest_url():
+            return
+        if not (PRIVATE_RESOURCE_DIR / "pig.json").exists():
+            return
+        try:
+            self._apply_private_overlay(
+                PRIVATE_RESOURCE_DIR,
+                resource_version=self._read_private_state_version(),
+            )
+        except Exception as error:
+            logger.warning(f"rollpig 私有资源缓存读取失败，已忽略: {error}")
+
+    def _apply_private_overlay(
+        self,
+        resource_dir: Path,
+        *,
+        resource_version: str,
+    ) -> None:
+        """私有包默认只追加新 ID；覆盖公有 ID 必须放在 pig_overrides.json。"""
+        private_pigs = self._read_pig_json(resource_dir / "pig.json")
+        private_rules = self._normalize_rules(
+            self._read_rules_json(resource_dir / "pig_rules.json")
+        )
+        pig_overrides = self._read_pig_overrides_json(
+            resource_dir / "pig_overrides.json"
+        )
+        self._validate_pig_list(private_pigs)
+
+        base_ids = set(self.pig_map)
+        duplicate_ids = [
+            str(item["id"])
+            for item in private_pigs
+            if str(item["id"]) in base_ids
+        ]
+        if duplicate_ids:
+            raise ValueError(
+                "私有 pig.json 不能重复公有 ID，请改用 pig_overrides.json: "
+                + ", ".join(duplicate_ids[:10])
+            )
+
+        merged_map = {pig_id: dict(item) for pig_id, item in self.pig_map.items()}
+        for override in pig_overrides:
+            pig_id = str(override["id"])
+            if pig_id not in merged_map:
+                raise ValueError(f"pig_overrides 指向不存在的公有 ID: {pig_id}")
+            updated_item = dict(merged_map[pig_id])
+            updated_item.update(
+                {key: value for key, value in override.items() if key != "id"}
+            )
+            updated_item["id"] = pig_id
+            merged_map[pig_id] = updated_item
+
+        merged_pigs = [merged_map[str(item["id"])] for item in self.pig_list]
+        merged_pigs.extend(private_pigs)
+        self._validate_pig_list(merged_pigs)
+        self.pig_list = merged_pigs
+        self.pig_map = {str(item["id"]): item for item in merged_pigs}
+        self.rules = self._merge_rules(private_rules, self.rules)
+        self.image_dirs = [resource_dir / "images", *self.image_dirs]
+        self.resource_version = (
+            f"{self.resource_version}+{resource_version or 'private'}"
+        )
+        logger.info(
+            "rollpig 私有资源已叠加: "
+            f"version={resource_version}, private_pigs={len(private_pigs)}"
+        )
+
+    def get_pig_by_id(self, pig_id: str | None) -> dict[str, Any] | None:
+        if not pig_id:
+            return None
+        return self.pig_map.get(str(pig_id))
+
+    def find_image_file(self, pig_id: str) -> Path | None:
+        for image_dir in self.image_dirs:
+            for suffix in ALLOWED_IMAGE_SUFFIXES:
+                image_file = image_dir / f"{pig_id}{suffix}"
+                if image_file.exists():
+                    return image_file
+        return None
+
+    def get_rule_ids(self, key: str) -> list[str]:
+        return list(self.rules.get(key, []))
+
+    async def sync_from_remote(self, *, force: bool = False) -> ResourceSyncResult:
+        """从静态 manifest 同步资源；同步成功前不替换当前 active 快照。"""
+        if not get_resource_sync_enabled() and not force:
+            return ResourceSyncResult(
+                updated=False,
+                skipped=True,
+                message="资源同步未启用",
+            )
+
+        manifest_url = get_resource_manifest_url()
+        if not manifest_url:
+            return ResourceSyncResult(
+                updated=False,
+                skipped=True,
+                message="未配置资源 manifest URL",
+            )
+
+        timeout = get_resource_sync_timeout()
+        max_size = get_resource_max_file_size()
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            proxy=get_proxy(),
+        ) as client:
+            manifest = await self._download_json(
+                client,
+                manifest_url,
+                max_size=max_size,
+            )
+            resource_version = str(manifest.get("resource_version") or "").strip()
+            if not resource_version:
+                raise ValueError("manifest 缺少 resource_version")
+            if not force and resource_version == self._read_state_version():
+                return ResourceSyncResult(
+                    updated=False,
+                    skipped=True,
+                    resource_version=resource_version,
+                    message="资源已是最新版本",
+                )
+
+            staging_dir = CACHE_ROOT / f".incoming_{int(time.time())}"
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir)
+            (staging_dir / "images").mkdir(parents=True, exist_ok=True)
+            try:
+                await self._download_manifest_files(
+                    client,
+                    manifest_url=manifest_url,
+                    manifest=manifest,
+                    staging_dir=staging_dir,
+                    max_size=max_size,
+                )
+                self._merge_with_existing_snapshot(staging_dir)
+                self._activate_staging_dir(staging_dir, resource_version)
+            except Exception:
+                if staging_dir.exists():
+                    shutil.rmtree(staging_dir)
+                raise
+
+        self.reload()
+        return ResourceSyncResult(
+            updated=True,
+            skipped=False,
+            resource_version=resource_version,
+            message=f"资源同步完成：{resource_version}",
+        )
+
+    async def sync_private_from_remote(
+        self,
+        *,
+        force: bool = False,
+    ) -> ResourceSyncResult:
+        """同步私有 overlay；未配置私有 URL 时静默跳过。"""
+        if not get_resource_sync_enabled() and not force:
+            return ResourceSyncResult(updated=False, skipped=True, message="")
+
+        manifest_url = get_private_resource_manifest_url()
+        if not manifest_url:
+            return ResourceSyncResult(updated=False, skipped=True, message="")
+
+        timeout = get_resource_sync_timeout()
+        max_size = get_resource_max_file_size()
+        headers: dict[str, str] = {}
+        private_token = get_private_resource_token()
+        if private_token:
+            headers["Authorization"] = f"Bearer {private_token}"
+
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=True,
+            proxy=get_proxy(),
+            headers=headers,
+        ) as client:
+            manifest = await self._download_json(
+                client,
+                manifest_url,
+                max_size=max_size,
+            )
+            if manifest.get("overlay") is not True:
+                raise ValueError("私有资源 manifest 必须标记 overlay=true")
+            resource_version = str(manifest.get("resource_version") or "").strip()
+            if not resource_version:
+                raise ValueError("私有资源 manifest 缺少 resource_version")
+            if not force and resource_version == self._read_private_state_version():
+                return ResourceSyncResult(
+                    updated=False,
+                    skipped=True,
+                    resource_version=resource_version,
+                    message="私有资源已是最新版本",
+                )
+
+            staging_dir = CACHE_ROOT / f".incoming_private_{int(time.time())}"
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir)
+            (staging_dir / "images").mkdir(parents=True, exist_ok=True)
+            try:
+                await self._download_private_manifest_files(
+                    client,
+                    manifest_url=manifest_url,
+                    manifest=manifest,
+                    staging_dir=staging_dir,
+                    max_size=max_size,
+                )
+                self._validate_private_staging_dir(staging_dir)
+                self._activate_private_staging_dir(staging_dir, resource_version)
+            except Exception:
+                if staging_dir.exists():
+                    shutil.rmtree(staging_dir)
+                raise
+
+        self.reload()
+        return ResourceSyncResult(
+            updated=True,
+            skipped=False,
+            resource_version=resource_version,
+            message=f"私有资源同步完成：{resource_version}",
+        )
+
+    async def _download_manifest_files(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        manifest_url: str,
+        manifest: dict[str, Any],
+        staging_dir: Path,
+        max_size: int,
+    ) -> None:
+        pig_json_meta = manifest.get("pig_json")
+        if not isinstance(pig_json_meta, dict):
+            raise ValueError("manifest 缺少 pig_json")
+        await self._download_file_by_meta(
+            client,
+            manifest_url=manifest_url,
+            meta=pig_json_meta,
+            target=staging_dir / "pig.json",
+            max_size=max_size,
+        )
+
+        optional_files = manifest.get("optional_files") or {}
+        rules_meta = (
+            optional_files.get("pig_rules")
+            if isinstance(optional_files, dict)
+            else None
+        )
+        if isinstance(rules_meta, dict):
+            await self._download_file_by_meta(
+                client,
+                manifest_url=manifest_url,
+                meta=rules_meta,
+                target=staging_dir / "pig_rules.json",
+                max_size=max_size,
+            )
+
+        image_items = manifest.get("images") or []
+        if not isinstance(image_items, list):
+            raise ValueError("manifest images 必须是 list")
+        for image_meta in image_items:
+            if not isinstance(image_meta, dict):
+                raise ValueError("manifest images 存在非法条目")
+            filename = str(image_meta.get("filename") or image_meta.get("path") or "")
+            self._validate_image_filename(Path(filename).name)
+            await self._download_file_by_meta(
+                client,
+                manifest_url=manifest_url,
+                meta=image_meta,
+                target=staging_dir / "images" / Path(filename).name,
+                max_size=max_size,
+            )
+
+    async def _download_private_manifest_files(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        manifest_url: str,
+        manifest: dict[str, Any],
+        staging_dir: Path,
+        max_size: int,
+    ) -> None:
+        pig_json_meta = manifest.get("pig_json")
+        if not isinstance(pig_json_meta, dict):
+            raise ValueError("私有资源 manifest 缺少 pig_json")
+        await self._download_file_by_meta(
+            client,
+            manifest_url=manifest_url,
+            meta=pig_json_meta,
+            target=staging_dir / "pig.json",
+            max_size=max_size,
+        )
+
+        optional_files = manifest.get("optional_files") or {}
+        if not isinstance(optional_files, dict):
+            raise ValueError("私有资源 optional_files 必须是 object")
+        for key, filename in (
+            ("pig_rules", "pig_rules.json"),
+            ("pig_overrides", "pig_overrides.json"),
+        ):
+            file_meta = optional_files.get(key)
+            if not isinstance(file_meta, dict):
+                continue
+            await self._download_file_by_meta(
+                client,
+                manifest_url=manifest_url,
+                meta=file_meta,
+                target=staging_dir / filename,
+                max_size=max_size,
+            )
+
+        image_items = manifest.get("images") or []
+        if not isinstance(image_items, list):
+            raise ValueError("私有资源 manifest images 必须是 list")
+        for image_meta in image_items:
+            if not isinstance(image_meta, dict):
+                raise ValueError("私有资源 images 存在非法条目")
+            filename = str(image_meta.get("filename") or image_meta.get("path") or "")
+            self._validate_image_filename(Path(filename).name)
+            await self._download_file_by_meta(
+                client,
+                manifest_url=manifest_url,
+                meta=image_meta,
+                target=staging_dir / "images" / Path(filename).name,
+                max_size=max_size,
+            )
+
+    def _validate_private_staging_dir(self, staging_dir: Path) -> None:
+        private_pigs = self._read_pig_json(staging_dir / "pig.json")
+        self._normalize_rules(self._read_rules_json(staging_dir / "pig_rules.json"))
+        self._validate_pig_list(private_pigs)
+        self._read_pig_overrides_json(staging_dir / "pig_overrides.json")
+
+    def _merge_with_existing_snapshot(self, staging_dir: Path) -> None:
+        """云端缺失旧 ID 时继续保留旧资源，避免本地账本历史引用失效。"""
+        new_pigs = self._read_pig_json(staging_dir / "pig.json")
+        new_rules = self._normalize_rules(
+            self._read_rules_json(staging_dir / "pig_rules.json")
+        )
+        self._validate_pig_list(new_pigs)
+
+        base_pigs, base_rules, base_image_dirs = self._read_current_snapshot()
+        merged_pigs = self._merge_pig_lists(new_pigs, base_pigs)
+        merged_rules = self._merge_rules(new_rules, base_rules)
+        self._copy_legacy_images(
+            staging_dir / "images",
+            new_pigs=new_pigs,
+            merged_pigs=merged_pigs,
+            base_image_dirs=base_image_dirs,
+        )
+
+        (staging_dir / "pig.json").write_text(
+            json.dumps(merged_pigs, ensure_ascii=False, indent=4),
+            encoding="utf-8",
+        )
+        (staging_dir / "pig_rules.json").write_text(
+            json.dumps(merged_rules, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _read_current_snapshot(
+        self,
+    ) -> tuple[list[dict[str, Any]], dict[str, list[str]], list[Path]]:
+        if (ACTIVE_RESOURCE_DIR / "pig.json").exists():
+            try:
+                pigs = self._read_pig_json(ACTIVE_RESOURCE_DIR / "pig.json")
+                rules = self._normalize_rules(
+                    self._read_rules_json(ACTIVE_RESOURCE_DIR / "pig_rules.json")
+                )
+                return pigs, rules, [ACTIVE_IMAGE_DIR, BUILTIN_IMAGE_DIR]
+            except Exception as error:
+                logger.warning(f"rollpig 旧缓存读取失败，合并时仅使用内置资源: {error}")
+
+        pigs = self._read_pig_json(BUILTIN_PIG_JSON)
+        rules = self._normalize_rules(self._read_rules_json(BUILTIN_RULES_JSON))
+        return pigs, rules, [BUILTIN_IMAGE_DIR]
+
+    def _merge_pig_lists(
+        self,
+        new_pigs: list[dict[str, Any]],
+        base_pigs: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        merged_map = {str(item["id"]): dict(item) for item in base_pigs}
+        for item in new_pigs:
+            merged_map[str(item["id"])] = dict(item)
+
+        ordered_ids: list[str] = []
+        for item in new_pigs:
+            ordered_ids.append(str(item["id"]))
+        for item in base_pigs:
+            pig_id = str(item["id"])
+            if pig_id not in ordered_ids:
+                ordered_ids.append(pig_id)
+        return [merged_map[pig_id] for pig_id in ordered_ids]
+
+    def _merge_rules(
+        self,
+        new_rules: dict[str, list[str]],
+        base_rules: dict[str, list[str]],
+    ) -> dict[str, list[str]]:
+        merged: dict[str, list[str]] = {}
+        for key in RULE_KEYS:
+            merged[key] = list(
+                dict.fromkeys([*base_rules.get(key, []), *new_rules.get(key, [])])
+            )
+        return merged
+
+    def _copy_legacy_images(
+        self,
+        target_image_dir: Path,
+        *,
+        new_pigs: list[dict[str, Any]],
+        merged_pigs: list[dict[str, Any]],
+        base_image_dirs: list[Path],
+    ) -> None:
+        new_ids = {str(item["id"]) for item in new_pigs}
+        for item in merged_pigs:
+            pig_id = str(item["id"])
+            if pig_id in new_ids:
+                continue
+            source = self._find_image_in_dirs(pig_id, base_image_dirs)
+            if not source:
+                continue
+            target = target_image_dir / source.name
+            if not target.exists():
+                shutil.copy2(source, target)
+
+    def _find_image_in_dirs(self, pig_id: str, image_dirs: list[Path]) -> Path | None:
+        for image_dir in image_dirs:
+            for suffix in ALLOWED_IMAGE_SUFFIXES:
+                image_file = image_dir / f"{pig_id}{suffix}"
+                if image_file.exists():
+                    return image_file
+        return None
+
+    async def _download_json(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        *,
+        max_size: int,
+    ) -> dict[str, Any]:
+        content = await self._download_bytes(client, url, max_size=max_size)
+        data = json.loads(content.decode("utf-8-sig"))
+        if not isinstance(data, dict):
+            raise ValueError("manifest 必须是 JSON object")
+        return data
+
+    async def _download_file_by_meta(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        manifest_url: str,
+        meta: dict[str, Any],
+        target: Path,
+        max_size: int,
+    ) -> None:
+        path = str(meta.get("path") or meta.get("filename") or "").strip()
+        if not path:
+            raise ValueError("manifest 文件条目缺少 path")
+        content = await self._download_bytes(
+            client,
+            urljoin(manifest_url, path),
+            max_size=max_size,
+        )
+
+        expected_size = meta.get("size")
+        if expected_size is not None and int(expected_size) != len(content):
+            raise ValueError(f"文件大小校验失败: {path}")
+
+        expected_hash = str(meta.get("sha256") or "").lower()
+        actual_hash = hashlib.sha256(content).hexdigest()
+        if expected_hash and actual_hash != expected_hash:
+            raise ValueError(f"sha256 校验失败: {path}")
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+
+    async def _download_bytes(
+        self,
+        client: httpx.AsyncClient,
+        url: str,
+        *,
+        max_size: int,
+    ) -> bytes:
+        response = await client.get(url)
+        response.raise_for_status()
+        content = response.content
+        if len(content) > max_size:
+            raise ValueError(f"文件超过大小上限: {url}")
+        return content
+
+    def _activate_staging_dir(self, staging_dir: Path, resource_version: str) -> None:
+        CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        if PREVIOUS_RESOURCE_DIR.exists():
+            shutil.rmtree(PREVIOUS_RESOURCE_DIR)
+        if ACTIVE_RESOURCE_DIR.exists():
+            ACTIVE_RESOURCE_DIR.rename(PREVIOUS_RESOURCE_DIR)
+        staging_dir.rename(ACTIVE_RESOURCE_DIR)
+        STATE_FILE.write_text(
+            json.dumps(
+                {
+                    "resource_version": resource_version,
+                    "synced_at": int(time.time()),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+    def _read_state_version(self) -> str:
+        try:
+            state = json.loads(self._read_json_text(STATE_FILE))
+            return str(state.get("resource_version") or "cache")
+        except Exception:
+            return "cache"
+
+    def _read_private_state_version(self) -> str:
+        try:
+            state = json.loads(self._read_json_text(PRIVATE_STATE_FILE))
+            return str(state.get("resource_version") or "private")
+        except Exception:
+            return "private"
+
+    def _activate_private_staging_dir(
+        self,
+        staging_dir: Path,
+        resource_version: str,
+    ) -> None:
+        CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        if PRIVATE_PREVIOUS_RESOURCE_DIR.exists():
+            shutil.rmtree(PRIVATE_PREVIOUS_RESOURCE_DIR)
+        if PRIVATE_RESOURCE_DIR.exists():
+            PRIVATE_RESOURCE_DIR.rename(PRIVATE_PREVIOUS_RESOURCE_DIR)
+        staging_dir.rename(PRIVATE_RESOURCE_DIR)
+        PRIVATE_STATE_FILE.write_text(
+            json.dumps(
+                {
+                    "resource_version": resource_version,
+                    "synced_at": int(time.time()),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+    def _read_json_text(self, path: Path) -> str:
+        return path.read_text(encoding="utf-8-sig")
+
+    def _read_pig_json(self, path: Path) -> list[dict[str, Any]]:
+        data = json.loads(self._read_json_text(path))
+        if not isinstance(data, list):
+            raise ValueError(f"pig.json 必须是 list: {path}")
+        return data
+
+    def _read_rules_json(self, path: Path) -> dict[str, Any]:
+        if not path.exists():
+            return {}
+        data = json.loads(self._read_json_text(path))
+        if not isinstance(data, dict):
+            raise ValueError(f"pig_rules.json 必须是 object: {path}")
+        return data
+
+    def _read_pig_overrides_json(self, path: Path) -> list[dict[str, Any]]:
+        if not path.exists():
+            return []
+        data = json.loads(self._read_json_text(path))
+        if not isinstance(data, list):
+            raise ValueError(f"pig_overrides.json 必须是 list: {path}")
+
+        seen_ids: set[str] = set()
+        for item in data:
+            if not isinstance(item, dict):
+                raise ValueError("pig_overrides.json 存在非法条目")
+            pig_id = str(item.get("id") or "")
+            if not PIG_ID_PATTERN.match(pig_id):
+                raise ValueError(f"pig_overrides.json 存在非法 pig_id: {pig_id}")
+            if pig_id in seen_ids:
+                raise ValueError(f"pig_overrides.json 存在重复 pig_id: {pig_id}")
+            seen_ids.add(pig_id)
+        return data
+
+    def _normalize_rules(self, rules: dict[str, Any]) -> dict[str, list[str]]:
+        normalized: dict[str, list[str]] = {}
+        for key in RULE_KEYS:
+            values = rules.get(key) or []
+            if not isinstance(values, list):
+                raise ValueError(f"pig_rules.{key} 必须是 list")
+            normalized_values: list[str] = []
+            for value in values:
+                pig_id = str(value)
+                if not pig_id:
+                    continue
+                if not PIG_ID_PATTERN.match(pig_id):
+                    raise ValueError(f"pig_rules.{key} 存在非法 pig_id: {pig_id}")
+                normalized_values.append(pig_id)
+            normalized[key] = normalized_values
+        return normalized
+
+    def _validate_pig_list(self, pig_list: list[dict[str, Any]]) -> None:
+        seen_ids: set[str] = set()
+        for item in pig_list:
+            if not isinstance(item, dict):
+                raise ValueError("pig.json 存在非法条目")
+            pig_id = str(item.get("id") or "")
+            if not PIG_ID_PATTERN.match(pig_id):
+                raise ValueError(f"非法 pig_id: {pig_id}")
+            if pig_id in seen_ids:
+                raise ValueError(f"重复 pig_id: {pig_id}")
+            if not item.get("name"):
+                raise ValueError(f"pig 缺少 name: {pig_id}")
+            seen_ids.add(pig_id)
+
+    def _validate_image_filename(self, filename: str) -> None:
+        path = Path(filename)
+        if path.name != filename:
+            raise ValueError(f"图片文件名不能包含路径: {filename}")
+        if path.suffix.lower() not in ALLOWED_IMAGE_SUFFIXES:
+            raise ValueError(f"不支持的图片格式: {filename}")
+        if not PIG_ID_PATTERN.match(path.stem):
+            raise ValueError(f"图片文件名非法: {filename}")
+
+
+pig_resource_manager = RollPigResourceManager()
+pig_resource_manager.reload()

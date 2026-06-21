@@ -7,6 +7,9 @@ from pydantic import BaseModel, Field
 from zhenxun.configs.config import Config as ZhenxunConfig
 
 MODULE_NAME = "nonebot_plugin_rollpig"
+DEFAULT_PRIVATE_RESOURCE_MANIFEST_URL = (
+    "https://pig.felislab.cc/resources/rollpig-pjsk/manifest.json"
+)
 base_config = ZhenxunConfig.get(MODULE_NAME)
 
 
@@ -34,6 +37,14 @@ class Config(BaseModel):
     GROWTH_MAX_EXPERT_LEVEL: int = 5
     GROWTH_PITY_WEIGHT_STEP: float = 0.5
     GROWTH_PITY_WEIGHT_CAP: float = 4.0
+    RESOURCE_SYNC_ENABLED: bool = False
+    RESOURCE_MANIFEST_URL: Optional[str] = None
+    RESOURCE_SYNC_ON_STARTUP: bool = True
+    RESOURCE_SYNC_INTERVAL_HOURS: int = 24
+    RESOURCE_SYNC_TIMEOUT: float = 10.0
+    RESOURCE_MAX_FILE_SIZE: int = 10 * 1024 * 1024
+    PRIVATE_RESOURCE_MANIFEST_URL: Optional[str] = DEFAULT_PRIVATE_RESOURCE_MANIFEST_URL
+    PRIVATE_RESOURCE_TOKEN: Optional[str] = None
 
     # Legacy compatibility only. Runtime no longer uses these fields.
     rollpig_ai_enabled: Optional[bool] = None
@@ -50,6 +61,14 @@ class Config(BaseModel):
     rollpig_growth_max_expert_level: Optional[int] = None
     rollpig_growth_pity_weight_step: Optional[float] = None
     rollpig_growth_pity_weight_cap: Optional[float] = None
+    rollpig_resource_sync_enabled: Optional[bool] = None
+    rollpig_resource_manifest_url: Optional[str] = None
+    rollpig_resource_sync_on_startup: Optional[bool] = None
+    rollpig_resource_sync_interval_hours: Optional[int] = None
+    rollpig_resource_sync_timeout: Optional[float] = None
+    rollpig_resource_max_file_size: Optional[int] = None
+    rollpig_private_resource_manifest_url: Optional[str] = None
+    rollpig_private_resource_token: Optional[str] = None
 
 
 def _get_str(key: str, default: Optional[str] = None) -> Optional[str]:
@@ -135,3 +154,44 @@ def get_growth_pity_weight_step() -> float:
 
 def get_growth_pity_weight_cap() -> float:
     return max(0.0, _get_float("GROWTH_PITY_WEIGHT_CAP", 4.0))
+
+
+def get_resource_sync_enabled() -> bool:
+    return _get_bool("RESOURCE_SYNC_ENABLED", False)
+
+
+def get_resource_manifest_url() -> Optional[str]:
+    return _get_str("RESOURCE_MANIFEST_URL")
+
+
+def get_resource_sync_on_startup() -> bool:
+    return _get_bool("RESOURCE_SYNC_ON_STARTUP", True)
+
+
+def get_resource_sync_interval_hours() -> int:
+    return max(1, _get_int("RESOURCE_SYNC_INTERVAL_HOURS", 24))
+
+
+def get_resource_sync_timeout() -> float:
+    return max(1.0, _get_float("RESOURCE_SYNC_TIMEOUT", 10.0))
+
+
+def get_resource_max_file_size() -> int:
+    return max(1024, _get_int("RESOURCE_MAX_FILE_SIZE", 10 * 1024 * 1024))
+
+
+def get_private_resource_manifest_url() -> Optional[str]:
+    raw_value = base_config.get(
+        "PRIVATE_RESOURCE_MANIFEST_URL",
+        DEFAULT_PRIVATE_RESOURCE_MANIFEST_URL,
+    )
+    if raw_value is None:
+        return DEFAULT_PRIVATE_RESOURCE_MANIFEST_URL
+
+    # 私有包默认跟随上游 PJSK；显式配置为空字符串时表示关闭 overlay。
+    text = str(raw_value).strip()
+    return text or None
+
+
+def get_private_resource_token() -> Optional[str]:
+    return _get_str("PRIVATE_RESOURCE_TOKEN")
