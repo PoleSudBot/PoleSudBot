@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -18,6 +20,10 @@ ROLLPIG_CONFIG_PATH = ROLLPIG_PLUGIN_DIR / "config.py"
 ROLLPIG_PLUGIN_INIT_PATH = ROLLPIG_PLUGIN_DIR / "__init__.py"
 ROLLPIG_RANKING_PATH = ROLLPIG_PLUGIN_DIR / "ranking.py"
 ROLLPIG_RESOURCE_MANAGER_PATH = ROLLPIG_PLUGIN_DIR / "resource_manager.py"
+VALID_PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/"
+    "iZk9HQAAAABJRU5ErkJggg=="
+)
 
 
 class FakeLogger:
@@ -56,6 +62,35 @@ class FakeMessageSegment:
     @staticmethod
     def image(_data):
         return ""
+
+
+class FakeHTTPResponse:
+    def __init__(self, content: bytes):
+        self.content = content
+
+    def raise_for_status(self):
+        return None
+
+
+class FakeHTTPClient:
+    def __init__(self, payloads: dict[str, bytes]):
+        self.payloads = payloads
+        self.request_urls: list[str] = []
+
+    async def get(self, url: str):
+        self.request_urls.append(url)
+        return FakeHTTPResponse(self.payloads[url])
+
+
+class FakeAsyncClientContext:
+    def __init__(self, client: FakeHTTPClient):
+        self.client = client
+
+    async def __aenter__(self):
+        return self.client
+
+    async def __aexit__(self, *_args):
+        return None
 
 
 class FakePluginMetadata:
@@ -298,6 +333,14 @@ def load_rollpig_config_module(
     )
 
 
+def build_manifest_meta(path: str, content: bytes) -> dict:
+    return {
+        "path": path,
+        "size": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }
+
+
 def load_rollpig_plugin_module(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -403,6 +446,9 @@ def load_rollpig_plugin_module(
 
     fake_config = types.ModuleType(f"{package_name}.config")
     fake_config.Config = type("Config", (), {})
+    fake_config.DEFAULT_RESOURCE_MANIFEST_URL = (
+        "https://pig.felislab.cc/resources/rollpig/manifest.json"
+    )
     fake_config.DEFAULT_PRIVATE_RESOURCE_MANIFEST_URL = (
         "https://pig.felislab.cc/resources/rollpig-pjsk/manifest.json"
     )
@@ -820,6 +866,173 @@ def test_rollpig_resource_json_accepts_utf8_bom(monkeypatch, tmp_path):
     assert manager._read_pig_json(resource_file) == [
         {"id": "bom-pig", "name": "BOM"}
     ]
+
+
+@pytest.mark.asyncio
+async def test_rollpig_resource_sync_accepts_decodable_image_mismatch(
+    monkeypatch,
+    tmp_path,
+):
+    module = load_rollpig_resource_manager_module(monkeypatch, tmp_path)
+    manager = module.RollPigResourceManager()
+    staging_dir = tmp_path / "staging"
+    (staging_dir / "images").mkdir(parents=True)
+    pig_json = b'[{"id": "pig", "name": "Pig"}]'
+    client = FakeHTTPClient(
+        {
+            "https://example.com/resources/pig.json": pig_json,
+            "https://example.com/resources/images/pig.png": VALID_PNG_BYTES,
+        }
+    )
+    manifest = {
+        "pig_json": build_manifest_meta("pig.json", pig_json),
+        "images": [
+            {
+                "path": "images/pig.png",
+                "filename": "pig.png",
+                "size": len(VALID_PNG_BYTES) + 1,
+                "sha256": "0" * 64,
+            }
+        ],
+    }
+
+    report = await manager._download_manifest_files(
+        client,
+        manifest_url="https://example.com/resources/manifest.json",
+        manifest=manifest,
+        staging_dir=staging_dir,
+        max_size=1024 * 1024,
+    )
+
+    assert staging_dir.joinpath("images", "pig.png").read_bytes() == VALID_PNG_BYTES
+    assert report.accepted_mismatches == ["images/pig.png"]
+    assert report.skipped == []
+
+
+@pytest.mark.asyncio
+async def test_rollpig_resource_sync_skips_invalid_image_mismatch(
+    monkeypatch,
+    tmp_path,
+):
+    module = load_rollpig_resource_manager_module(monkeypatch, tmp_path)
+    manager = module.RollPigResourceManager()
+    staging_dir = tmp_path / "staging"
+    (staging_dir / "images").mkdir(parents=True)
+    pig_json = b'[{"id": "pig", "name": "Pig"}]'
+    client = FakeHTTPClient(
+        {
+            "https://example.com/resources/pig.json": pig_json,
+            "https://example.com/resources/images/pig.png": b"<html>error</html>",
+        }
+    )
+    manifest = {
+        "pig_json": build_manifest_meta("pig.json", pig_json),
+        "images": [
+            {
+                "path": "images/pig.png",
+                "filename": "pig.png",
+                "size": 1,
+                "sha256": "0" * 64,
+            }
+        ],
+    }
+
+    report = await manager._download_manifest_files(
+        client,
+        manifest_url="https://example.com/resources/manifest.json",
+        manifest=manifest,
+        staging_dir=staging_dir,
+        max_size=1024 * 1024,
+    )
+
+    assert not staging_dir.joinpath("images", "pig.png").exists()
+    assert report.accepted_mismatches == []
+    assert report.skipped == ["images/pig.png"]
+
+
+def test_rollpig_partial_resource_state_keeps_retrying(monkeypatch, tmp_path):
+    module = load_rollpig_resource_manager_module(monkeypatch, tmp_path)
+    manager = module.RollPigResourceManager()
+    staging_dir = tmp_path / "staging"
+    staging_dir.mkdir()
+
+    manager._activate_staging_dir(
+        staging_dir,
+        "v1",
+        image_report=module.ImageSyncReport(
+            accepted_mismatches=[],
+            skipped=["images/pig.png"],
+        ),
+    )
+
+    state = json.loads(module.STATE_FILE.read_text(encoding="utf-8"))
+    assert state["partial"] is True
+    assert state["skipped_images"] == ["images/pig.png"]
+    assert manager._read_state_version() == "cache"
+
+
+@pytest.mark.asyncio
+async def test_rollpig_resource_sync_force_refreshes_same_version(
+    monkeypatch,
+    tmp_path,
+):
+    module = load_rollpig_resource_manager_module(monkeypatch, tmp_path)
+    manager = module.RollPigResourceManager()
+    module.CACHE_ROOT.mkdir(parents=True)
+    module.STATE_FILE.write_text(
+        json.dumps({"resource_version": "v1"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    pig_json = b'[{"id": "pig", "name": "Pig"}]'
+    manifest = {
+        "resource_version": "v1",
+        "pig_json": build_manifest_meta("pig.json", pig_json),
+        "images": [],
+    }
+    client = FakeHTTPClient(
+        {
+            "https://example.com/resources/manifest.json": json.dumps(
+                manifest
+            ).encode("utf-8"),
+            "https://example.com/resources/pig.json": pig_json,
+        }
+    )
+
+    monkeypatch.setattr(
+        module,
+        "get_resource_manifest_url",
+        lambda: "https://example.com/resources/manifest.json",
+    )
+    monkeypatch.setattr(
+        module.httpx,
+        "AsyncClient",
+        lambda **_: FakeAsyncClientContext(client),
+    )
+
+    result = await manager.sync_from_remote(force=True)
+
+    assert result.updated
+    assert "https://example.com/resources/pig.json" in client.request_urls
+
+
+def test_rollpig_public_resource_sync_defaults_to_upstream(monkeypatch):
+    default_module = load_rollpig_config_module(monkeypatch, {})
+    disabled_url_module = load_rollpig_config_module(
+        monkeypatch,
+        {"RESOURCE_MANIFEST_URL": "   "},
+    )
+    custom_module = load_rollpig_config_module(
+        monkeypatch,
+        {"RESOURCE_MANIFEST_URL": "https://example.com/public.json"},
+    )
+
+    assert default_module.get_resource_sync_enabled()
+    assert (
+        default_module.get_resource_manifest_url()
+        == default_module.DEFAULT_RESOURCE_MANIFEST_URL
+    )
+    assert disabled_url_module.get_resource_manifest_url() is None
+    assert custom_module.get_resource_manifest_url() == "https://example.com/public.json"
 
 
 def test_rollpig_private_resource_url_can_be_disabled(monkeypatch):

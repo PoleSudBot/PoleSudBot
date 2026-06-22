@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+from io import BytesIO
 import json
 from pathlib import Path
 import re
@@ -13,6 +14,7 @@ from urllib.parse import urljoin
 import httpx
 from nonebot.log import logger
 import nonebot_plugin_localstore as localstore
+from PIL import Image, UnidentifiedImageError
 
 from .config import (
     get_private_resource_manifest_url,
@@ -42,6 +44,12 @@ PRIVATE_STATE_FILE = CACHE_ROOT / "private_state.json"
 
 PIG_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 ALLOWED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+IMAGE_FORMAT_SUFFIXES = {
+    "GIF": {".gif"},
+    "JPEG": {".jpg", ".jpeg"},
+    "PNG": {".png"},
+    "WEBP": {".webp"},
+}
 RULE_KEYS = (
     "food_pigs",
     "human_pigs",
@@ -57,6 +65,16 @@ class ResourceSyncResult:
     skipped: bool
     resource_version: str = ""
     message: str = ""
+
+
+@dataclass
+class ImageSyncReport:
+    accepted_mismatches: list[str]
+    skipped: list[str]
+
+    def extend(self, other: "ImageSyncReport") -> None:
+        self.accepted_mismatches.extend(other.accepted_mismatches)
+        self.skipped.extend(other.skipped)
 
 
 class RollPigResourceManager:
@@ -239,7 +257,7 @@ class RollPigResourceManager:
                 shutil.rmtree(staging_dir)
             (staging_dir / "images").mkdir(parents=True, exist_ok=True)
             try:
-                await self._download_manifest_files(
+                image_report = await self._download_manifest_files(
                     client,
                     manifest_url=manifest_url,
                     manifest=manifest,
@@ -247,7 +265,11 @@ class RollPigResourceManager:
                     max_size=max_size,
                 )
                 self._merge_with_existing_snapshot(staging_dir)
-                self._activate_staging_dir(staging_dir, resource_version)
+                self._activate_staging_dir(
+                    staging_dir,
+                    resource_version,
+                    image_report=image_report,
+                )
             except Exception:
                 if staging_dir.exists():
                     shutil.rmtree(staging_dir)
@@ -258,7 +280,11 @@ class RollPigResourceManager:
             updated=True,
             skipped=False,
             resource_version=resource_version,
-            message=f"资源同步完成：{resource_version}",
+            message=self._build_sync_message(
+                "资源",
+                resource_version,
+                image_report,
+            ),
         )
 
     async def sync_private_from_remote(
@@ -310,7 +336,7 @@ class RollPigResourceManager:
                 shutil.rmtree(staging_dir)
             (staging_dir / "images").mkdir(parents=True, exist_ok=True)
             try:
-                await self._download_private_manifest_files(
+                image_report = await self._download_private_manifest_files(
                     client,
                     manifest_url=manifest_url,
                     manifest=manifest,
@@ -318,7 +344,11 @@ class RollPigResourceManager:
                     max_size=max_size,
                 )
                 self._validate_private_staging_dir(staging_dir)
-                self._activate_private_staging_dir(staging_dir, resource_version)
+                self._activate_private_staging_dir(
+                    staging_dir,
+                    resource_version,
+                    image_report=image_report,
+                )
             except Exception:
                 if staging_dir.exists():
                     shutil.rmtree(staging_dir)
@@ -329,7 +359,11 @@ class RollPigResourceManager:
             updated=True,
             skipped=False,
             resource_version=resource_version,
-            message=f"私有资源同步完成：{resource_version}",
+            message=self._build_sync_message(
+                "私有资源",
+                resource_version,
+                image_report,
+            ),
         )
 
     async def _download_manifest_files(
@@ -340,7 +374,7 @@ class RollPigResourceManager:
         manifest: dict[str, Any],
         staging_dir: Path,
         max_size: int,
-    ) -> None:
+    ) -> ImageSyncReport:
         pig_json_meta = manifest.get("pig_json")
         if not isinstance(pig_json_meta, dict):
             raise ValueError("manifest 缺少 pig_json")
@@ -370,18 +404,31 @@ class RollPigResourceManager:
         image_items = manifest.get("images") or []
         if not isinstance(image_items, list):
             raise ValueError("manifest images 必须是 list")
+        image_report = ImageSyncReport(accepted_mismatches=[], skipped=[])
         for image_meta in image_items:
             if not isinstance(image_meta, dict):
                 raise ValueError("manifest images 存在非法条目")
             filename = str(image_meta.get("filename") or image_meta.get("path") or "")
-            self._validate_image_filename(Path(filename).name)
-            await self._download_file_by_meta(
-                client,
-                manifest_url=manifest_url,
-                meta=image_meta,
-                target=staging_dir / "images" / Path(filename).name,
-                max_size=max_size,
+            image_filename = Path(filename).name
+            try:
+                self._validate_image_filename(image_filename)
+            except ValueError as error:
+                logger.warning(
+                    "rollpig 图片文件名非法，已跳过: "
+                    f"{filename or '<empty>'} error={error}"
+                )
+                image_report.skipped.append(filename or "<empty>")
+                continue
+            image_report.extend(
+                await self._download_image_by_meta(
+                    client,
+                    manifest_url=manifest_url,
+                    meta=image_meta,
+                    target=staging_dir / "images" / image_filename,
+                    max_size=max_size,
+                )
             )
+        return image_report
 
     async def _download_private_manifest_files(
         self,
@@ -391,7 +438,7 @@ class RollPigResourceManager:
         manifest: dict[str, Any],
         staging_dir: Path,
         max_size: int,
-    ) -> None:
+    ) -> ImageSyncReport:
         pig_json_meta = manifest.get("pig_json")
         if not isinstance(pig_json_meta, dict):
             raise ValueError("私有资源 manifest 缺少 pig_json")
@@ -424,18 +471,31 @@ class RollPigResourceManager:
         image_items = manifest.get("images") or []
         if not isinstance(image_items, list):
             raise ValueError("私有资源 manifest images 必须是 list")
+        image_report = ImageSyncReport(accepted_mismatches=[], skipped=[])
         for image_meta in image_items:
             if not isinstance(image_meta, dict):
                 raise ValueError("私有资源 images 存在非法条目")
             filename = str(image_meta.get("filename") or image_meta.get("path") or "")
-            self._validate_image_filename(Path(filename).name)
-            await self._download_file_by_meta(
-                client,
-                manifest_url=manifest_url,
-                meta=image_meta,
-                target=staging_dir / "images" / Path(filename).name,
-                max_size=max_size,
+            image_filename = Path(filename).name
+            try:
+                self._validate_image_filename(image_filename)
+            except ValueError as error:
+                logger.warning(
+                    "rollpig 私有图片文件名非法，已跳过: "
+                    f"{filename or '<empty>'} error={error}"
+                )
+                image_report.skipped.append(filename or "<empty>")
+                continue
+            image_report.extend(
+                await self._download_image_by_meta(
+                    client,
+                    manifest_url=manifest_url,
+                    meta=image_meta,
+                    target=staging_dir / "images" / image_filename,
+                    max_size=max_size,
+                )
             )
+        return image_report
 
     def _validate_private_staging_dir(self, staging_dir: Path) -> None:
         private_pigs = self._read_pig_json(staging_dir / "pig.json")
@@ -588,6 +648,84 @@ class RollPigResourceManager:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
 
+    async def _download_image_by_meta(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        manifest_url: str,
+        meta: dict[str, Any],
+        target: Path,
+        max_size: int,
+    ) -> ImageSyncReport:
+        path = str(meta.get("path") or meta.get("filename") or "").strip()
+        if not path:
+            raise ValueError("manifest 图片条目缺少 path")
+
+        try:
+            content = await self._download_bytes(
+                client,
+                urljoin(manifest_url, path),
+                max_size=max_size,
+            )
+            mismatch_reasons = self._get_file_mismatch_reasons(
+                meta,
+                content,
+            )
+            if mismatch_reasons:
+                # 远端 manifest 可能落后于图片文件；图片能解码时保留可用性，
+                # 但仍记录失配，避免把资源源头问题悄悄吃掉。
+                self._validate_image_content(content, target.suffix)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+                logger.warning(
+                    "rollpig 图片校验失配但可解码，已接受: "
+                    f"{path} ({'; '.join(mismatch_reasons)})"
+                )
+                return ImageSyncReport(accepted_mismatches=[path], skipped=[])
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+            return ImageSyncReport(accepted_mismatches=[], skipped=[])
+        except Exception as error:
+            logger.warning(f"rollpig 图片下载失败，已跳过: {path} error={error}")
+            return ImageSyncReport(accepted_mismatches=[], skipped=[path])
+
+    def _get_file_mismatch_reasons(
+        self,
+        meta: dict[str, Any],
+        content: bytes,
+    ) -> list[str]:
+        reasons: list[str] = []
+        expected_size = meta.get("size")
+        if expected_size is not None:
+            try:
+                size = int(expected_size)
+            except (TypeError, ValueError):
+                reasons.append(f"size 非法: {expected_size}")
+            else:
+                if size != len(content):
+                    reasons.append(f"size {size}!={len(content)}")
+
+        expected_hash = str(meta.get("sha256") or "").lower()
+        actual_hash = hashlib.sha256(content).hexdigest()
+        if expected_hash and actual_hash != expected_hash:
+            reasons.append("sha256 不一致")
+        return reasons
+
+    def _validate_image_content(self, content: bytes, suffix: str) -> None:
+        try:
+            with Image.open(BytesIO(content)) as image:
+                image.verify()
+                image_format = str(image.format or "").upper()
+        except (OSError, UnidentifiedImageError) as error:
+            raise ValueError("图片内容无法解码") from error
+
+        allowed_suffixes = IMAGE_FORMAT_SUFFIXES.get(image_format)
+        if not allowed_suffixes or suffix.lower() not in allowed_suffixes:
+            raise ValueError(
+                f"图片格式与文件扩展名不匹配: format={image_format}, suffix={suffix}"
+            )
+
     async def _download_bytes(
         self,
         client: httpx.AsyncClient,
@@ -602,18 +740,28 @@ class RollPigResourceManager:
             raise ValueError(f"文件超过大小上限: {url}")
         return content
 
-    def _activate_staging_dir(self, staging_dir: Path, resource_version: str) -> None:
+    def _activate_staging_dir(
+        self,
+        staging_dir: Path,
+        resource_version: str,
+        *,
+        image_report: ImageSyncReport | None = None,
+    ) -> None:
         CACHE_ROOT.mkdir(parents=True, exist_ok=True)
         if PREVIOUS_RESOURCE_DIR.exists():
             shutil.rmtree(PREVIOUS_RESOURCE_DIR)
         if ACTIVE_RESOURCE_DIR.exists():
             ACTIVE_RESOURCE_DIR.rename(PREVIOUS_RESOURCE_DIR)
         staging_dir.rename(ACTIVE_RESOURCE_DIR)
+        image_report = image_report or ImageSyncReport([], [])
         STATE_FILE.write_text(
             json.dumps(
                 {
                     "resource_version": resource_version,
                     "synced_at": int(time.time()),
+                    "partial": bool(image_report.skipped),
+                    "accepted_image_mismatches": image_report.accepted_mismatches,
+                    "skipped_images": image_report.skipped,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -624,6 +772,8 @@ class RollPigResourceManager:
     def _read_state_version(self) -> str:
         try:
             state = json.loads(self._read_json_text(STATE_FILE))
+            if state.get("partial") is True:
+                return "cache"
             return str(state.get("resource_version") or "cache")
         except Exception:
             return "cache"
@@ -631,6 +781,8 @@ class RollPigResourceManager:
     def _read_private_state_version(self) -> str:
         try:
             state = json.loads(self._read_json_text(PRIVATE_STATE_FILE))
+            if state.get("partial") is True:
+                return "private"
             return str(state.get("resource_version") or "private")
         except Exception:
             return "private"
@@ -639,6 +791,8 @@ class RollPigResourceManager:
         self,
         staging_dir: Path,
         resource_version: str,
+        *,
+        image_report: ImageSyncReport | None = None,
     ) -> None:
         CACHE_ROOT.mkdir(parents=True, exist_ok=True)
         if PRIVATE_PREVIOUS_RESOURCE_DIR.exists():
@@ -646,11 +800,15 @@ class RollPigResourceManager:
         if PRIVATE_RESOURCE_DIR.exists():
             PRIVATE_RESOURCE_DIR.rename(PRIVATE_PREVIOUS_RESOURCE_DIR)
         staging_dir.rename(PRIVATE_RESOURCE_DIR)
+        image_report = image_report or ImageSyncReport([], [])
         PRIVATE_STATE_FILE.write_text(
             json.dumps(
                 {
                     "resource_version": resource_version,
                     "synced_at": int(time.time()),
+                    "partial": bool(image_report.skipped),
+                    "accepted_image_mismatches": image_report.accepted_mismatches,
+                    "skipped_images": image_report.skipped,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -733,6 +891,36 @@ class RollPigResourceManager:
             raise ValueError(f"不支持的图片格式: {filename}")
         if not PIG_ID_PATTERN.match(path.stem):
             raise ValueError(f"图片文件名非法: {filename}")
+
+    def _build_sync_message(
+        self,
+        label: str,
+        resource_version: str,
+        image_report: ImageSyncReport,
+    ) -> str:
+        status = "部分同步完成" if image_report.skipped else "同步完成"
+        message = f"{label}{status}：{resource_version}"
+        details: list[str] = []
+        if image_report.accepted_mismatches:
+            details.append(
+                "接受校验失配图片 "
+                f"{len(image_report.accepted_mismatches)} 张"
+                f"（{self._format_path_sample(image_report.accepted_mismatches)}）"
+            )
+        if image_report.skipped:
+            details.append(
+                "跳过失败图片 "
+                f"{len(image_report.skipped)} 张"
+                f"（{self._format_path_sample(image_report.skipped)}）"
+            )
+        if details:
+            message += "；" + "；".join(details)
+        return message
+
+    def _format_path_sample(self, paths: list[str]) -> str:
+        sample = paths[:3]
+        suffix = "..." if len(paths) > len(sample) else ""
+        return ", ".join(sample) + suffix
 
 
 pig_resource_manager = RollPigResourceManager()

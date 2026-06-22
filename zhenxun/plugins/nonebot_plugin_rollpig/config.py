@@ -7,6 +7,9 @@ from pydantic import BaseModel, Field
 from zhenxun.configs.config import Config as ZhenxunConfig
 
 MODULE_NAME = "nonebot_plugin_rollpig"
+DEFAULT_RESOURCE_MANIFEST_URL = (
+    "https://pig.felislab.cc/resources/rollpig/manifest.json"
+)
 DEFAULT_PRIVATE_RESOURCE_MANIFEST_URL = (
     "https://pig.felislab.cc/resources/rollpig-pjsk/manifest.json"
 )
@@ -37,8 +40,8 @@ class Config(BaseModel):
     GROWTH_MAX_EXPERT_LEVEL: int = 5
     GROWTH_PITY_WEIGHT_STEP: float = 0.5
     GROWTH_PITY_WEIGHT_CAP: float = 4.0
-    RESOURCE_SYNC_ENABLED: bool = False
-    RESOURCE_MANIFEST_URL: Optional[str] = None
+    RESOURCE_SYNC_ENABLED: bool = True
+    RESOURCE_MANIFEST_URL: Optional[str] = DEFAULT_RESOURCE_MANIFEST_URL
     RESOURCE_SYNC_ON_STARTUP: bool = True
     RESOURCE_SYNC_INTERVAL_HOURS: int = 24
     RESOURCE_SYNC_TIMEOUT: float = 10.0
@@ -157,11 +160,17 @@ def get_growth_pity_weight_cap() -> float:
 
 
 def get_resource_sync_enabled() -> bool:
-    return _get_bool("RESOURCE_SYNC_ENABLED", False)
+    return _get_bool("RESOURCE_SYNC_ENABLED", True)
 
 
 def get_resource_manifest_url() -> Optional[str]:
-    return _get_str("RESOURCE_MANIFEST_URL")
+    raw_value = base_config.get("RESOURCE_MANIFEST_URL", DEFAULT_RESOURCE_MANIFEST_URL)
+    if raw_value is None:
+        return DEFAULT_RESOURCE_MANIFEST_URL
+
+    # 公有资源默认走上游全量包；显式配置为空字符串时表示关闭公有同步 URL。
+    text = str(raw_value).strip()
+    return text or None
 
 
 def get_resource_sync_on_startup() -> bool:

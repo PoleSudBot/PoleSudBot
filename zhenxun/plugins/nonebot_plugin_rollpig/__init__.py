@@ -34,6 +34,7 @@ from .ranking import (
 
 from .config import (
     Config,
+    DEFAULT_RESOURCE_MANIFEST_URL,
     DEFAULT_PRIVATE_RESOURCE_MANIFEST_URL,
     GroupSettings,
     MODULE_NAME,
@@ -226,16 +227,16 @@ __plugin_meta__ = PluginMetadata(
             {
                 "module": MODULE_NAME,
                 "key": "RESOURCE_SYNC_ENABLED",
-                "value": False,
-                "default_value": False,
-                "help": "是否启用静态小猪资源同步",
+                "value": True,
+                "default_value": True,
+                "help": "是否启用静态小猪资源同步，默认从上游资源包下载",
                 "type": bool,
             },
             {
                 "module": MODULE_NAME,
                 "key": "RESOURCE_MANIFEST_URL",
-                "value": None,
-                "default_value": None,
+                "value": DEFAULT_RESOURCE_MANIFEST_URL,
+                "default_value": DEFAULT_RESOURCE_MANIFEST_URL,
                 "help": "静态小猪资源 manifest URL",
                 "type": str,
             },

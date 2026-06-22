@@ -36,8 +36,8 @@
 | `GROWTH_MAX_EXPERT_LEVEL` | `5` | EX 等级上限 |
 | `GROWTH_PITY_WEIGHT_STEP` | `0.5` | 连续重复后未解锁小猪的单次权重加成 |
 | `GROWTH_PITY_WEIGHT_CAP` | `4.0` | 连续重复后未解锁小猪的最大权重加成 |
-| `RESOURCE_SYNC_ENABLED` | `False` | 是否启用静态小猪资源同步，默认不联网 |
-| `RESOURCE_MANIFEST_URL` | `None` | 静态资源 manifest URL |
+| `RESOURCE_SYNC_ENABLED` | `True` | 是否启用静态小猪资源同步，默认下载上游公有资源包 |
+| `RESOURCE_MANIFEST_URL` | `https://pig.felislab.cc/resources/rollpig/manifest.json` | 静态资源 manifest URL，设为空字符串可关闭公有同步 URL |
 | `RESOURCE_SYNC_ON_STARTUP` | `True` | 启动后是否后台同步资源 |
 | `RESOURCE_SYNC_INTERVAL_HOURS` | `24` | 定时资源同步间隔 |
 | `RESOURCE_SYNC_TIMEOUT` | `10.0` | 资源同步请求超时时间 |
@@ -50,10 +50,11 @@
 资源同步只处理静态资源，不接入上游 rollpig 云端账本，也不会读写本地 `pig_data.json`。
 
 - manifest 指向一组静态文件：`pig.json`、可选 `pig_rules.json`、以及小猪图片。
-- 同步成功前写入 localstore 缓存目录，完整校验后再替换 active 快照；失败会继续使用旧缓存或内置资源。
+- 同步成功前写入 localstore 缓存目录，完整校验后再替换 active 快照；失败会继续使用旧缓存或内置元数据。
 - `pig.json` 按 ID 合并：远端新增或更新的 ID 覆盖本地旧条目，远端缺失的旧 ID 会保留，避免历史本地账本引用失效。
 - `pig_rules.json` 按规则类型取并集，用于继续识别人类、熟食、吃掉、卖掉等特殊形态。
-- 小猪图片优先从 active 缓存读取，缺图时回退仓库内置 `resource/image/`。
+- 仓库不再携带小猪图片，生产环境部署后会自动下载到 localstore 的 `resources/active/images/`。
+- 小猪图片优先从私有 overlay 缓存读取，其次读取公有 active 缓存；首次同步完成前可能暂时无图。
 - 私有 overlay 默认指向上游 PJSK 包；启用资源同步后会缓存到 localstore 的 `resources/private_active/`，优先级高于公有资源。
 - 私有 `pig.json` 默认只追加新 ID；如需覆盖公有小猪文案，必须通过 `pig_overrides.json` 显式声明。
 - 本地特色的 `new.png` 贴纸位于 `resource/assets/new.png`，不属于小猪图片同步范围。
