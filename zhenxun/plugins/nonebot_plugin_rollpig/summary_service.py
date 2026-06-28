@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import datetime
 from collections import Counter
 from typing import Optional
 
+from .runtime import rollpig_date_str
 from .store.base import RollpigStore
 
 
@@ -12,7 +12,7 @@ async def build_daily_summary(
     date_str: Optional[str] = None,
     group_id: Optional[str] = None,
 ) -> dict:
-    target_date = date_str or datetime.date.today().isoformat()
+    target_date = date_str or rollpig_date_str()
     today_rolls = (
         await store.get_group_rolls(group_id, target_date)
         if group_id

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import random
 import re
@@ -34,6 +35,7 @@ class RoastManager:
     def __init__(self):
         self.file = ROAST_LIB_FILE
         self.library: Dict[str, Dict[str, List[str]]] = self._load()
+        self._lock = asyncio.Lock()
 
     def _load(self) -> dict:
         if not self.file.exists():
@@ -44,21 +46,26 @@ class RoastManager:
             logger.warning(f"roast_library.json 读取失败，已使用空文案库兜底: {e}")
             return {}
 
-    def _save(self):
-        self.file.write_text(
+    def _sync_save(self):
+        """用临时文件原子替换文案库，避免生成中断留下半截 JSON。"""
+        self.file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.file.with_name(f"{self.file.name}.{id(self)}.tmp")
+        tmp.write_text(
             json.dumps(self.library, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        tmp.replace(self.file)
 
-    def _save_new_text(self, origin_id: str, target_id: str, text: str):
+    async def _save_new_text(self, origin_id: str, target_id: str, text: str):
         normalized_text = self._normalize_pvp_placeholder_spacing(text)
-        if origin_id not in self.library:
-            self.library[origin_id] = {}
-        if target_id not in self.library[origin_id]:
-            self.library[origin_id][target_id] = []
-        if normalized_text not in self.library[origin_id][target_id]:
-            self.library[origin_id][target_id].append(normalized_text)
-            self._save()
+        async with self._lock:
+            if origin_id not in self.library:
+                self.library[origin_id] = {}
+            if target_id not in self.library[origin_id]:
+                self.library[origin_id][target_id] = []
+            if normalized_text not in self.library[origin_id][target_id]:
+                self.library[origin_id][target_id].append(normalized_text)
+                await asyncio.to_thread(self._sync_save)
 
     def _normalize_pvp_placeholder_spacing(self, text: str) -> str:
         # 历史 AI 文案会把 {k}/{v} 两侧补空格，名字改成「昵称」后在图片里会显得断开。
@@ -116,7 +123,7 @@ class RoastManager:
                     is_pvp=bool(operator_name),
                 )
                 if template_text:
-                    self._save_new_text(o_id, lookup_t_id, template_text)
+                    await self._save_new_text(o_id, lookup_t_id, template_text)
             except Exception as e:
                 logger.warning(f"AI 生成失败，回落本地文案: {e}")
 

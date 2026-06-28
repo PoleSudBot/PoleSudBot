@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import hashlib
 from io import BytesIO
@@ -79,6 +80,7 @@ class ImageSyncReport:
 
 class RollPigResourceManager:
     def __init__(self) -> None:
+        self._sync_lock = asyncio.Lock()
         self.pig_list: list[dict[str, Any]] = []
         self.pig_map: dict[str, dict[str, Any]] = {}
         self.rules: dict[str, list[str]] = {}
@@ -212,7 +214,44 @@ class RollPigResourceManager:
     def get_rule_ids(self, key: str) -> list[str]:
         return list(self.rules.get(key, []))
 
+    async def sync_all(
+        self,
+        *,
+        force: bool = False,
+        wait_if_busy: bool = True,
+    ) -> tuple[ResourceSyncResult, ResourceSyncResult]:
+        """串行同步公有资源与私有 overlay；后台任务忙时可直接跳过。"""
+        if not wait_if_busy and self._sync_lock.locked():
+            return (
+                ResourceSyncResult(updated=False, skipped=True, message="已有资源同步任务运行中"),
+                ResourceSyncResult(updated=False, skipped=True, message=""),
+            )
+
+        async with self._sync_lock:
+            public_result = await self._sync_from_remote_unlocked(force=force)
+            try:
+                private_result = await self._sync_private_from_remote_unlocked(force=force)
+            except Exception as error:
+                # 私有 overlay 是附加包，同步失败要报告，但不能让公有资源更新失效。
+                logger.warning(f"rollpig 私有资源同步失败，继续使用当前私有缓存: {error}")
+                private_result = ResourceSyncResult(
+                    updated=False,
+                    skipped=False,
+                    message=f"私有资源同步失败：{error}",
+                )
+            if public_result.updated or private_result.updated:
+                self.reload()
+            return public_result, private_result
+
     async def sync_from_remote(self, *, force: bool = False) -> ResourceSyncResult:
+        """兼容旧调用：单独同步公有包时也进入同一把锁。"""
+        async with self._sync_lock:
+            result = await self._sync_from_remote_unlocked(force=force)
+            if result.updated:
+                self.reload()
+            return result
+
+    async def _sync_from_remote_unlocked(self, *, force: bool = False) -> ResourceSyncResult:
         """从静态 manifest 同步资源；同步成功前不替换当前 active 快照。"""
         if not get_resource_sync_enabled() and not force:
             return ResourceSyncResult(
@@ -275,7 +314,6 @@ class RollPigResourceManager:
                     shutil.rmtree(staging_dir)
                 raise
 
-        self.reload()
         return ResourceSyncResult(
             updated=True,
             skipped=False,
@@ -288,6 +326,18 @@ class RollPigResourceManager:
         )
 
     async def sync_private_from_remote(
+        self,
+        *,
+        force: bool = False,
+    ) -> ResourceSyncResult:
+        """兼容旧调用：单独同步私有包时也进入同一把锁。"""
+        async with self._sync_lock:
+            result = await self._sync_private_from_remote_unlocked(force=force)
+            if result.updated:
+                self.reload()
+            return result
+
+    async def _sync_private_from_remote_unlocked(
         self,
         *,
         force: bool = False,
@@ -354,7 +404,6 @@ class RollPigResourceManager:
                     shutil.rmtree(staging_dir)
                 raise
 
-        self.reload()
         return ResourceSyncResult(
             updated=True,
             skipped=False,

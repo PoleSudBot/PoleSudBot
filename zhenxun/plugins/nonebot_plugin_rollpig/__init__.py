@@ -2,10 +2,12 @@ import random
 import datetime
 import time
 import asyncio
+from contextlib import suppress
 from functools import wraps
 import httpx
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from nonebot import on_command, require, get_driver, get_bot
 from nonebot.adapters.onebot.v11 import Event, MessageSegment, Message, GroupMessageEvent, Bot
@@ -52,6 +54,8 @@ from .roast_manager import roast_manager
 from .runtime import (
     is_daily_summary_push_enabled,
     is_group_rollpig_enabled,
+    rollpig_date_str,
+    rollpig_today,
     resolve_roast_cooldown_seconds,
 )
 from .store import store
@@ -126,7 +130,7 @@ __plugin_meta__ = PluginMetadata(
     config=Config,
     extra={
         "author": "Felis2026",
-        "version": "0.6.2",
+        "version": "0.6.3",
         "configs": [
             {
                 "module": MODULE_NAME,
@@ -299,10 +303,18 @@ PLUGIN_DIR = Path(__file__).parent
 RES_DIR = PLUGIN_DIR / "resource"
 ASSET_DIR = RES_DIR / "assets"
 PIGHUB_IMAGE_BASE_URL = "https://pighub.top/data/"
+PIGHUB_API_URLS = [
+    "https://pighub.top/api/images?sort=2",
+    "https://pighub.top/api/all-images",
+]
 PIGHUB_TTL_SECONDS = 6 * 3600  # PigHub 图库缓存有效期（6小时）
+PIGHUB_REFRESH_RETRY_SECONDS = 60
 
 pighub_images: list = []
 pighub_last_loaded: float = 0.0
+pighub_last_refresh_attempt: float = 0.0
+pighub_refresh_lock = asyncio.Lock()
+pighub_refresh_task: asyncio.Task[bool] | None = None
 resource_sync_tasks: set[asyncio.Task] = set()
 
 PIG_LIST = pig_resource_manager.pig_list
@@ -340,11 +352,18 @@ def _read_rule_ids(key: str) -> list[str]:
     return pig_resource_manager.get_rule_ids(key)
 
 
-async def sync_rollpig_resources(*, force: bool = False) -> str:
+async def sync_rollpig_resources(
+    *,
+    force: bool = False,
+    wait_if_busy: bool = True,
+) -> str:
     """同步公有资源与私有 overlay；这里只处理图鉴与图片，不触碰本地账本。"""
-    public_result = await pig_resource_manager.sync_from_remote(force=force)
-    private_result = await pig_resource_manager.sync_private_from_remote(force=force)
-    reload_rollpig_resources()
+    public_result, private_result = await pig_resource_manager.sync_all(
+        force=force,
+        wait_if_busy=wait_if_busy,
+    )
+    if public_result.updated or private_result.updated:
+        reload_rollpig_resources()
 
     messages = [
         result.message
@@ -357,7 +376,7 @@ async def sync_rollpig_resources(*, force: bool = False) -> str:
 async def run_rollpig_resource_sync(reason: str, *, force: bool = False) -> None:
     """后台资源同步失败时只记录日志，避免网络问题影响抽猪主流程。"""
     try:
-        message = await sync_rollpig_resources(force=force)
+        message = await sync_rollpig_resources(force=force, wait_if_busy=False)
         logger.info(f"[小猪资源同步] {reason}: {message}")
     except Exception as error:
         logger.warning(f"[小猪资源同步] {reason}失败: {error}")
@@ -371,6 +390,17 @@ async def _():
     task = asyncio.create_task(run_rollpig_resource_sync("startup"))
     resource_sync_tasks.add(task)
     task.add_done_callback(resource_sync_tasks.discard)
+
+
+@get_driver().on_shutdown
+async def _shutdown_rollpig_runtime() -> None:
+    """退出时收束后台资源同步，避免缓存目录正在替换时运行时关闭。"""
+    for task in list(resource_sync_tasks):
+        task.cancel()
+    for task in list(resource_sync_tasks):
+        with suppress(asyncio.CancelledError):
+            await task
+    resource_sync_tasks.clear()
 
 
 def get_food_pig_ids() -> list[str]:
@@ -894,7 +924,7 @@ def build_my_pigsty_ranking_note(
 
 async def get_group_roll_candidates(bot: Bot, group_id: int, exclude_ids: set[str]) -> list[str]:
     """优先按当前群成员范围筛候选；接口异常时回退到群内已登记过的今日形态。"""
-    today = datetime.date.today().isoformat()
+    today = rollpig_date_str()
     today_rolls = await store.get_daily_rolls(today)
 
     try:
@@ -970,49 +1000,137 @@ def guard_store_errors(matcher, message: str = "猪圈云账本暂时离线，�
     return decorator
 
 
-async def ensure_pighub_images_loaded() -> bool:
-    """
-    懒加载 PigHub 图库，带 TTL（默认6小时）自动刷新。
-    刷新失败时回退旧缓存，避免因网络抖动打挂功能。
-    """
-    global pighub_images, pighub_last_loaded
-    now = time.time()
+def normalize_pighub_image_item(item: dict) -> Optional[dict]:
+    """把 PigHub 新旧 API 条目归一成命令层使用的 title/thumbnail/filename。"""
+    if not isinstance(item, dict):
+        return None
 
-    # 缓存有效：直接返回
-    if pighub_images and (now - pighub_last_loaded) < PIGHUB_TTL_SECONDS:
-        return True
+    thumbnail = item.get("thumbnail") or item.get("image_url")
+    if not isinstance(thumbnail, str) or not thumbnail:
+        return None
+
+    title = item.get("title")
+    filename = item.get("filename") or thumbnail.split("/")[-1]
+    normalized = dict(item)
+    normalized["thumbnail"] = thumbnail
+    normalized["title"] = str(title or filename or "未命名小猪")
+    normalized["filename"] = str(filename or "")
+    return normalized
+
+
+def parse_pighub_images_payload(data: dict, api_url: str) -> list[dict]:
+    """解析 PigHub 新旧 API 返回值，并过滤缺少图片地址的异常条目。"""
+    if not isinstance(data, dict):
+        raise ValueError(f"PigHub 返回结构异常（{api_url}）：不是 JSON 对象")
+
+    raw_items = data.get("data") if isinstance(data.get("data"), list) else data.get("images")
+    if not isinstance(raw_items, list):
+        raise ValueError(f"PigHub 返回结构异常（{api_url}）：缺少 data/images 列表")
+
+    valid = []
+    for item in raw_items:
+        normalized = normalize_pighub_image_item(item)
+        if normalized:
+            valid.append(normalized)
+    if not valid:
+        raise ValueError(f"PigHub 返回空图集（{api_url}）")
+    return valid
+
+
+def is_pighub_cache_fresh(now: float) -> bool:
+    return bool(pighub_images and (now - pighub_last_loaded) < PIGHUB_TTL_SECONDS)
+
+
+async def refresh_pighub_images() -> bool:
+    """真实刷新 PigHub 图库；调用方复用 task，避免并发缓存击穿。"""
+    global pighub_images, pighub_last_loaded, pighub_last_refresh_attempt
+    pighub_last_refresh_attempt = time.time()
+    last_error: Exception | None = None
 
     try:
         async with httpx.AsyncClient(timeout=10, proxy=get_proxy()) as client:
-            resp = await client.get("https://pighub.top/api/all-images")
-            resp.raise_for_status()
-            data = resp.json()
+            for api_url in PIGHUB_API_URLS:
+                try:
+                    resp = await client.get(api_url)
+                    resp.raise_for_status()
+                    pighub_images = parse_pighub_images_payload(resp.json(), api_url)
+                    pighub_last_loaded = time.time()
+                    return True
+                except Exception as error:
+                    # PigHub 新旧接口有切换历史；单个接口失败时继续尝试备用接口。
+                    last_error = error
+                    logger.warning(f"PigHub 接口刷新失败，尝试备用接口：url={api_url}, error={error}")
+    except Exception as error:
+        last_error = error
 
-        if not isinstance(data, dict) or not isinstance(data.get("images"), list):
-            raise ValueError("PigHub 返回结构异常，缺少 images 列表")
+    if last_error:
+        if pighub_images:
+            logger.warning(f"PigHub 刷新失败，继续使用旧缓存（{len(pighub_images)} 张）: {last_error}")
+            return True
+        logger.warning(f"PigHub 连接失败: {last_error}")
+    return False
 
-        valid = [item for item in data["images"] if isinstance(item, dict) and item.get("thumbnail")]
-        if not valid:
-            raise ValueError("PigHub 返回空图集")
 
-        pighub_images = valid
-        pighub_last_loaded = now
+async def ensure_pighub_images_loaded() -> bool:
+    """
+    懒加载 PigHub 图库，带 TTL（默认6小时）自动刷新。
+    刷新失败时回退旧缓存；旧缓存存在时后台刷新，避免 PigHub 抖动拖慢用户命令。
+    """
+    global pighub_refresh_task
+    now = time.time()
+
+    if is_pighub_cache_fresh(now):
         return True
 
-    except Exception as e:
-        if pighub_images:
-            # 刷新失败但有旧缓存：继续使用，不打挂功能
-            logger.warning(f"PigHub 刷新失败，继续使用旧缓存（{len(pighub_images)} 张）: {e}")
+    async with pighub_refresh_lock:
+        now = time.time()
+        if is_pighub_cache_fresh(now):
             return True
-        logger.warning(f"PigHub 连接失败: {e}")
-        return False
+
+        active_task = (
+            pighub_refresh_task
+            if pighub_refresh_task and not pighub_refresh_task.done()
+            else None
+        )
+        in_retry_cooldown = (
+            now - pighub_last_refresh_attempt
+        ) < PIGHUB_REFRESH_RETRY_SECONDS
+        if active_task is None and in_retry_cooldown:
+            return bool(pighub_images)
+
+        if active_task is None:
+            active_task = asyncio.create_task(refresh_pighub_images())
+            pighub_refresh_task = active_task
+
+        if pighub_images:
+            return True
+
+    return await active_task
 
 
 def build_pighub_image_url(pig_item: dict) -> Optional[str]:
     thumbnail = pig_item.get("thumbnail")
     if not isinstance(thumbnail, str) or not thumbnail:
         return None
-    return PIGHUB_IMAGE_BASE_URL + thumbnail.split("/")[-1]
+    if thumbnail.startswith(("http://", "https://")):
+        image_url = thumbnail
+    elif thumbnail.startswith(("/data/", "data/")):
+        image_url = "https://pighub.top/" + thumbnail.lstrip("/")
+    elif thumbnail.startswith(("/images/", "images/")):
+        image_url = "https://pighub.top/" + thumbnail.lstrip("/")
+    else:
+        image_url = PIGHUB_IMAGE_BASE_URL + thumbnail.split("/")[-1]
+
+    parsed = urlsplit(image_url)
+    return urlunsplit(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            quote(parsed.path, safe="/%"),
+            parsed.query,
+            parsed.fragment,
+        )
+    )
 
 # ================= 辅助渲染函数 =================
 async def build_panel_picture(
@@ -1145,7 +1263,7 @@ def build_daily_summary_panel(summary: dict) -> dict[str, object]:
 
     return {
         "title": "今日猪圈日报",
-        "subtitle": datetime.date.today().isoformat(),
+        "subtitle": rollpig_date_str(),
         "stats": stats,
         "notes": notes,
         "footer": "明天继续，猪圈永不打烊。",
@@ -1378,7 +1496,7 @@ cmd_yest = on_command("昨日小猪", block=True)
 @guard_store_errors(cmd_yest)
 async def _(event: Event):
     user_id = str(event.user_id)
-    yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+    yesterday = rollpig_date_str(-1)
     pig = get_pig_by_id(await store.get_pig_by_date(user_id, yesterday))
 
     if not pig:
@@ -1462,7 +1580,7 @@ async def _(event: Event):
 
 
 # 5.5 烤群友
-cmd_roast_member = on_command("烤群友", block=True)
+cmd_roast_member = on_command("烤群友", aliases={"烤"}, block=True)
 
 @cmd_roast_member.handle()
 @guard_group_enabled(cmd_roast_member)
@@ -2253,7 +2371,7 @@ async def _(event: Event):
         await cmd_week.finish("Bot 未安装 PIL 库。")
 
     user_id = str(event.user_id)
-    today = datetime.date.today()
+    today = rollpig_today()
 
     images_to_merge = []
     for i in range(7):
@@ -2390,7 +2508,7 @@ async def daily_summary_job():
             return
 
         group_summaries = {}
-        protect_date = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+        protect_date = rollpig_date_str(1)
         for group_id in enabled_active_groups:
             summary = await build_daily_summary(store, group_id=group_id)
             group_summaries[group_id] = summary

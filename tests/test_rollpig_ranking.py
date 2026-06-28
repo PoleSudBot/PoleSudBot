@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import importlib.util
@@ -20,6 +21,8 @@ ROLLPIG_CONFIG_PATH = ROLLPIG_PLUGIN_DIR / "config.py"
 ROLLPIG_PLUGIN_INIT_PATH = ROLLPIG_PLUGIN_DIR / "__init__.py"
 ROLLPIG_RANKING_PATH = ROLLPIG_PLUGIN_DIR / "ranking.py"
 ROLLPIG_RESOURCE_MANAGER_PATH = ROLLPIG_PLUGIN_DIR / "resource_manager.py"
+ROLLPIG_ROAST_MANAGER_PATH = ROLLPIG_PLUGIN_DIR / "roast_manager.py"
+ROLLPIG_RUNTIME_PATH = ROLLPIG_PLUGIN_DIR / "runtime.py"
 VALID_PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/"
     "iZk9HQAAAABJRU5ErkJggg=="
@@ -65,11 +68,17 @@ class FakeMessageSegment:
 
 
 class FakeHTTPResponse:
-    def __init__(self, content: bytes):
+    def __init__(self, content: bytes = b"", json_data=None):
         self.content = content
+        self._json_data = json_data
 
     def raise_for_status(self):
         return None
+
+    def json(self):
+        if self._json_data is not None:
+            return self._json_data
+        return json.loads(self.content.decode("utf-8"))
 
 
 class FakeHTTPClient:
@@ -110,6 +119,9 @@ class FakeDriver:
     config = types.SimpleNamespace(superusers=set())
 
     def on_startup(self, func):
+        return func
+
+    def on_shutdown(self, func):
         return func
 
 
@@ -154,6 +166,16 @@ class FakeResourceManager:
             resource_version="test",
             message="小猪资源同步完成：test" if force else "资源已是最新版本",
         )
+
+    async def sync_all(self, *, force=False, wait_if_busy=True):
+        public_result = await self.sync_from_remote(force=force)
+        private_result = types.SimpleNamespace(
+            updated=False,
+            skipped=True,
+            resource_version="",
+            message="",
+        )
+        return public_result, private_result
 
 
 class FakePigProgress:
@@ -252,6 +274,10 @@ def load_rollpig_data_manager_module(
     fake_package.__path__ = [str(ROLLPIG_DATA_MANAGER_PATH.parent)]
     fake_runtime = types.ModuleType(f"{package_name}.runtime")
     fake_runtime.resolve_roast_cooldown_seconds = lambda: 8 * 60 * 60
+    fake_runtime.rollpig_date_str = (
+        lambda offset_days=0: f"2026-04-{22 + offset_days:02d}"
+    )
+    fake_runtime.rollpig_today = lambda: __import__("datetime").date(2026, 4, 22)
     fake_store_package = types.ModuleType(f"{package_name}.store")
     fake_store_package.__path__ = []
     fake_store_models = types.ModuleType(f"{package_name}.store.models")
@@ -331,6 +357,89 @@ def load_rollpig_config_module(
         f"rollpig_config_test_{uuid.uuid4().hex}",
         ROLLPIG_CONFIG_PATH,
     )
+
+
+def load_rollpig_runtime_module(monkeypatch: pytest.MonkeyPatch):
+    fake_nonebot_log = types.ModuleType("nonebot.log")
+    fake_nonebot_log.logger = FakeLogger()
+
+    fake_zhenxun = types.ModuleType("zhenxun")
+    fake_zhenxun.__path__ = []
+    fake_services = types.ModuleType("zhenxun.services")
+    fake_services.__path__ = []
+    fake_group_settings = types.ModuleType("zhenxun.services.group_settings_service")
+    fake_group_settings.group_settings_service = types.SimpleNamespace(
+        get_all_for_plugin=lambda *_args, **_kwargs: None
+    )
+
+    package_name = f"rollpig_runtime_testpkg_{uuid.uuid4().hex}"
+    fake_package = types.ModuleType(package_name)
+    fake_package.__path__ = [str(ROLLPIG_PLUGIN_DIR)]
+    fake_config = types.ModuleType(f"{package_name}.config")
+    fake_config.GroupSettings = type("GroupSettings", (), {})
+    fake_config.MODULE_NAME = "nonebot_plugin_rollpig"
+    fake_config.get_roast_cooldown_hours = lambda: 8.0
+
+    for name, module in {
+        "nonebot.log": fake_nonebot_log,
+        "zhenxun": fake_zhenxun,
+        "zhenxun.services": fake_services,
+        "zhenxun.services.group_settings_service": fake_group_settings,
+        package_name: fake_package,
+        f"{package_name}.config": fake_config,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    return load_module_from_path(
+        f"{package_name}.runtime",
+        ROLLPIG_RUNTIME_PATH,
+    )
+
+
+def load_rollpig_roast_manager_module(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    roast_file = tmp_path / "roast_library.json"
+    fake_localstore = types.ModuleType("nonebot_plugin_localstore")
+    fake_localstore.get_plugin_data_file = lambda _name: roast_file
+
+    fake_zhenxun = types.ModuleType("zhenxun")
+    fake_zhenxun.__path__ = []
+    fake_services = types.ModuleType("zhenxun.services")
+    fake_services.__path__ = []
+    fake_llm = types.ModuleType("zhenxun.services.llm")
+    fake_llm.LLMMessage = types.SimpleNamespace(
+        system=lambda text: ("system", text),
+        user=lambda text: ("user", text),
+    )
+    fake_llm.generate = lambda *_args, **_kwargs: None
+    fake_log = types.ModuleType("zhenxun.services.log")
+    fake_log.logger = FakeLogger()
+
+    package_name = f"rollpig_roast_testpkg_{uuid.uuid4().hex}"
+    fake_package = types.ModuleType(package_name)
+    fake_package.__path__ = [str(ROLLPIG_PLUGIN_DIR)]
+    fake_config = types.ModuleType(f"{package_name}.config")
+    fake_config.get_ai_enabled = lambda: False
+    fake_config.get_llm_model_name = lambda: None
+
+    for name, module in {
+        "nonebot_plugin_localstore": fake_localstore,
+        "zhenxun": fake_zhenxun,
+        "zhenxun.services": fake_services,
+        "zhenxun.services.llm": fake_llm,
+        "zhenxun.services.log": fake_log,
+        package_name: fake_package,
+        f"{package_name}.config": fake_config,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    module = load_module_from_path(
+        f"{package_name}.roast_manager",
+        ROLLPIG_ROAST_MANAGER_PATH,
+    )
+    return module, roast_file
 
 
 def build_manifest_meta(path: str, content: bytes) -> dict:
@@ -474,6 +583,10 @@ def load_rollpig_plugin_module(
     fake_runtime = types.ModuleType(f"{package_name}.runtime")
     fake_runtime.is_daily_summary_push_enabled = lambda *_args, **_kwargs: True
     fake_runtime.is_group_rollpig_enabled = lambda *_args, **_kwargs: True
+    fake_runtime.rollpig_date_str = (
+        lambda offset_days=0: f"2026-04-{22 + offset_days:02d}"
+    )
+    fake_runtime.rollpig_today = lambda: __import__("datetime").date(2026, 4, 22)
     fake_runtime.resolve_roast_cooldown_seconds = lambda: 8 * 60 * 60
 
     fake_store_module = types.ModuleType(f"{package_name}.store")
@@ -725,6 +838,77 @@ async def test_existing_daily_roll_does_not_increment_growth(monkeypatch, tmp_pa
     assert manager.get_group_rolls("20001", "2026-04-22") == {"10001": "pig"}
 
 
+@pytest.mark.asyncio
+async def test_broken_pig_data_enters_write_protection(monkeypatch, tmp_path):
+    module, data_file = load_rollpig_data_manager_module(monkeypatch, tmp_path)
+    data_file.write_text("{ broken json", encoding="utf-8")
+
+    manager = module.PigDataManager()
+
+    assert manager.get_daily_rolls("2026-04-22") == {}
+    assert data_file.read_text("utf-8") == "{ broken json"
+    assert list(tmp_path.glob("pig_data.json.broken.*.bak"))
+    with pytest.raises(RuntimeError, match="拒绝写入"):
+        await manager.set_today_pig("10001", "pig")
+    assert data_file.read_text("utf-8") == "{ broken json"
+
+
+def test_broken_pig_data_recovers_from_backup(monkeypatch, tmp_path):
+    module, data_file = load_rollpig_data_manager_module(monkeypatch, tmp_path)
+    backup_data = {
+        "history": {"2026-04-22": {"10001": "pig"}},
+        "group_rolls": {},
+        "collection": {"10001": ["pig"]},
+        "collection_progress": {},
+        "pig_progress": {},
+        "draw_state": {},
+        "usage": {},
+        "force_usage": {},
+        "daily_events": {},
+        "protected": {},
+    }
+    data_file.write_text("{ broken json", encoding="utf-8")
+    data_file.with_name("pig_data.json.bak").write_text(
+        json.dumps(backup_data, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    manager = module.PigDataManager()
+
+    assert manager.get_today_pig("10001", "2026-04-22") == "pig"
+    saved = json.loads(data_file.read_text("utf-8"))
+    assert saved["history"]["2026-04-22"]["10001"] == "pig"
+    assert json.loads(data_file.with_name("pig_data.json.bak").read_text("utf-8")) == backup_data
+
+
+@pytest.mark.asyncio
+async def test_pig_data_save_rotates_backups(monkeypatch, tmp_path):
+    module, data_file = load_rollpig_data_manager_module(
+        monkeypatch,
+        tmp_path,
+        seed_data={
+            "history": {},
+            "group_rolls": {},
+            "collection": {},
+            "collection_progress": {},
+            "pig_progress": {},
+            "draw_state": {},
+            "usage": {},
+            "force_usage": {},
+            "daily_events": {},
+            "protected": {},
+        },
+    )
+    original = data_file.read_text("utf-8")
+    manager = module.PigDataManager()
+
+    await manager.set_today_pig("10001", "pig", group_id="20001")
+
+    assert data_file.with_name("pig_data.json.bak").read_text("utf-8") == original
+    saved = json.loads(data_file.read_text("utf-8"))
+    assert saved["history"]["2026-04-22"]["10001"] == "pig"
+
+
 def test_sort_prefers_earlier_reached_at_for_same_count():
     rankings = sort_pig_king_rankings(
         [
@@ -853,6 +1037,117 @@ def test_pigsty_footer_matches_upstream_summary_copy(monkeypatch):
         module.build_my_pigsty_footer(1)
         == "完整图鉴图还在施工，先把成长进度记牢。"
     )
+
+
+@pytest.mark.asyncio
+async def test_pighub_refresh_prefers_new_api_and_builds_urls(monkeypatch):
+    module = load_rollpig_plugin_module(
+        monkeypatch,
+        fake_store=object(),
+        fake_data_manager=object(),
+        group_members=[],
+    )
+
+    class FakePigHubClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url: str):
+            assert url == module.PIGHUB_API_URLS[0]
+            return FakeHTTPResponse(
+                json_data={
+                    "code": 0,
+                    "data": [
+                        {
+                            "title": "空格猪",
+                            "image_url": "https://pighub.top/images/space pig.png",
+                        }
+                    ],
+                }
+            )
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", lambda **_: FakePigHubClient())
+
+    assert await module.ensure_pighub_images_loaded()
+    assert module.pighub_images[0]["thumbnail"].endswith("space pig.png")
+    assert (
+        module.build_pighub_image_url(module.pighub_images[0])
+        == "https://pighub.top/images/space%20pig.png"
+    )
+    assert (
+        module.build_pighub_image_url({"thumbnail": "pig.png"})
+        == "https://pighub.top/data/pig.png"
+    )
+    assert (
+        module.build_pighub_image_url({"thumbnail": "/data/fancy pig.png"})
+        == "https://pighub.top/data/fancy%20pig.png"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pighub_refresh_falls_back_to_old_api(monkeypatch):
+    module = load_rollpig_plugin_module(
+        monkeypatch,
+        fake_store=object(),
+        fake_data_manager=object(),
+        group_members=[],
+    )
+    requested_urls: list[str] = []
+
+    class FakePigHubClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url: str):
+            requested_urls.append(url)
+            if url == module.PIGHUB_API_URLS[0]:
+                raise RuntimeError("new api down")
+            return FakeHTTPResponse(
+                json_data={"images": [{"title": "旧猪", "thumbnail": "old.png"}]}
+            )
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", lambda **_: FakePigHubClient())
+
+    assert await module.ensure_pighub_images_loaded()
+    assert requested_urls == module.PIGHUB_API_URLS
+    assert module.pighub_images[0]["title"] == "旧猪"
+
+
+@pytest.mark.asyncio
+async def test_pighub_refresh_reuses_active_task(monkeypatch):
+    module = load_rollpig_plugin_module(
+        monkeypatch,
+        fake_store=object(),
+        fake_data_manager=object(),
+        group_members=[],
+    )
+    calls = 0
+    release = asyncio.Event()
+
+    async def slow_refresh():
+        nonlocal calls
+        calls += 1
+        await release.wait()
+        module.pighub_images = [{"title": "并发猪", "thumbnail": "pig.png"}]
+        module.pighub_last_loaded = module.time.time()
+        return True
+
+    monkeypatch.setattr(module, "refresh_pighub_images", slow_refresh)
+
+    first = asyncio.create_task(module.ensure_pighub_images_loaded())
+    second = asyncio.create_task(module.ensure_pighub_images_loaded())
+    await asyncio.sleep(0)
+    release.set()
+
+    assert await first
+    assert await second
+    assert calls == 1
 
 
 def test_rollpig_resource_json_accepts_utf8_bom(monkeypatch, tmp_path):
@@ -1015,6 +1310,40 @@ async def test_rollpig_resource_sync_force_refreshes_same_version(
     assert "https://example.com/resources/pig.json" in client.request_urls
 
 
+@pytest.mark.asyncio
+async def test_rollpig_resource_sync_busy_background_skips(monkeypatch, tmp_path):
+    module = load_rollpig_resource_manager_module(monkeypatch, tmp_path)
+    manager = module.RollPigResourceManager()
+    entered = 0
+    release = asyncio.Event()
+
+    async def slow_public_sync(*, force=False):
+        nonlocal entered
+        entered += 1
+        await release.wait()
+        return module.ResourceSyncResult(
+            updated=False,
+            skipped=True,
+            message="done",
+        )
+
+    async def private_sync(*, force=False):
+        return module.ResourceSyncResult(updated=False, skipped=True, message="")
+
+    monkeypatch.setattr(manager, "_sync_from_remote_unlocked", slow_public_sync)
+    monkeypatch.setattr(manager, "_sync_private_from_remote_unlocked", private_sync)
+
+    first_task = asyncio.create_task(manager.sync_all(force=True))
+    await asyncio.sleep(0)
+    busy_result, _ = await manager.sync_all(force=True, wait_if_busy=False)
+    release.set()
+    await first_task
+
+    assert entered == 1
+    assert busy_result.skipped
+    assert busy_result.message == "已有资源同步任务运行中"
+
+
 def test_rollpig_public_resource_sync_defaults_to_upstream(monkeypatch):
     default_module = load_rollpig_config_module(monkeypatch, {})
     disabled_url_module = load_rollpig_config_module(
@@ -1055,6 +1384,44 @@ def test_rollpig_private_resource_url_can_be_disabled(monkeypatch):
         custom_module.get_private_resource_manifest_url()
         == "https://example.com/private.json"
     )
+
+
+def test_rollpig_date_str_uses_business_timezone(monkeypatch):
+    module = load_rollpig_runtime_module(monkeypatch)
+    real_datetime = module.datetime.datetime
+
+    class FixedDateTime:
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime(
+                2026,
+                4,
+                22,
+                0,
+                30,
+                tzinfo=tz,
+            )
+
+    monkeypatch.setattr(module.datetime, "datetime", FixedDateTime)
+
+    assert module.rollpig_date_str() == "2026-04-22"
+    assert module.rollpig_date_str(-1) == "2026-04-21"
+    assert module.rollpig_date_str(1) == "2026-04-23"
+
+
+@pytest.mark.asyncio
+async def test_roast_library_save_is_atomic_and_locked(monkeypatch, tmp_path):
+    module, roast_file = load_rollpig_roast_manager_module(monkeypatch, tmp_path)
+    manager = module.RoastManager()
+
+    await asyncio.gather(
+        manager._save_new_text("pig", "food", "{k} text"),
+        manager._save_new_text("pig", "food", "{v} text"),
+    )
+
+    saved = json.loads(roast_file.read_text("utf-8"))
+    assert set(saved["pig"]["food"]) == {"{k}text", "{v}text"}
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_rollpig_resource_merge_retains_legacy_ids_and_images(monkeypatch, tmp_path):

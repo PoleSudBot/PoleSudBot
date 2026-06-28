@@ -3,16 +3,18 @@ import asyncio
 import datetime
 import time
 import math
+import shutil
 from pathlib import Path
 from typing import List, Optional
 
 from nonebot.log import logger
 import nonebot_plugin_localstore as store
 
-from .runtime import resolve_roast_cooldown_seconds
+from .runtime import rollpig_date_str, rollpig_today, resolve_roast_cooldown_seconds
 from .store.models import DailyRollResult, DrawState, PigProgress
 
 ROAST_COOLDOWN_SECONDS = resolve_roast_cooldown_seconds()
+DATA_BACKUP_COUNT = 2
 
 # ================= 数据管理 =================
 
@@ -44,45 +46,53 @@ class PigDataManager:
     def __init__(self):
         self.file = DATA_FILE
         self._lock = asyncio.Lock()
+        self._load_failed = False
+        self._skip_backup_rotation_once = False
         self.data = self._load()
 
     # ---- 加载与迁移 ----
 
+    def _default_data(self) -> dict:
+        return {
+            "history": {},
+            "group_rolls": {},
+            "collection": {},
+            "collection_progress": {},
+            "pig_progress": {},
+            "draw_state": {},
+            "usage": {},
+            "force_usage": {},
+            "daily_events": {},
+            "protected": {},
+        }
+
     def _load(self) -> dict:
         if not self.file.exists():
-            default = {
-                "history": {},
-                "group_rolls": {},
-                "collection": {},
-                "collection_progress": {},
-                "pig_progress": {},
-                "draw_state": {},
-                "usage": {},
-                "force_usage": {},
-                "daily_events": {},
-                "protected": {},
-            }
+            default = self._default_data()
+            self.file.parent.mkdir(parents=True, exist_ok=True)
             self.file.write_text(json.dumps(default, ensure_ascii=False, indent=2), encoding="utf-8")
             return default
         try:
             raw = json.loads(self.file.read_text("utf-8"))
             return self._migrate(raw)
         except Exception as e:
-            logger.warning(f"pig_data.json 读取失败，已使用空数据兜底: {e}")
-            return {
-                "history": {},
-                "group_rolls": {},
-                "collection": {},
-                "collection_progress": {},
-                "pig_progress": {},
-                "draw_state": {},
-                "usage": {},
-                "force_usage": {},
-                "daily_events": {},
-                "protected": {},
-            }
+            self._load_failed = True
+            logger.error(f"pig_data.json 读取失败，进入写保护模式以避免覆盖旧数据: {e}")
+            self._preserve_broken_file()
 
-    def _migrate(self, data: dict) -> dict:
+            recovered = self._load_backup()
+            if recovered is not None:
+                logger.warning("pig_data.json 已从备份恢复，并写回主文件。")
+                self._load_failed = False
+                self.data = recovered
+                self._skip_backup_rotation_once = True
+                self._sync_save()
+                return recovered
+
+            logger.error("pig_data.json 没有可用备份；本地存储写操作将被拒绝，请手动修复数据文件。")
+            return self._default_data()
+
+    def _migrate(self, data: dict, *, persist: bool = True) -> dict:
         """将旧版 history（存完整 pig dict）迁移为新版（只存 pig_id 字符串）。
         迁移完成后立即同步落盘，防止进程在第一次写入前已退出导致磁盘仍为旧格式。
         """
@@ -197,23 +207,79 @@ class PigDataManager:
                 migrated = True
         if migrated:
             logger.info("pig_data.json 数据结构已自动迁移/补全，开始落盘...")
-            self.data = data
-            self._sync_save()  # 迁移后立即落盘，防止重启丢失
+            if persist:
+                self.data = data
+                self._sync_save()  # 迁移后立即落盘，防止重启丢失
         return data
 
     # ---- 原子写 ----
 
     def _sync_save(self):
         """同步原子写（仅用于启动期迁移，运行期写操作应使用 _atomic_save）。"""
+        self._ensure_writable()
+        self.file.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.file.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._rotate_backups()
         tmp.replace(self.file)
 
     async def _atomic_save(self):
-        """异步原子写：写入临时文件再原子替换，防止写入中途崩溃导致 JSON 损坏。"""
-        tmp = self.file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(self.file)  # 同一文件系统上是原子操作（Windows/Linux 均支持）
+        """异步原子写：把 JSON 序列化和磁盘 IO 放到线程，避免阻塞事件循环。"""
+        # 调用方仍持有 self._lock；这里仅把同步 IO 挪到线程，保存顺序不变。
+        await asyncio.to_thread(self._sync_save)
+
+    def _ensure_writable(self):
+        """账册读取失败后拒绝写入，避免空数据覆盖仍可人工修复的坏文件。"""
+        if self._load_failed:
+            raise RuntimeError("pig_data.json 读取失败，已拒绝写入以避免覆盖旧数据。请先修复数据文件或恢复备份。")
+
+    def _backup_paths(self) -> list[Path]:
+        return [
+            self.file.with_name(f"{self.file.name}.bak{'' if index == 0 else f'.{index}'}")
+            for index in range(DATA_BACKUP_COUNT + 1)
+        ]
+
+    def _rotate_backups(self) -> None:
+        """每次成功写入前保留滚动备份；恢复场景跳过一次以保护已有好备份。"""
+        if self._skip_backup_rotation_once:
+            self._skip_backup_rotation_once = False
+            return
+        if not self.file.exists():
+            return
+
+        backup_paths = self._backup_paths()
+        for index in range(len(backup_paths) - 1, -1, -1):
+            source = self.file if index == 0 else backup_paths[index - 1]
+            target = backup_paths[index]
+            if not source.exists():
+                continue
+            if target.exists():
+                target.unlink()
+            shutil.copy2(source, target)
+
+    def _preserve_broken_file(self) -> None:
+        """把无法读取的主文件另存为 broken 备份，方便人工排查和恢复。"""
+        if not self.file.exists():
+            return
+        broken_path = self.file.with_name(f"{self.file.name}.broken.{int(time.time())}.bak")
+        try:
+            shutil.copy2(self.file, broken_path)
+            logger.error(f"pig_data.json 损坏文件已保留: {broken_path}")
+        except Exception as error:
+            logger.error(f"pig_data.json 损坏文件备份失败: {error}")
+
+    def _load_backup(self) -> Optional[dict]:
+        """按新到旧顺序尝试备份，成功后仍走迁移归一化但不立即写盘。"""
+        for backup_path in self._backup_paths():
+            if not backup_path.exists():
+                continue
+            try:
+                raw = json.loads(backup_path.read_text("utf-8"))
+                logger.warning(f"尝试从 pig_data.json 备份恢复: {backup_path}")
+                return self._migrate(raw, persist=False)
+            except Exception as error:
+                logger.warning(f"pig_data.json 备份不可用: {backup_path}: {error}")
+        return None
 
     def _normalize_collection_progress_entry(
         self,
@@ -385,11 +451,11 @@ class PigDataManager:
 
     def get_today_pig(self, user_id: str, date_str: Optional[str] = None) -> Optional[str]:
         """返回今日已抽的 pig_id，未抽返回 None。"""
-        target_date = date_str or datetime.date.today().isoformat()
+        target_date = date_str or rollpig_date_str()
         return self.data["history"].get(target_date, {}).get(user_id)
 
     def get_daily_rolls(self, date_str: Optional[str] = None) -> dict:
-        target_date = date_str or datetime.date.today().isoformat()
+        target_date = date_str or rollpig_date_str()
         return dict(self.data.get("history", {}).get(target_date, {}))
 
     def _record_group_roll(self, date_str: str, group_id: str, user_id: str, pig_id: str):
@@ -404,7 +470,7 @@ class PigDataManager:
     async def set_today_pig(self, user_id: str, pig_id: str, group_id: str = ""):
         """记录今日抽到的 pig_id，并同步将其写入图鉴（永久保留）。"""
         async with self._lock:
-            today = datetime.date.today().isoformat()
+            today = rollpig_date_str()
             if today not in self.data["history"]:
                 self.data["history"][today] = {}
             previous_pig_id = self.data["history"][today].get(user_id)
@@ -422,7 +488,7 @@ class PigDataManager:
         date_str: Optional[str] = None,
         group_id: str = "",
     ) -> DailyRollResult:
-        target_date = date_str or datetime.date.today().isoformat()
+        target_date = date_str or rollpig_date_str()
         async with self._lock:
             history = self.data.setdefault("history", {})
             day_history = history.setdefault(target_date, {})
@@ -461,7 +527,7 @@ class PigDataManager:
         if not group_id:
             return
         async with self._lock:
-            target_date = date_str or datetime.date.today().isoformat()
+            target_date = date_str or rollpig_date_str()
             self._record_group_roll(target_date, group_id, user_id, pig_id)
             await self._atomic_save()
 
@@ -534,7 +600,7 @@ class PigDataManager:
     async def clean_old_history(self, days_to_keep: int = 14):
         """清理超过 days_to_keep 天的历史记录（不影响图鉴数据）。"""
         async with self._lock:
-            today = datetime.date.today()
+            today = rollpig_today()
             history_dates_to_del = [
                 d for d in self.data["history"]
                 if _is_valid_date(d)  # 必须先过滤非法日期键，再做计算（防止 ValueError）
@@ -618,13 +684,13 @@ class PigDataManager:
 
     def check_force_roast_usage(self, user_id: str) -> bool:
         """普通用户后门：每日仅 1 次，返回今日是否仍可用。"""
-        today = datetime.date.today().isoformat()
+        today = rollpig_date_str()
         if "force_usage" not in self.data or not isinstance(self.data["force_usage"], dict):
             self.data["force_usage"] = {}
         return self.data["force_usage"].get(user_id) != today
 
     async def consume_force_roast_usage(self, user_id: str, date_str: Optional[str] = None) -> bool:
-        target_date = date_str or datetime.date.today().isoformat()
+        target_date = date_str or rollpig_date_str()
         async with self._lock:
             usage = self.data.setdefault("force_usage", {})
             if usage.get(user_id) == target_date:
@@ -635,7 +701,7 @@ class PigDataManager:
 
     async def update_force_roast_usage(self, user_id: str):
         async with self._lock:
-            today = datetime.date.today().isoformat()
+            today = rollpig_date_str()
             self.data.setdefault("force_usage", {})[user_id] = today
             await self._atomic_save()
 
@@ -649,7 +715,7 @@ class PigDataManager:
         event_type: "success" / "escape" / "backfire" / "bot_backfire" / "self_roast"
         """
         async with self._lock:
-            today = datetime.date.today().isoformat()
+            today = rollpig_date_str()
             events = self.data.setdefault("daily_events", {})
             day_events = events.setdefault(today, [])
             day_events.append({
@@ -666,7 +732,7 @@ class PigDataManager:
     def get_daily_events(self, date_str: Optional[str] = None, group_id: Optional[str] = None) -> list:
         """获取指定日期（默认今天）的所有烤群友事件。"""
         if not date_str:
-            date_str = datetime.date.today().isoformat()
+            date_str = rollpig_date_str()
         events = self.data.get("daily_events", {}).get(date_str, [])
         if not group_id:
             return events
@@ -675,13 +741,13 @@ class PigDataManager:
     def get_group_rolls(self, group_id: str, date_str: Optional[str] = None) -> dict:
         """获取指定群在某天登记过的今日形态。"""
         if not date_str:
-            date_str = datetime.date.today().isoformat()
+            date_str = rollpig_date_str()
         return self.data.get("group_rolls", {}).get(date_str, {}).get(group_id, {})
 
     def get_active_group_ids(self, date_str: Optional[str] = None) -> set[str]:
         """获取指定日期内有抽猪或烧烤活动的群号集合。"""
         if not date_str:
-            date_str = datetime.date.today().isoformat()
+            date_str = rollpig_date_str()
 
         event_groups = {
             str(e.get("group_id"))
@@ -772,7 +838,7 @@ class PigDataManager:
         """从 history 中统计今日抽猪信息。"""
         from collections import Counter
         if not date_str:
-            date_str = datetime.date.today().isoformat()
+            date_str = rollpig_date_str()
         if group_id:
             today_rolls = self.get_group_rolls(group_id, date_str)
         else:
@@ -797,7 +863,7 @@ class PigDataManager:
 
     def is_protected(self, group_id: str, user_id: str, date_str: Optional[str] = None) -> bool:
         """检查用户在当前群今日是否受保护。"""
-        target_date = date_str or datetime.date.today().isoformat()
+        target_date = date_str or rollpig_date_str()
         protected_map = self.data.get("protected", {}).get(target_date, {})
         if not isinstance(protected_map, dict):
             return False
@@ -812,7 +878,7 @@ class PigDataManager:
         protect_date: Optional[str] = None,
     ):
         """按群设置某日受保护的用户列表。"""
-        target_date = protect_date or (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+        target_date = protect_date or rollpig_date_str(1)
         async with self._lock:
             protected = self.data.setdefault("protected", {})
             day_map = protected.setdefault(target_date, {})
@@ -821,7 +887,7 @@ class PigDataManager:
 
     async def set_protected_users(self, user_ids: list):
         """兼容旧接口：写入 legacy 全局保护名单。"""
-        target_date = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+        target_date = rollpig_date_str(1)
         async with self._lock:
             protected = self.data.setdefault("protected", {})
             day_map = protected.setdefault(target_date, {})
@@ -831,7 +897,7 @@ class PigDataManager:
     async def clean_old_events(self, days_to_keep: int = 7):
         """清理超过 days_to_keep 天的事件记录。"""
         async with self._lock:
-            today = datetime.date.today()
+            today = rollpig_today()
             events = self.data.get("daily_events", {})
             dates_to_del = [
                 d for d in events

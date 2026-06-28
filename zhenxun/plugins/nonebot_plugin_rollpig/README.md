@@ -51,6 +51,8 @@
 
 - manifest 指向一组静态文件：`pig.json`、可选 `pig_rules.json`、以及小猪图片。
 - 同步成功前写入 localstore 缓存目录，完整校验后再替换 active 快照；失败会继续使用旧缓存或内置元数据。
+- 启动同步、定时同步和手动同步共用同一把同步锁；手动同步会等待当前任务，后台同步遇到已有任务时直接跳过。
+- Bot 关闭时会取消并等待后台资源同步任务，避免退出过程中仍在替换缓存目录。
 - `pig.json` 按 ID 合并：远端新增或更新的 ID 覆盖本地旧条目，远端缺失的旧 ID 会保留，避免历史本地账本引用失效。
 - `pig_rules.json` 按规则类型取并集，用于继续识别人类、熟食、吃掉、卖掉等特殊形态。
 - 仓库不再携带小猪图片，生产环境部署后会自动下载到 localstore 的 `resources/active/images/`。
@@ -103,6 +105,18 @@ manifest 示例：
 - `draw_state`：连续重复次数。
 - `daily_events`：烧烤事件，用于日报。
 - `protected`：群维度保护名单。
+
+账册落盘使用临时文件原子替换，并在每次成功写入前保留滚动备份：
+
+- `pig_data.json.bak`：最近一次成功写入前的主文件。
+- `pig_data.json.bak.1` / `pig_data.json.bak.2`：更早的备份。
+- `pig_data.json.broken.<timestamp>.bak`：启动时发现主文件损坏后保留的现场文件。
+
+如果主文件损坏，插件会先尝试从备份恢复；无可用备份时进入写保护模式，避免用空账册覆盖旧数据。此时需要人工修复 `pig_data.json` 或恢复备份后重启。
+
+## PigHub
+
+`随机小猪 / 找猪` 会优先使用 PigHub 新接口 `/api/images?sort=2`，失败时回退旧接口 `/api/all-images`。接口返回的 `data/images` 与 `image_url/thumbnail` 都会归一化，图片 URL 支持完整 URL、`/images/...`、`/data/...` 和裸文件名；外部请求继续使用 `PROXY` 配置。
 
 ## 验证
 
