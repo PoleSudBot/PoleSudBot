@@ -27,7 +27,8 @@
 | --- | --- | --- |
 | `AI_ENABLED` | `False` | 是否启用 AI 烤猪文案 |
 | `LLM_MODEL_NAME` | `None` | 烤猪文案使用的 LLM 模型名 |
-| `ROAST_COOLDOWN_HOURS` | `8.0` | 普通烤群友冷却时间 |
+| `ROAST_COOLDOWN_HOURS` | `8.0` | 普通烤群友每次充能恢复时间 |
+| `ROAST_CHARGE_MAX` | `2` | 普通烤群友最多可储存次数，设为 `1` 可恢复旧版单冷却 |
 | `STORAGE_BACKEND` | `local` | 存储后端，支持 `local` / `cloud` |
 | `CLOUD_API_URL` | `None` | cloud 存储服务地址 |
 | `CLOUD_TOKEN` | `None` | cloud 存储鉴权 token |
@@ -117,6 +118,7 @@ manifest 示例：
 - `collection_progress`：达到当前图鉴数量的时间，用于排行并列排序。
 - `pig_progress`：每只猪的累计抽到次数和首次获得时间。
 - `draw_state`：连续重复次数。
+- `usage`：普通烤群友充能状态，兼容旧版单时间戳冷却记录。
 - `daily_events`：烧烤事件，用于日报。
 - `protected`：群维度保护名单。
 

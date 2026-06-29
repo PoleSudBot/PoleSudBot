@@ -31,6 +31,7 @@ class Config(BaseModel):
     AI_ENABLED: bool = False
     LLM_MODEL_NAME: Optional[str] = None
     ROAST_COOLDOWN_HOURS: float = 8.0
+    ROAST_CHARGE_MAX: int = 2
     STORAGE_BACKEND: str = "local"
     CLOUD_API_URL: Optional[str] = None
     CLOUD_TOKEN: Optional[str] = None
@@ -59,6 +60,7 @@ class Config(BaseModel):
     rollpig_deepseek_base: Optional[str] = None
     rollpig_model: Optional[str] = None
     rollpig_roast_cooldown_hours: Optional[float] = None
+    rollpig_roast_charge_max: Optional[int] = None
     rollpig_storage_backend: Optional[str] = None
     rollpig_cloud_api_url: Optional[str] = None
     rollpig_cloud_token: Optional[str] = None
@@ -129,6 +131,10 @@ def get_llm_model_name() -> Optional[str]:
 
 def get_roast_cooldown_hours() -> float:
     return _get_float("ROAST_COOLDOWN_HOURS", 8.0)
+
+
+def get_roast_charge_max() -> int:
+    return _get_int("ROAST_CHARGE_MAX", 2)
 
 
 def get_storage_backend() -> str:

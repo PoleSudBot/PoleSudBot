@@ -59,6 +59,7 @@ from .runtime import (
     is_group_rollpig_enabled,
     rollpig_date_str,
     rollpig_today,
+    resolve_roast_charge_max,
     resolve_roast_cooldown_seconds,
 )
 from .store import store
@@ -114,7 +115,7 @@ __plugin_meta__ = PluginMetadata(
     明日小猪 - 预测明天的猪猪运势
     昨日小猪 - 查看昨天抽到了什么
     今日烤猪 - 把今天的猪做成美食（人类/熟食形态/吃掉了会拦截）
-    烤群友 - 把群友做成烤猪（目标需已抽猪且非人类/熟食/吃掉了）
+    烤群友 - 把群友做成烤猪（默认最多储存 2 次普通烧烤充能）
     烤群友 + 打点后厨/偷换烤架/贿赂主厨/加急生火(兼容加急生活)
       - 每日一次强制成功（目标仍需已抽猪且非人类/熟食/吃掉了）
     烤群友 + 强行点火 - superuser 专属，无限强制成功
@@ -134,7 +135,7 @@ __plugin_meta__ = PluginMetadata(
     config=Config,
     extra={
         "author": "Felis2026",
-        "version": "0.6.4",
+        "version": "0.6.5",
         "configs": [
             {
                 "module": MODULE_NAME,
@@ -157,8 +158,16 @@ __plugin_meta__ = PluginMetadata(
                 "key": "ROAST_COOLDOWN_HOURS",
                 "value": 8.0,
                 "default_value": 8.0,
-                "help": "普通烤群友冷却时间（小时）",
+                "help": "普通烤群友每次充能恢复时间（小时）",
                 "type": float,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "ROAST_CHARGE_MAX",
+                "value": 2,
+                "default_value": 2,
+                "help": "普通烤群友最多可储存次数；设为 1 可恢复旧版单冷却",
+                "type": int,
             },
             {
                 "module": MODULE_NAME,
@@ -994,7 +1003,7 @@ def format_cooldown_message(remaining_seconds: int) -> str:
     minutes, seconds = divmod(remaining, 60)
     hours, minutes = divmod(minutes, 60)
     time_str = f"{hours}小时{minutes}分" if hours > 0 else f"{minutes}分{seconds}秒"
-    return f"技能冷却中！还需要休息 {time_str} 才能再次烧烤。"
+    return f"烧烤充能恢复中！还需要 {time_str} 恢复 1 次。"
 
 
 # ================================ 群开关守卫 ================================ #
@@ -1802,6 +1811,7 @@ async def _(bot: Bot, event: GroupMessageEvent):
         cooldown_result = await store.consume_roast_cooldown(
             attacker_id,
             cooldown_seconds=resolve_roast_cooldown_seconds(),
+            max_charges=resolve_roast_charge_max(),
         )
         if not cooldown_result.allowed:
             await cmd_roast_member.finish(
@@ -2014,6 +2024,7 @@ async def _(bot: Bot, event: GroupMessageEvent):
     cooldown_result = await store.consume_roast_cooldown(
         attacker_id,
         cooldown_seconds=resolve_roast_cooldown_seconds(),
+        max_charges=resolve_roast_charge_max(),
     )
     if not cooldown_result.allowed:
         await cmd_random_roast.finish(

@@ -11,6 +11,7 @@ from zhenxun.services.group_settings_service import group_settings_service
 from .config import (
     GroupSettings,
     MODULE_NAME,
+    get_roast_charge_max,
     get_roast_cooldown_hours,
 )
 
@@ -61,6 +62,22 @@ def resolve_roast_cooldown_seconds() -> int:
         hours = 8.0
 
     return max(1, int(hours * 3600))
+
+
+def resolve_roast_charge_max() -> int:
+    """解析普通烤群友充能上限，限制最大值以避免群内刷屏。"""
+    raw_max = get_roast_charge_max()
+    try:
+        max_charges = int(raw_max)
+    except (TypeError, ValueError):
+        logger.warning(f"ROAST_CHARGE_MAX 配置非法: {raw_max}，已回退到 2")
+        max_charges = 2
+
+    if max_charges <= 0:
+        logger.warning(f"ROAST_CHARGE_MAX 必须 > 0，当前值: {max_charges}，已回退到 2")
+        max_charges = 2
+
+    return max(1, min(6, max_charges))
 
 
 def set_group_enable_checker(checker: Optional[Callable[[str], bool]]) -> None:

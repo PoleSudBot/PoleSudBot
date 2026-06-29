@@ -214,6 +214,7 @@ class CloudStore(RollpigStore):
         user_id: str,
         now_ts: Optional[float] = None,
         cooldown_seconds: Optional[int] = None,
+        max_charges: Optional[int] = None,
     ) -> CooldownConsumeResult:
         payload = await self._request(
             "POST",
@@ -222,11 +223,15 @@ class CloudStore(RollpigStore):
                 "user_id": user_id,
                 "now_ts": now_ts,
                 "cooldown_seconds": cooldown_seconds,
+                "max_charges": max_charges,
             },
         )
         return CooldownConsumeResult(
             allowed=bool(payload.get("allowed")),
             remaining_seconds=int(payload.get("remaining_seconds", 0)),
+            charges_left=int(payload.get("charges_left", 0)),
+            max_charges=int(payload.get("max_charges", max_charges or 1)),
+            next_recover_seconds=int(payload.get("next_recover_seconds", 0)),
         )
 
     async def consume_force_usage(self, user_id: str, date_str: Optional[str] = None) -> bool:

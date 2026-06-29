@@ -61,6 +61,7 @@ class RollpigStore(ABC):
         user_id: str,
         now_ts: Optional[float] = None,
         cooldown_seconds: Optional[int] = None,
+        max_charges: Optional[int] = None,
     ) -> CooldownConsumeResult:
         raise NotImplementedError
 

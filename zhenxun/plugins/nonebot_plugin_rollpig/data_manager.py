@@ -1,9 +1,9 @@
-import json
 import asyncio
 import datetime
-import time
+import json
 import math
 import shutil
+import time
 from pathlib import Path
 from typing import List, Optional
 
@@ -11,10 +11,98 @@ from nonebot.log import logger
 import nonebot_plugin_localstore as store
 
 from .runtime import rollpig_date_str, rollpig_today, resolve_roast_cooldown_seconds
-from .store.models import CatalogSnapshot, DailyRollResult, DrawState, PigProgress
+from .store.models import (
+    CatalogSnapshot,
+    CooldownConsumeResult,
+    DailyRollResult,
+    DrawState,
+    PigProgress,
+)
 
 ROAST_COOLDOWN_SECONDS = resolve_roast_cooldown_seconds()
 DATA_BACKUP_COUNT = 2
+DEFAULT_ROAST_CHARGE_MAX = 2
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    """把账册中的历史数值安全转成 float，坏字段按默认值参与后续归一化。"""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_charge_settings(
+    cooldown_seconds: Optional[int],
+    max_charges: Optional[int],
+) -> tuple[int, int]:
+    """统一本地账册的恢复间隔和上限边界，避免坏配置写入 usage 状态。"""
+    try:
+        cooldown = int(cooldown_seconds or ROAST_COOLDOWN_SECONDS)
+    except (TypeError, ValueError):
+        cooldown = ROAST_COOLDOWN_SECONDS
+    try:
+        charge_max = int(max_charges or DEFAULT_ROAST_CHARGE_MAX)
+    except (TypeError, ValueError):
+        charge_max = DEFAULT_ROAST_CHARGE_MAX
+    return max(1, cooldown), max(1, min(6, charge_max))
+
+
+def _legacy_roast_state(
+    last_use: float,
+    now: float,
+    cooldown: int,
+    max_charges: int,
+) -> tuple[int, float]:
+    """把旧单时间戳宽松迁移为充能桶：最近一次使用后视为还剩 1 格。"""
+    cooldown = max(1, int(cooldown))
+    max_charges = max(1, min(6, int(max_charges)))
+    if last_use <= 0:
+        return max_charges, now
+    elapsed = max(0.0, now - last_use)
+    if max_charges <= 1:
+        charges = 1 if elapsed >= cooldown else 0
+        updated_ts = now if charges >= 1 else last_use
+        return charges, float(updated_ts)
+    recovered = int(elapsed // cooldown)
+    charges = min(max_charges, 1 + recovered)
+    updated_ts = now if charges >= max_charges else last_use + recovered * cooldown
+    return int(charges), float(updated_ts)
+
+
+def _recover_roast_charges(
+    charges: int,
+    updated_ts: float,
+    now: float,
+    cooldown: int,
+    max_charges: int,
+) -> tuple[int, float]:
+    """按 token bucket 恢复普通烤群友次数；满格后把恢复锚点归到当前时间。"""
+    charges = max(0, min(max_charges, int(charges)))
+    updated_ts = float(updated_ts or now)
+    if charges >= max_charges:
+        return max_charges, now
+    elapsed = max(0.0, now - updated_ts)
+    recovered = int(elapsed // cooldown)
+    if recovered <= 0:
+        return charges, updated_ts
+    charges = min(max_charges, charges + recovered)
+    updated_ts = now if charges >= max_charges else updated_ts + recovered * cooldown
+    return int(charges), float(updated_ts)
+
+
+def _next_charge_seconds(
+    charges: int,
+    updated_ts: float,
+    now: float,
+    cooldown: int,
+    max_charges: int,
+) -> int:
+    """计算下一格恢复倒计时；只在未满格状态下对用户展示。"""
+    if charges >= max_charges:
+        return 0
+    elapsed = max(0.0, now - float(updated_ts or now))
+    return max(1, int(cooldown - (elapsed % cooldown)))
 
 # ================= 数据管理 =================
 
@@ -36,7 +124,8 @@ class PigDataManager:
                          ← 记录每只猪累计抽到次数，用于 EX 等级
     - draw_state : {user_id: {"duplicate_streak": int}}
                          ← 记录连续重复次数，用于新猪候选权重
-    - usage      : {user_id: timestamp}        ← 烤群友普通模式 CD 时间戳
+    - usage      : {user_id: {last_roast_ts, roast_charges, roast_charge_updated_ts}}
+                         ← 普通烤群友充能桶，兼容旧版 timestamp
     - force_usage: {user_id: "YYYY-MM-DD"}    ← 后门口令每日计数
     - daily_events: {date: [event, ...]}      ← 群内烧烤事件（用于日报）
 
@@ -679,25 +768,48 @@ class PigDataManager:
 
     def check_roast_usage(self, user_id: str) -> tuple[bool, str]:
         """
-        检查普通烤群友 CD 是否已过。
+        Deprecated: 仅保留给旧调用兜底；新流程必须使用 consume_roast_usage()。
+        检查与扣减分离会重新引入 TOCTOU 竞态，因此不要在新代码中调用本函数。
         返回: (是否可用, 若不可用时的提示信息)
         """
-        # 兼容旧版数据结构
-        if "usage" not in self.data or not isinstance(self.data["usage"], dict):
-            self.data["usage"] = {}
-        if self.data["usage"] and isinstance(list(self.data["usage"].values())[0], dict):
-            self.data["usage"] = {}
+        usage = self.data.setdefault("usage", {})
+        raw_state = usage.get(user_id, 0)
+        now = float(time.time())
+        cooldown, max_charges = _normalize_charge_settings(
+            ROAST_COOLDOWN_SECONDS,
+            DEFAULT_ROAST_CHARGE_MAX,
+        )
 
-        last_use = self.data["usage"].get(user_id, 0)
-        now = time.time()
-        cooldown = ROAST_COOLDOWN_SECONDS
+        if isinstance(raw_state, dict):
+            charges = _safe_int(raw_state.get("roast_charges"), 0)
+            updated_ts = _safe_float(raw_state.get("roast_charge_updated_ts"), now)
+        else:
+            charges, updated_ts = _legacy_roast_state(
+                _safe_float(raw_state),
+                now,
+                cooldown,
+                max_charges,
+            )
 
-        if now - last_use < cooldown:
-            remaining = int(cooldown - (now - last_use))
+        charges, updated_ts = _recover_roast_charges(
+            charges,
+            updated_ts,
+            now,
+            cooldown,
+            max_charges,
+        )
+        if charges <= 0:
+            remaining = _next_charge_seconds(
+                charges,
+                updated_ts,
+                now,
+                cooldown,
+                max_charges,
+            )
             m, s = divmod(remaining, 60)
             h, m = divmod(m, 60)
             time_str = f"{h}小时{m}分" if h > 0 else f"{m}分{s}秒"
-            return False, f"技能冷却中！还需要休息 {time_str} 才能再次烧烤。"
+            return False, f"烧烤充能恢复中！还需要 {time_str} 恢复 1 次。"
 
         return True, ""
 
@@ -706,32 +818,95 @@ class PigDataManager:
         user_id: str,
         now_ts: Optional[float] = None,
         cooldown_seconds: Optional[int] = None,
-    ) -> tuple[bool, int]:
+        max_charges: Optional[int] = None,
+    ) -> CooldownConsumeResult:
         now = float(now_ts or time.time())
-        cooldown = cooldown_seconds or ROAST_COOLDOWN_SECONDS
+        cooldown, charge_max = _normalize_charge_settings(cooldown_seconds, max_charges)
         async with self._lock:
             usage = self.data.setdefault("usage", {})
-            if usage and isinstance(list(usage.values())[0], dict):
-                self.data["usage"] = {}
-                usage = self.data["usage"]
+            raw_state = usage.get(user_id, 0)
+            if isinstance(raw_state, dict):
+                charges = _safe_int(raw_state.get("roast_charges"), 0)
+                updated_ts = _safe_float(raw_state.get("roast_charge_updated_ts"), now)
+            else:
+                charges, updated_ts = _legacy_roast_state(
+                    _safe_float(raw_state),
+                    now,
+                    cooldown,
+                    charge_max,
+                )
 
-            last_use = float(usage.get(user_id, 0) or 0)
-            remaining = max(0, int(cooldown - (now - last_use)))
-            if remaining > 0:
-                return False, remaining
+            charges, updated_ts = _recover_roast_charges(
+                charges,
+                updated_ts,
+                now,
+                cooldown,
+                charge_max,
+            )
+            if charges <= 0:
+                remaining = _next_charge_seconds(
+                    charges,
+                    updated_ts,
+                    now,
+                    cooldown,
+                    charge_max,
+                )
+                usage[user_id] = {
+                    "last_roast_ts": (
+                        _safe_float(raw_state)
+                        if not isinstance(raw_state, dict)
+                        else raw_state.get("last_roast_ts")
+                    ),
+                    "roast_charges": charges,
+                    "roast_charge_updated_ts": updated_ts,
+                }
+                await self._atomic_save()
+                return CooldownConsumeResult(
+                    allowed=False,
+                    remaining_seconds=remaining,
+                    charges_left=0,
+                    max_charges=charge_max,
+                    next_recover_seconds=remaining,
+                )
 
-            usage[user_id] = now
+            was_full = charges >= charge_max
+            charges -= 1
+            if was_full:
+                updated_ts = now
+            usage[user_id] = {
+                "last_roast_ts": now,
+                "roast_charges": charges,
+                "roast_charge_updated_ts": updated_ts,
+            }
             await self._atomic_save()
-            return True, 0
+            return CooldownConsumeResult(
+                allowed=True,
+                remaining_seconds=0,
+                charges_left=charges,
+                max_charges=charge_max,
+                next_recover_seconds=_next_charge_seconds(
+                    charges,
+                    updated_ts,
+                    now,
+                    cooldown,
+                    charge_max,
+                ),
+            )
 
     async def update_roast_usage(self, user_id: str):
-        """记录本次使用时间戳。"""
+        """
+        Deprecated: 仅保留给旧调用兜底。
+
+        新流程必须使用 consume_roast_usage() 原子扣减，避免重新引入检查/扣减竞态。
+        """
         async with self._lock:
             usage = self.data.setdefault("usage", {})
-            # 兼容旧版嵌套 dict 格式
-            if usage and isinstance(list(usage.values())[0], dict):
-                self.data["usage"] = {}
-            self.data["usage"][user_id] = time.time()
+            now = time.time()
+            usage[user_id] = {
+                "last_roast_ts": now,
+                "roast_charges": max(0, DEFAULT_ROAST_CHARGE_MAX - 1),
+                "roast_charge_updated_ts": now,
+            }
             await self._atomic_save()
 
     # ---- 烤群友 后门口令 每日计数 ----

@@ -1,3 +1,4 @@
+import ast
 import asyncio
 import base64
 import hashlib
@@ -227,6 +228,22 @@ class FakeDailyRollResult:
         yield self.created
 
 
+class FakeCooldownConsumeResult:
+    def __init__(
+        self,
+        allowed: bool,
+        remaining_seconds: int = 0,
+        charges_left: int = 0,
+        max_charges: int = 1,
+        next_recover_seconds: int = 0,
+    ):
+        self.allowed = allowed
+        self.remaining_seconds = remaining_seconds
+        self.charges_left = charges_left
+        self.max_charges = max_charges
+        self.next_recover_seconds = next_recover_seconds
+
+
 class FakeCatalogSnapshot:
     def __init__(
         self,
@@ -305,6 +322,7 @@ def load_rollpig_data_manager_module(
     fake_store_package.__path__ = []
     fake_store_models = types.ModuleType(f"{package_name}.store.models")
     fake_store_models.DailyRollResult = FakeDailyRollResult
+    fake_store_models.CooldownConsumeResult = FakeCooldownConsumeResult
     fake_store_models.DrawState = FakeDrawState
     fake_store_models.PigProgress = FakePigProgress
     fake_store_models.CatalogSnapshot = FakeCatalogSnapshot
@@ -467,6 +485,7 @@ def load_rollpig_runtime_module(monkeypatch: pytest.MonkeyPatch):
     fake_config.GroupSettings = type("GroupSettings", (), {})
     fake_config.MODULE_NAME = "nonebot_plugin_rollpig"
     fake_config.get_roast_cooldown_hours = lambda: 8.0
+    fake_config.get_roast_charge_max = lambda: 2
 
     for name, module in {
         "nonebot.log": fake_nonebot_log,
@@ -687,6 +706,7 @@ def load_rollpig_plugin_module(
     )
     fake_runtime.rollpig_today = lambda: __import__("datetime").date(2026, 4, 22)
     fake_runtime.resolve_roast_cooldown_seconds = lambda: 8 * 60 * 60
+    fake_runtime.resolve_roast_charge_max = lambda: 2
 
     fake_store_module = types.ModuleType(f"{package_name}.store")
     fake_store_module.__path__ = []
@@ -697,6 +717,7 @@ def load_rollpig_plugin_module(
 
     fake_store_models = types.ModuleType(f"{package_name}.store.models")
     fake_store_models.DailyRollResult = FakeDailyRollResult
+    fake_store_models.CooldownConsumeResult = FakeCooldownConsumeResult
     fake_store_models.DrawState = FakeDrawState
     fake_store_models.PigProgress = FakePigProgress
     fake_store_models.CatalogSnapshot = FakeCatalogSnapshot
@@ -1020,6 +1041,176 @@ async def test_pig_data_save_rotates_backups(monkeypatch, tmp_path):
     assert data_file.with_name("pig_data.json.bak").read_text("utf-8") == original
     saved = json.loads(data_file.read_text("utf-8"))
     assert saved["history"]["2026-04-22"]["10001"] == "pig"
+
+
+@pytest.mark.asyncio
+async def test_roast_charge_allows_two_uses_then_blocks(monkeypatch, tmp_path):
+    module, data_file = load_rollpig_data_manager_module(
+        monkeypatch,
+        tmp_path,
+        seed_data={
+            "history": {},
+            "group_rolls": {},
+            "collection": {},
+            "collection_progress": {},
+            "pig_progress": {},
+            "draw_state": {},
+            "usage": {},
+            "force_usage": {},
+            "daily_events": {},
+            "protected": {},
+        },
+    )
+    manager = module.PigDataManager()
+
+    first = await manager.consume_roast_usage(
+        "10001",
+        now_ts=1000.0,
+        cooldown_seconds=100,
+        max_charges=2,
+    )
+    second = await manager.consume_roast_usage(
+        "10001",
+        now_ts=1001.0,
+        cooldown_seconds=100,
+        max_charges=2,
+    )
+    third = await manager.consume_roast_usage(
+        "10001",
+        now_ts=1001.0,
+        cooldown_seconds=100,
+        max_charges=2,
+    )
+
+    assert first.allowed is True
+    assert first.charges_left == 1
+    assert first.next_recover_seconds == 100
+    assert second.allowed is True
+    assert second.charges_left == 0
+    assert second.next_recover_seconds == 99
+    assert third.allowed is False
+    assert third.remaining_seconds == 99
+    assert third.max_charges == 2
+    saved = json.loads(data_file.read_text("utf-8"))
+    assert saved["usage"]["10001"]["roast_charges"] == 0
+
+
+@pytest.mark.asyncio
+async def test_roast_charge_max_one_keeps_legacy_single_cooldown(monkeypatch, tmp_path):
+    module, _data_file = load_rollpig_data_manager_module(
+        monkeypatch,
+        tmp_path,
+        seed_data={
+            "history": {},
+            "group_rolls": {},
+            "collection": {},
+            "collection_progress": {},
+            "pig_progress": {},
+            "draw_state": {},
+            "usage": {"10001": 1000.0},
+            "force_usage": {},
+            "daily_events": {},
+            "protected": {},
+        },
+    )
+    manager = module.PigDataManager()
+
+    blocked = await manager.consume_roast_usage(
+        "10001",
+        now_ts=1001.0,
+        cooldown_seconds=100,
+        max_charges=1,
+    )
+    allowed = await manager.consume_roast_usage(
+        "10001",
+        now_ts=1101.0,
+        cooldown_seconds=100,
+        max_charges=1,
+    )
+
+    assert blocked.allowed is False
+    assert blocked.remaining_seconds == 99
+    assert blocked.max_charges == 1
+    assert allowed.allowed is True
+    assert allowed.charges_left == 0
+
+
+@pytest.mark.asyncio
+async def test_roast_charge_migrates_legacy_timestamp_generously(monkeypatch, tmp_path):
+    module, data_file = load_rollpig_data_manager_module(
+        monkeypatch,
+        tmp_path,
+        seed_data={
+            "history": {},
+            "group_rolls": {},
+            "collection": {},
+            "collection_progress": {},
+            "pig_progress": {},
+            "draw_state": {},
+            "usage": {"10001": 1000.0},
+            "force_usage": {},
+            "daily_events": {},
+            "protected": {},
+        },
+    )
+    manager = module.PigDataManager()
+
+    result = await manager.consume_roast_usage(
+        "10001",
+        now_ts=1001.0,
+        cooldown_seconds=100,
+        max_charges=2,
+    )
+
+    assert result.allowed is True
+    assert result.charges_left == 0
+    saved_state = json.loads(data_file.read_text("utf-8"))["usage"]["10001"]
+    assert saved_state["last_roast_ts"] == 1001.0
+    assert saved_state["roast_charges"] == 0
+    assert saved_state["roast_charge_updated_ts"] == 1000.0
+
+
+@pytest.mark.asyncio
+async def test_roast_charge_clamps_malformed_state(monkeypatch, tmp_path):
+    module, data_file = load_rollpig_data_manager_module(
+        monkeypatch,
+        tmp_path,
+        seed_data={
+            "history": {},
+            "group_rolls": {},
+            "collection": {},
+            "collection_progress": {},
+            "pig_progress": {},
+            "draw_state": {},
+            "usage": {
+                "10001": {
+                    "last_roast_ts": "bad",
+                    "roast_charges": 99,
+                    "roast_charge_updated_ts": "bad",
+                }
+            },
+            "force_usage": {},
+            "daily_events": {},
+            "protected": {},
+        },
+    )
+    manager = module.PigDataManager()
+
+    result = await manager.consume_roast_usage(
+        "10001",
+        now_ts=2000.0,
+        cooldown_seconds=100,
+        max_charges=2,
+    )
+
+    assert result.allowed is True
+    assert result.charges_left == 1
+    saved_state = json.loads(data_file.read_text("utf-8"))["usage"]["10001"]
+    assert saved_state == {
+        "last_roast_ts": 2000.0,
+        "roast_charges": 1,
+        "roast_charge_updated_ts": 2000.0,
+    }
 
 
 def test_sort_prefers_earlier_reached_at_for_same_count():
@@ -1397,6 +1588,86 @@ def test_catalog_config_invalid_values_fall_back_to_safe_defaults(monkeypatch):
     assert clamped_module.get_catalog_cache_seconds() == 0
     assert clamped_module.get_catalog_render_timeout() == 1.0
     assert clamped_module.get_html_render_concurrency() == 6
+
+
+def test_roast_charge_config_defaults_and_runtime_clamps(monkeypatch):
+    config_module = load_rollpig_config_module(monkeypatch, {})
+    runtime_module = load_rollpig_runtime_module(monkeypatch)
+
+    assert config_module.get_roast_charge_max() == 2
+    assert runtime_module.resolve_roast_charge_max() == 2
+
+    monkeypatch.setattr(runtime_module, "get_roast_charge_max", lambda: "bad")
+    assert runtime_module.resolve_roast_charge_max() == 2
+
+    monkeypatch.setattr(runtime_module, "get_roast_charge_max", lambda: 0)
+    assert runtime_module.resolve_roast_charge_max() == 2
+
+    monkeypatch.setattr(runtime_module, "get_roast_charge_max", lambda: 99)
+    assert runtime_module.resolve_roast_charge_max() == 6
+
+
+def test_roast_cooldown_message_uses_charge_copy(monkeypatch):
+    module = load_rollpig_plugin_module(
+        monkeypatch,
+        fake_store=object(),
+        fake_data_manager=object(),
+        group_members=[],
+    )
+
+    assert (
+        module.format_cooldown_message(3661)
+        == "烧烤充能恢复中！还需要 1小时1分 恢复 1 次。"
+    )
+
+
+def test_roast_commands_pass_charge_max_to_cooldown():
+    tree = ast.parse(ROLLPIG_PLUGIN_INIT_PATH.read_text("utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "consume_roast_cooldown"
+    ]
+
+    assert len(calls) == 2
+    for call in calls:
+        keyword_names = {keyword.arg for keyword in call.keywords}
+        assert "cooldown_seconds" in keyword_names
+        assert "max_charges" in keyword_names
+
+
+def test_cloud_store_sends_charge_max_payload():
+    cloud_path = ROLLPIG_PLUGIN_DIR / "store" / "cloud.py"
+    tree = ast.parse(cloud_path.read_text("utf-8"))
+    consume_func = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "consume_roast_cooldown"
+    )
+    request_call = next(
+        node
+        for node in ast.walk(consume_func)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_request"
+    )
+    json_body = next(
+        keyword.value
+        for keyword in request_call.keywords
+        if keyword.arg == "json_body"
+    )
+    body_keys = {
+        key.value
+        for key in json_body.keys
+        if isinstance(key, ast.Constant)
+    }
+
+    assert "max_charges" in body_keys
+    assert "charges_left" in ast.unparse(consume_func)
+    assert "next_recover_seconds" in ast.unparse(consume_func)
 
 
 @pytest.mark.asyncio
