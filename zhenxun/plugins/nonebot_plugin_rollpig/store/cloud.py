@@ -15,6 +15,7 @@ from ..config import (
 from ..runtime import rollpig_date_str
 from .base import RollpigStore
 from .models import (
+    CatalogSnapshot,
     CooldownConsumeResult,
     DailyRollResult,
     DrawState,
@@ -153,6 +154,10 @@ class CloudStore(RollpigStore):
                 int(payload.get("duplicate_streak") or 0) if payload else 0
             ),
         )
+
+    async def get_catalog_snapshot(self, user_id: str, days: int = 14) -> CatalogSnapshot:
+        """云中心不扩展新接口；图片版图鉴命令会在入口处限制为 local。"""
+        raise CloudStoreError("图片版小猪图鉴仅支持 local 存储")
 
     async def mark_group_roll_seen(
         self,

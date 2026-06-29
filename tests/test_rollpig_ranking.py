@@ -23,6 +23,7 @@ ROLLPIG_RANKING_PATH = ROLLPIG_PLUGIN_DIR / "ranking.py"
 ROLLPIG_RESOURCE_MANAGER_PATH = ROLLPIG_PLUGIN_DIR / "resource_manager.py"
 ROLLPIG_ROAST_MANAGER_PATH = ROLLPIG_PLUGIN_DIR / "roast_manager.py"
 ROLLPIG_RUNTIME_PATH = ROLLPIG_PLUGIN_DIR / "runtime.py"
+ROLLPIG_CATALOG_RENDERER_PATH = ROLLPIG_PLUGIN_DIR / "catalog_renderer.py"
 VALID_PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/"
     "iZk9HQAAAABJRU5ErkJggg=="
@@ -136,6 +137,8 @@ class FakeResourceManager:
             {"id": "guest-human", "name": "客人人类"},
             {"id": "auctioned-pig", "name": "拍卖猪"},
         ]
+        self.pig_map = {str(item["id"]): item for item in self.pig_list}
+        self.resource_version = "test"
         self.rules = {
             "food_pigs": ["cake-pig"],
             "human_pigs": ["guest-human"],
@@ -224,6 +227,26 @@ class FakeDailyRollResult:
         yield self.created
 
 
+class FakeCatalogSnapshot:
+    def __init__(
+        self,
+        draw_state: FakeDrawState,
+        recent_rolls: dict[str, str],
+        roasted_7d: int = 0,
+    ):
+        self.draw_state = draw_state
+        self.recent_rolls = recent_rolls
+        self.roasted_7d = roasted_7d
+
+
+class FakeAsyncContext:
+    async def __aenter__(self):
+        return None
+
+    async def __aexit__(self, *_args):
+        return None
+
+
 def load_module_from_path(module_name: str, module_path: Path):
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     assert spec is not None
@@ -284,6 +307,7 @@ def load_rollpig_data_manager_module(
     fake_store_models.DailyRollResult = FakeDailyRollResult
     fake_store_models.DrawState = FakeDrawState
     fake_store_models.PigProgress = FakePigProgress
+    fake_store_models.CatalogSnapshot = FakeCatalogSnapshot
 
     monkeypatch.setitem(sys.modules, package_name, fake_package)
     monkeypatch.setitem(sys.modules, f"{package_name}.runtime", fake_runtime)
@@ -357,6 +381,70 @@ def load_rollpig_config_module(
         f"rollpig_config_test_{uuid.uuid4().hex}",
         ROLLPIG_CONFIG_PATH,
     )
+
+
+def load_rollpig_catalog_renderer_module(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    fake_nonebot_log = types.ModuleType("nonebot.log")
+    fake_nonebot_log.logger = FakeLogger()
+
+    async def fake_template_to_pic(*_args, **_kwargs):
+        return b"catalog"
+
+    fake_htmlrender = types.ModuleType("nonebot_plugin_htmlrender")
+    fake_htmlrender.template_to_pic = fake_template_to_pic
+
+    fake_localstore = types.ModuleType("nonebot_plugin_localstore")
+    fake_localstore.get_plugin_cache_dir = lambda: tmp_path / "cache"
+
+    package_name = f"rollpig_catalog_testpkg_{uuid.uuid4().hex}"
+    fake_package = types.ModuleType(package_name)
+    fake_package.__path__ = [str(ROLLPIG_PLUGIN_DIR)]
+
+    fake_config = types.ModuleType(f"{package_name}.config")
+    fake_config.get_catalog_cache_seconds = lambda: 300
+    fake_config.get_catalog_render_timeout = lambda: 8.0
+    fake_config.get_growth_max_expert_level = lambda: 5
+
+    fake_render_budget = types.ModuleType(f"{package_name}.render_budget")
+    fake_render_budget.html_render_budget = lambda _label: FakeAsyncContext()
+
+    fake_resource_manager = types.ModuleType(f"{package_name}.resource_manager")
+    fake_resource_manager.pig_resource_manager = FakeResourceManager()
+
+    fake_runtime = types.ModuleType(f"{package_name}.runtime")
+    fake_runtime.ROLLPIG_TIMEZONE = __import__("datetime").timezone.utc
+    fake_runtime.rollpig_today = lambda: __import__("datetime").date(2026, 4, 22)
+
+    fake_store_package = types.ModuleType(f"{package_name}.store")
+    fake_store_package.__path__ = []
+    fake_store_models = types.ModuleType(f"{package_name}.store.models")
+    fake_store_models.CatalogSnapshot = FakeCatalogSnapshot
+    fake_store_models.DrawState = FakeDrawState
+    fake_store_models.PigProgress = FakePigProgress
+
+    for name, module in {
+        "nonebot.log": fake_nonebot_log,
+        "nonebot_plugin_htmlrender": fake_htmlrender,
+        "nonebot_plugin_localstore": fake_localstore,
+        package_name: fake_package,
+        f"{package_name}.config": fake_config,
+        f"{package_name}.render_budget": fake_render_budget,
+        f"{package_name}.resource_manager": fake_resource_manager,
+        f"{package_name}.runtime": fake_runtime,
+        f"{package_name}.store": fake_store_package,
+        f"{package_name}.store.models": fake_store_models,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    module = load_module_from_path(
+        f"{package_name}.catalog_renderer",
+        ROLLPIG_CATALOG_RENDERER_PATH,
+    )
+    module.clear_catalog_runtime_cache()
+    return module
 
 
 def load_rollpig_runtime_module(monkeypatch: pytest.MonkeyPatch):
@@ -564,6 +652,7 @@ def load_rollpig_plugin_module(
     fake_config.GroupSettings = type("GroupSettings", (), {})
     fake_config.MODULE_NAME = "nonebot_plugin_rollpig"
     fake_config.get_proxy = lambda: None
+    fake_config.get_catalog_enabled = lambda: True
     fake_config.get_storage_backend = lambda: "local"
     fake_config.get_growth_max_expert_level = lambda: 5
     fake_config.get_growth_pity_weight_cap = lambda: 4.0
@@ -573,6 +662,16 @@ def load_rollpig_plugin_module(
     fake_config.get_resource_sync_on_startup = lambda: True
     fake_config.get_private_resource_manifest_url = lambda: None
     fake_config.get_private_resource_token = lambda: None
+    fake_config.get_html_render_concurrency = lambda: 2
+
+    async def fake_render_catalog_image(*_args, **_kwargs):
+        return b"catalog"
+
+    fake_catalog_renderer = types.ModuleType(f"{package_name}.catalog_renderer")
+    fake_catalog_renderer.render_catalog_image = fake_render_catalog_image
+
+    fake_render_budget = types.ModuleType(f"{package_name}.render_budget")
+    fake_render_budget.html_render_budget = lambda _label: FakeAsyncContext()
 
     fake_resource_manager = types.ModuleType(f"{package_name}.resource_manager")
     fake_resource_manager.pig_resource_manager = FakeResourceManager()
@@ -600,6 +699,7 @@ def load_rollpig_plugin_module(
     fake_store_models.DailyRollResult = FakeDailyRollResult
     fake_store_models.DrawState = FakeDrawState
     fake_store_models.PigProgress = FakePigProgress
+    fake_store_models.CatalogSnapshot = FakeCatalogSnapshot
     fake_store_models.RoastEvent = type("RoastEvent", (), {})
 
     fake_summary = types.ModuleType(f"{package_name}.summary_service")
@@ -648,6 +748,16 @@ def load_rollpig_plugin_module(
     fake_data_manager_module.get_data_manager = lambda: fake_data_manager
 
     monkeypatch.setitem(sys.modules, f"{package_name}.config", fake_config)
+    monkeypatch.setitem(
+        sys.modules,
+        f"{package_name}.catalog_renderer",
+        fake_catalog_renderer,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        f"{package_name}.render_budget",
+        fake_render_budget,
+    )
     monkeypatch.setitem(sys.modules, f"{package_name}.ranking", _ranking_module)
     monkeypatch.setitem(
         sys.modules,
@@ -878,7 +988,10 @@ def test_broken_pig_data_recovers_from_backup(monkeypatch, tmp_path):
     assert manager.get_today_pig("10001", "2026-04-22") == "pig"
     saved = json.loads(data_file.read_text("utf-8"))
     assert saved["history"]["2026-04-22"]["10001"] == "pig"
-    assert json.loads(data_file.with_name("pig_data.json.bak").read_text("utf-8")) == backup_data
+    assert (
+        json.loads(data_file.with_name("pig_data.json.bak").read_text("utf-8"))
+        == backup_data
+    )
 
 
 @pytest.mark.asyncio
@@ -1035,8 +1148,255 @@ def test_pigsty_footer_matches_upstream_summary_copy(monkeypatch):
     assert module.build_my_pigsty_footer(0) == "发送「今日小猪」开始收集。"
     assert (
         module.build_my_pigsty_footer(1)
-        == "完整图鉴图还在施工，先把成长进度记牢。"
+        == "发送「小猪图鉴」查看图片版完整图鉴。"
     )
+
+
+def test_catalog_page_parser_rejects_invalid_input(monkeypatch):
+    module = load_rollpig_plugin_module(
+        monkeypatch,
+        fake_store=object(),
+        fake_data_manager=object(),
+        group_members=[],
+    )
+
+    assert module.parse_catalog_page("") == 1
+    assert module.parse_catalog_page("2") == 2
+    assert module.parse_catalog_page("2 extra") == 2
+    assert module.parse_catalog_page("0") is None
+    assert module.parse_catalog_page("abc") is None
+
+
+def test_catalog_snapshot_reads_recent_rolls_and_roasted_count(monkeypatch, tmp_path):
+    module, data_file = load_rollpig_data_manager_module(
+        monkeypatch,
+        tmp_path,
+        seed_data={
+            "history": {
+                "2026-04-22": {"10001": "pig"},
+                "2026-04-21": {"10001": "black-pig"},
+                "2026-04-08": {"10001": "old-pig"},
+                "bad-date": {"10001": "broken"},
+            },
+            "group_rolls": {},
+            "collection": {"10001": ["pig", "black-pig"]},
+            "collection_progress": {},
+            "pig_progress": {
+                "10001": {
+                    "pig": {"copies": 2, "first_obtained_at": "2026-04-21T00:00:00Z"},
+                    "black-pig": {"copies": 1, "first_obtained_at": None},
+                }
+            },
+            "draw_state": {"10001": {"duplicate_streak": 1}},
+            "usage": {},
+            "force_usage": {},
+            "daily_events": {
+                "2026-04-22": [
+                    {"type": "success", "target": "10001"},
+                    {"type": "escape", "target": "10001"},
+                    {"type": "success", "target": "20002"},
+                ],
+                "2026-04-16": [{"type": "success", "target": "10001"}],
+                "2026-04-08": [{"type": "success", "target": "10001"}],
+            },
+            "protected": {},
+        },
+    )
+    manager = module.PigDataManager()
+    saved_before = data_file.read_text("utf-8")
+
+    snapshot = manager.get_catalog_snapshot("10001", days=14)
+
+    assert snapshot.draw_state.pig_ids == ["black-pig", "pig"]
+    assert snapshot.recent_rolls == {
+        "2026-04-22": "pig",
+        "2026-04-21": "black-pig",
+    }
+    assert snapshot.roasted_7d == 2
+    assert data_file.read_text("utf-8") == saved_before
+
+
+def test_catalog_payload_sorts_marks_badges_and_uses_missing_placeholder(
+    monkeypatch,
+    tmp_path,
+):
+    module = load_rollpig_catalog_renderer_module(monkeypatch, tmp_path)
+    module.pig_resource_manager.pig_list = [
+        {"id": "new-pig", "name": "新猪"},
+        {"id": "old-pig", "name": "老猪"},
+        {"id": "repeat-pig", "name": "复读猪"},
+        {"id": "max-pig", "name": "满级猪"},
+    ]
+    module.pig_resource_manager.pig_map = {
+        str(item["id"]): item for item in module.pig_resource_manager.pig_list
+    }
+    draw_state = FakeDrawState(
+        pig_ids=["new-pig", "old-pig", "repeat-pig", "max-pig"],
+        progress={
+            "new-pig": FakePigProgress(
+                copies=1,
+                first_obtained_at="2026-04-20T00:00:00Z",
+            ),
+            "old-pig": FakePigProgress(
+                copies=1,
+                first_obtained_at="2026-04-10T00:00:00Z",
+            ),
+            "repeat-pig": FakePigProgress(
+                copies=3,
+                first_obtained_at="2026-04-18T00:00:00Z",
+            ),
+            "max-pig": FakePigProgress(
+                copies=6,
+                first_obtained_at="2026-04-22T00:00:00Z",
+            ),
+        },
+    )
+
+    payload = module._build_template_payload(
+        user_name="很长很长很长的昵称",
+        snapshot=FakeCatalogSnapshot(
+            draw_state=draw_state,
+            recent_rolls={"2026-04-22": "max-pig", "2026-04-21": "repeat-pig"},
+            roasted_7d=3,
+        ),
+        page=1,
+    )
+
+    assert [card["id"] for card in payload["cards"]] == [
+        "max-pig",
+        "repeat-pig",
+        "old-pig",
+        "new-pig",
+    ]
+    assert payload["cards"][0]["badge"] == "MAX"
+    assert payload["cards"][-1]["badge"] == "NEW"
+    assert all(card["image"] == "" for card in payload["cards"])
+    assert payload["stats"]["unlocked"] == 4
+    assert payload["stats"]["total"] == 4
+    assert payload["stats"]["progress_percent"] == 100.0
+    assert payload["stats"]["max_level"] == 5
+    assert payload["stats"]["maxed_count"] == 1
+    assert payload["stats"]["recent_new_count"] == 3
+    assert payload["stats"]["checkin_streak"] == 2
+    assert payload["stats"]["roasted_7d"] == 3
+    assert payload["favorite"]["name"] == "满级猪"
+
+
+def test_catalog_payload_clamps_page_and_paginates(monkeypatch, tmp_path):
+    module = load_rollpig_catalog_renderer_module(monkeypatch, tmp_path)
+    pigs = [
+        {"id": f"pig-{index:02d}", "name": f"小猪{index:02d}"}
+        for index in range(31)
+    ]
+    module.pig_resource_manager.pig_list = pigs
+    module.pig_resource_manager.pig_map = {str(item["id"]): item for item in pigs}
+    progress = {
+        str(item["id"]): FakePigProgress(
+            copies=1,
+            first_obtained_at="2026-04-01T00:00:00Z",
+        )
+        for item in pigs
+    }
+
+    payload = module._build_template_payload(
+        user_name="user",
+        snapshot=FakeCatalogSnapshot(
+            draw_state=FakeDrawState(
+                pig_ids=[str(item["id"]) for item in pigs],
+                progress=progress,
+            ),
+            recent_rolls={},
+        ),
+        page=99,
+    )
+
+    assert payload["stats"]["page"] == 2
+    assert payload["stats"]["pages"] == 2
+    assert len(payload["cards"]) == 1
+    assert payload["cards"][0]["id"] == "pig-30"
+
+
+@pytest.mark.asyncio
+async def test_catalog_render_cache_and_singleflight_split_by_state(
+    monkeypatch,
+    tmp_path,
+):
+    module = load_rollpig_catalog_renderer_module(monkeypatch, tmp_path)
+    pigs = [
+        {"id": f"pig-{index:02d}", "name": f"小猪{index:02d}"}
+        for index in range(31)
+    ]
+    module.pig_resource_manager.pig_list = pigs
+    module.pig_resource_manager.pig_map = {str(item["id"]): item for item in pigs}
+    progress = {
+        str(item["id"]): FakePigProgress(
+            copies=1,
+            first_obtained_at="2026-04-01T00:00:00Z",
+        )
+        for item in pigs
+    }
+    snapshot = FakeCatalogSnapshot(
+        draw_state=FakeDrawState(
+            pig_ids=[str(item["id"]) for item in pigs],
+            progress=progress,
+        ),
+        recent_rolls={},
+    )
+    calls = 0
+
+    async def slow_template_to_pic(*_args, **kwargs):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.01)
+        page = kwargs["templates"]["stats"]["page"]
+        return f"catalog-page-{page}".encode()
+
+    monkeypatch.setattr(module, "template_to_pic", slow_template_to_pic)
+
+    first, second = await asyncio.gather(
+        module.render_catalog_image(user_name="user", snapshot=snapshot, page=1),
+        module.render_catalog_image(user_name="user", snapshot=snapshot, page=1),
+    )
+    cached = await module.render_catalog_image(
+        user_name="user",
+        snapshot=snapshot,
+        page=1,
+    )
+    other_page = await module.render_catalog_image(
+        user_name="user",
+        snapshot=snapshot,
+        page=2,
+    )
+
+    assert first == second == cached == b"catalog-page-1"
+    assert other_page == b"catalog-page-2"
+    assert calls == 2
+
+
+def test_catalog_config_invalid_values_fall_back_to_safe_defaults(monkeypatch):
+    invalid_module = load_rollpig_config_module(
+        monkeypatch,
+        {
+            "CATALOG_CACHE_SECONDS": "bad",
+            "CATALOG_RENDER_TIMEOUT": "bad",
+            "HTML_RENDER_CONCURRENCY": "bad",
+        },
+    )
+    clamped_module = load_rollpig_config_module(
+        monkeypatch,
+        {
+            "CATALOG_CACHE_SECONDS": -30,
+            "CATALOG_RENDER_TIMEOUT": 0,
+            "HTML_RENDER_CONCURRENCY": 99,
+        },
+    )
+
+    assert invalid_module.get_catalog_cache_seconds() == 300
+    assert invalid_module.get_catalog_render_timeout() == 8.0
+    assert invalid_module.get_html_render_concurrency() == 2
+    assert clamped_module.get_catalog_cache_seconds() == 0
+    assert clamped_module.get_catalog_render_timeout() == 1.0
+    assert clamped_module.get_html_render_concurrency() == 6
 
 
 @pytest.mark.asyncio
@@ -1361,7 +1721,10 @@ def test_rollpig_public_resource_sync_defaults_to_upstream(monkeypatch):
         == default_module.DEFAULT_RESOURCE_MANIFEST_URL
     )
     assert disabled_url_module.get_resource_manifest_url() is None
-    assert custom_module.get_resource_manifest_url() == "https://example.com/public.json"
+    assert (
+        custom_module.get_resource_manifest_url()
+        == "https://example.com/public.json"
+    )
 
 
 def test_rollpig_private_resource_url_can_be_disabled(monkeypatch):

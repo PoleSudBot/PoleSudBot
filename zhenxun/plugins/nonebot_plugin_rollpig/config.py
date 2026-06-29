@@ -48,6 +48,10 @@ class Config(BaseModel):
     RESOURCE_MAX_FILE_SIZE: int = 10 * 1024 * 1024
     PRIVATE_RESOURCE_MANIFEST_URL: Optional[str] = DEFAULT_PRIVATE_RESOURCE_MANIFEST_URL
     PRIVATE_RESOURCE_TOKEN: Optional[str] = None
+    CATALOG_ENABLED: bool = True
+    CATALOG_CACHE_SECONDS: int = 300
+    CATALOG_RENDER_TIMEOUT: float = 8.0
+    HTML_RENDER_CONCURRENCY: int = 2
 
     # Legacy compatibility only. Runtime no longer uses these fields.
     rollpig_ai_enabled: Optional[bool] = None
@@ -72,6 +76,10 @@ class Config(BaseModel):
     rollpig_resource_max_file_size: Optional[int] = None
     rollpig_private_resource_manifest_url: Optional[str] = None
     rollpig_private_resource_token: Optional[str] = None
+    rollpig_catalog_enabled: Optional[bool] = None
+    rollpig_catalog_cache_seconds: Optional[int] = None
+    rollpig_catalog_render_timeout: Optional[float] = None
+    rollpig_html_render_concurrency: Optional[int] = None
 
 
 def _get_str(key: str, default: Optional[str] = None) -> Optional[str]:
@@ -204,3 +212,19 @@ def get_private_resource_manifest_url() -> Optional[str]:
 
 def get_private_resource_token() -> Optional[str]:
     return _get_str("PRIVATE_RESOURCE_TOKEN")
+
+
+def get_catalog_enabled() -> bool:
+    return _get_bool("CATALOG_ENABLED", True)
+
+
+def get_catalog_cache_seconds() -> int:
+    return max(0, _get_int("CATALOG_CACHE_SECONDS", 300))
+
+
+def get_catalog_render_timeout() -> float:
+    return max(1.0, _get_float("CATALOG_RENDER_TIMEOUT", 8.0))
+
+
+def get_html_render_concurrency() -> int:
+    return max(1, min(6, _get_int("HTML_RENDER_CONCURRENCY", 2)))

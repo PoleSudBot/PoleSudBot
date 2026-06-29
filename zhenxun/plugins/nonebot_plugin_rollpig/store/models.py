@@ -44,6 +44,13 @@ class CooldownConsumeResult:
 
 
 @dataclass(frozen=True)
+class CatalogSnapshot:
+    draw_state: DrawState
+    recent_rolls: dict[str, str]
+    roasted_7d: int = 0
+
+
+@dataclass(frozen=True)
 class RoastEvent:
     event_type: str
     attacker_id: str

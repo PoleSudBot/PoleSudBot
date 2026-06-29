@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Callable, Optional
 
 from .base import RollpigStore
-from .models import CooldownConsumeResult, DailyRollResult, DrawState, RoastEvent
+from .models import CatalogSnapshot, CooldownConsumeResult, DailyRollResult, DrawState, RoastEvent
 
 if TYPE_CHECKING:
     from ..data_manager import PigDataManager
@@ -39,6 +39,9 @@ class LocalJsonStore(RollpigStore):
 
     async def get_draw_state(self, user_id: str) -> DrawState:
         return self.manager.get_draw_state(user_id)
+
+    async def get_catalog_snapshot(self, user_id: str, days: int = 14) -> CatalogSnapshot:
+        return self.manager.get_catalog_snapshot(user_id, days=days)
 
     async def mark_group_roll_seen(
         self,

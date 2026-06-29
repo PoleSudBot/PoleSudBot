@@ -6,6 +6,7 @@
 
 - `今日小猪 / 今天是什么小猪 / jrxz`：每天抽取一次命运小猪，重复发送只查看当天结果。
 - `我的猪圈 / 我的小猪`：查看图鉴进度、EX 等级成长摘要、当前群排名与本地总排名。
+- `小猪图鉴 / 猪猪图鉴 / 完整图鉴 [页码]`：生成图片版已解锁小猪图鉴。
 - `猪王争霸榜 / 猪猪总榜`：按图鉴数量排行，并用首次达到当前图鉴数的时间处理并列。
 - `今日烤猪 / 烤群友`：围绕当天小猪形态做烧烤、反噬、保护和日报事件记录。
 - `随机小猪 / 找猪`：从 PigHub 获取或搜索外部猪图。
@@ -44,6 +45,19 @@
 | `RESOURCE_MAX_FILE_SIZE` | `10485760` | 单个资源文件下载大小上限 |
 | `PRIVATE_RESOURCE_MANIFEST_URL` | `https://pig.felislab.cc/resources/rollpig-pjsk/manifest.json` | 私有资源 overlay manifest URL，设为空字符串可关闭 |
 | `PRIVATE_RESOURCE_TOKEN` | `None` | 私有资源 Bearer Token |
+| `CATALOG_ENABLED` | `True` | 是否启用图片版小猪图鉴命令 |
+| `CATALOG_CACHE_SECONDS` | `300` | 同一图鉴状态图片缓存秒数，设为 `0` 可关闭缓存 |
+| `CATALOG_RENDER_TIMEOUT` | `8.0` | 单张小猪图鉴渲染超时时间 |
+| `HTML_RENDER_CONCURRENCY` | `2` | rollpig HTML 图片渲染总并发预算 |
+
+## 图片版图鉴
+
+`小猪图鉴 [页码]` 只展示当前用户已解锁的小猪，未解锁小猪只体现在总数和完成度里；每页固定 30 只，按 EX 等级、累计次数、首次获得时间和资源顺序排序。
+
+- 图片命令只支持本地账册模式，不新增云中心接口。
+- 图鉴卡片会展示缩略图、名称、`EX Lv.`、累计次数，以及最近 7 个业务日获得的 `NEW` 或满级 `MAX` 标记。
+- 缩略图从当前 active/private/builtin 资源快照读取并缓存到 localstore cache；命令执行时不会临时远程拉图，缺图会显示占位。
+- 渲染结果使用同状态 TTL 缓存和同 key 合流，避免多人同时触发时重复占用 Chromium。
 
 ## 资源同步
 
@@ -106,6 +120,8 @@ manifest 示例：
 - `daily_events`：烧烤事件，用于日报。
 - `protected`：群维度保护名单。
 
+图片版图鉴的 `recent_rolls`、连续打卡和近 7 天被烤次数都从这些本地字段只读聚合，不会补写历史、刷新 copies 或触发账册落盘。
+
 账册落盘使用临时文件原子替换，并在每次成功写入前保留滚动备份：
 
 - `pig_data.json.bak`：最近一次成功写入前的主文件。
@@ -125,4 +141,5 @@ manifest 示例：
 ```bash
 PYTHONPYCACHEPREFIX=/tmp/rollpig-pycache uv run --no-sync pytest -s tests/test_rollpig_ranking.py
 PYTHONPYCACHEPREFIX=/tmp/rollpig-pycache uv run --no-sync python -m py_compile zhenxun/plugins/nonebot_plugin_rollpig/*.py zhenxun/plugins/nonebot_plugin_rollpig/store/*.py
+git diff --check -- zhenxun/plugins/nonebot_plugin_rollpig tests/test_rollpig_ranking.py
 ```

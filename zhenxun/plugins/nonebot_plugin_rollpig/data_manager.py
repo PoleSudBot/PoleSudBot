@@ -11,7 +11,7 @@ from nonebot.log import logger
 import nonebot_plugin_localstore as store
 
 from .runtime import rollpig_date_str, rollpig_today, resolve_roast_cooldown_seconds
-from .store.models import DailyRollResult, DrawState, PigProgress
+from .store.models import CatalogSnapshot, DailyRollResult, DrawState, PigProgress
 
 ROAST_COOLDOWN_SECONDS = resolve_roast_cooldown_seconds()
 DATA_BACKUP_COUNT = 2
@@ -596,6 +596,60 @@ class PigDataManager:
                 if target_id and target_name and target_id not in result:
                     result[target_id] = target_name
         return result
+
+    def get_recent_rolls(self, user_id: str, days: int = 14) -> dict[str, str]:
+        """读取最近 N 天抽猪记录；图鉴展示只读使用，不补写任何历史状态。"""
+        today = rollpig_today()
+        safe_days = max(1, min(60, int(days or 14)))
+        start_date = today - datetime.timedelta(days=safe_days - 1)
+        result: dict[str, str] = {}
+        history = self.data.get("history", {})
+        if not isinstance(history, dict):
+            return result
+
+        for date_str, rows in history.items():
+            if not _is_valid_date(date_str) or not isinstance(rows, dict):
+                continue
+            date_obj = datetime.date.fromisoformat(date_str)
+            if not (start_date <= date_obj <= today):
+                continue
+            pig_id = rows.get(str(user_id))
+            if pig_id:
+                result[date_str] = str(pig_id)
+        return dict(sorted(result.items(), reverse=True))
+
+    def count_success_roasted(self, user_id: str, days: int = 7) -> int:
+        """统计近 N 天成功被烤次数；逃脱、反噬和自烤不计入图鉴状态。"""
+        today = rollpig_today()
+        safe_days = max(1, min(60, int(days or 7)))
+        start_date = today - datetime.timedelta(days=safe_days - 1)
+        events_by_date = self.data.get("daily_events", {})
+        if not isinstance(events_by_date, dict):
+            return 0
+
+        total = 0
+        for date_str, events in events_by_date.items():
+            if not _is_valid_date(date_str) or not isinstance(events, list):
+                continue
+            date_obj = datetime.date.fromisoformat(date_str)
+            if not (start_date <= date_obj <= today):
+                continue
+            total += sum(
+                1
+                for event in events
+                if isinstance(event, dict)
+                and event.get("type") == "success"
+                and str(event.get("target") or "") == str(user_id)
+            )
+        return total
+
+    def get_catalog_snapshot(self, user_id: str, days: int = 14) -> CatalogSnapshot:
+        """聚合图片版图鉴只读快照，避免命令层多处重复扫描账册。"""
+        return CatalogSnapshot(
+            draw_state=self.get_draw_state(user_id),
+            recent_rolls=self.get_recent_rolls(user_id, days=days),
+            roasted_7d=self.count_success_roasted(user_id, days=7),
+        )
 
     async def clean_old_history(self, days_to_keep: int = 14):
         """清理超过 days_to_keep 天的历史记录（不影响图鉴数据）。"""

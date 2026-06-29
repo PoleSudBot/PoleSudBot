@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Optional
 
-from .models import CooldownConsumeResult, DailyRollResult, DrawState, RoastEvent
+from .models import CatalogSnapshot, CooldownConsumeResult, DailyRollResult, DrawState, RoastEvent
 
 
 class RollpigStore(ABC):
@@ -27,6 +27,10 @@ class RollpigStore(ABC):
 
     @abstractmethod
     async def get_draw_state(self, user_id: str) -> DrawState:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_catalog_snapshot(self, user_id: str, days: int = 14) -> CatalogSnapshot:
         raise NotImplementedError
 
     @abstractmethod

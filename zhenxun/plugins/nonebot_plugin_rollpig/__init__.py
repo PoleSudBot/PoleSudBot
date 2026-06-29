@@ -40,6 +40,7 @@ from .config import (
     DEFAULT_PRIVATE_RESOURCE_MANIFEST_URL,
     GroupSettings,
     MODULE_NAME,
+    get_catalog_enabled,
     get_growth_max_expert_level,
     get_growth_pity_weight_cap,
     get_growth_pity_weight_step,
@@ -49,6 +50,8 @@ from .config import (
     get_resource_sync_on_startup,
     get_storage_backend,
 )
+from .catalog_renderer import render_catalog_image
+from .render_budget import html_render_budget
 from .resource_manager import pig_resource_manager
 from .roast_manager import roast_manager
 from .runtime import (
@@ -120,6 +123,7 @@ __plugin_meta__ = PluginMetadata(
     
     📊 统计指令：
     我的猪圈 / 我的小猪 - 查看解锁进度、EX 等级与猪王排行
+    小猪图鉴 / 猪猪图鉴 / 完整图鉴 [页码] - 生成图片版已解锁小猪图鉴
     猪王争霸榜 / 猪猪榜 / 猪猪排行 / 小猪榜 / 小猪排行 [数量] - 查看当前群图鉴排行
     猪猪总榜 / 猪猪总排行 [数量] - 查看全局图鉴排行
     本周小猪 - 生成本周猪猪总结长图
@@ -130,7 +134,7 @@ __plugin_meta__ = PluginMetadata(
     config=Config,
     extra={
         "author": "Felis2026",
-        "version": "0.6.3",
+        "version": "0.6.4",
         "configs": [
             {
                 "module": MODULE_NAME,
@@ -291,6 +295,38 @@ __plugin_meta__ = PluginMetadata(
                 "default_value": None,
                 "help": "私有小猪资源 Bearer Token",
                 "type": str,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "CATALOG_ENABLED",
+                "value": True,
+                "default_value": True,
+                "help": "是否启用图片版小猪图鉴命令",
+                "type": bool,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "CATALOG_CACHE_SECONDS",
+                "value": 300,
+                "default_value": 300,
+                "help": "图片版小猪图鉴同状态缓存秒数",
+                "type": int,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "CATALOG_RENDER_TIMEOUT",
+                "value": 8.0,
+                "default_value": 8.0,
+                "help": "单张小猪图鉴渲染超时时间（秒）",
+                "type": float,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "HTML_RENDER_CONCURRENCY",
+                "value": 2,
+                "default_value": 2,
+                "help": "rollpig HTML 图片渲染总并发预算",
+                "type": int,
             },
         ],
         "group_config_model": GroupSettings,
@@ -681,6 +717,18 @@ def parse_rank_limit(raw_text: str, default: int = DEFAULT_RANK_LIMIT) -> int | 
     return max(1, min(value, MAX_RANK_LIMIT))
 
 
+def parse_catalog_page(raw_text: str) -> int | None:
+    """解析图鉴页码；只接受正整数，避免无效参数静默落到第一页。"""
+    text = raw_text.strip()
+    if not text:
+        return 1
+    try:
+        value = int(text.split()[0])
+    except ValueError:
+        return None
+    return value if value >= 1 else None
+
+
 def get_rank_usage(command_name: str) -> str:
     return f"用法：{command_name} [数量]，数量需为 1-{MAX_RANK_LIMIT} 的整数。"
 
@@ -902,7 +950,7 @@ def build_my_pigsty_footer(user_count: int) -> str:
     """生成猪圈底部提示，让文本兜底和 PSB 面板使用同一份文案。"""
     if user_count <= 0:
         return "发送「今日小猪」开始收集。"
-    return "完整图鉴图还在施工，先把成长进度记牢。"
+    return "发送「小猪图鉴」查看图片版完整图鉴。"
 
 
 def build_my_pigsty_ranking_note(
@@ -1144,22 +1192,23 @@ async def build_panel_picture(
     rankings: Optional[list[dict[str, str]]] = None,
     footer: str = "",
 ) -> bytes:
-    return await template_to_pic(
-        template_path=RES_DIR,
-        template_name="panel.html",
-        templates={
-            "title": title,
-            "subtitle": subtitle,
-            "hero_avatar": hero_avatar,
-            "show_hero_avatar": show_hero_avatar,
-            "stats": stats or [],
-            "notes": notes or [],
-            "rankings": rankings or [],
-            "footer": footer,
-        },
-        pages={"viewport": {"width": 980, "height": 10}},
-        wait=80,
-    )
+    async with html_render_budget("panel"):
+        return await template_to_pic(
+            template_path=RES_DIR,
+            template_name="panel.html",
+            templates={
+                "title": title,
+                "subtitle": subtitle,
+                "hero_avatar": hero_avatar,
+                "show_hero_avatar": show_hero_avatar,
+                "stats": stats or [],
+                "notes": notes or [],
+                "rankings": rankings or [],
+                "footer": footer,
+            },
+            pages={"viewport": {"width": 980, "height": 10}},
+            wait=80,
+        )
 
 
 async def send_rendered_panel(
@@ -1284,18 +1333,19 @@ async def send_rendered_pig(
 
     pic = None
     try:
-        pic = await template_to_pic(
-            template_path=RES_DIR,
-            template_name="template.html",
-            templates={
-                "avatar": avatar_uri,
-                "name": name,
-                "desc": desc,
-                "analysis": analysis,
-                "is_new": is_new,
-                "new_icon_uri": new_icon_uri,
-            },
-        )
+        async with html_render_budget("pig-card"):
+            pic = await template_to_pic(
+                template_path=RES_DIR,
+                template_name="template.html",
+                templates={
+                    "avatar": avatar_uri,
+                    "name": name,
+                    "desc": desc,
+                    "analysis": analysis,
+                    "is_new": is_new,
+                    "new_icon_uri": new_icon_uri,
+                },
+            )
     except Exception as e:
         logger.error(f"图片渲染失败: pig_id={pig_id}, error={e}")
         await matcher.finish("图片生成失败。")
@@ -2269,7 +2319,53 @@ async def _(bot: Bot, event: Event):
     )
 
 
-# 6.5 猪王争霸榜
+# 6.5 图片版小猪图鉴
+cmd_catalog = on_command("小猪图鉴", aliases={"猪猪图鉴", "完整图鉴"}, block=True)
+
+
+@cmd_catalog.handle()
+@guard_group_enabled(cmd_catalog)
+@guard_store_errors(cmd_catalog)
+async def _(event: Event, args: Message = CommandArg()):
+    if not get_catalog_enabled():
+        await cmd_catalog.finish(MessageSegment.reply(event.message_id) + "图片版小猪图鉴当前未启用。")
+        return
+    if get_storage_backend() != "local":
+        await cmd_catalog.finish(MessageSegment.reply(event.message_id) + "图片版小猪图鉴当前仅支持本地账册。")
+        return
+
+    page = parse_catalog_page(args.extract_plain_text())
+    if page is None:
+        await cmd_catalog.finish(MessageSegment.reply(event.message_id) + "页码需要是正整数，例如：小猪图鉴 2")
+        return
+    if not PIG_LIST:
+        await cmd_catalog.finish(MessageSegment.reply(event.message_id) + "猪图鉴为空，请先检查资源文件。")
+        return
+
+    user_id = str(event.user_id)
+    snapshot = await store.get_catalog_snapshot(user_id, days=14)
+    if not snapshot.draw_state.pig_ids:
+        await cmd_catalog.finish(
+            MessageSegment.reply(event.message_id) + "你的猪圈空空如也！发送「今日小猪」开始收集。"
+        )
+        return
+
+    owner_name = sanitize_display_name(get_event_user_name(event), user_id)
+    try:
+        pic = await render_catalog_image(
+            user_name=owner_name,
+            snapshot=snapshot,
+            page=page,
+        )
+    except Exception as error:
+        logger.error(f"小猪图鉴渲染失败: user={user_id} page={page} error={error}")
+        await cmd_catalog.finish(MessageSegment.reply(event.message_id) + "小猪图鉴生成失败，请稍后再试。")
+        return
+
+    await cmd_catalog.finish(MessageSegment.reply(event.message_id) + MessageSegment.image(pic))
+
+
+# 6.6 猪王争霸榜
 cmd_pig_king = on_command(
     "猪王争霸榜",
     aliases={"猪猪榜", "猪猪排行", "小猪榜", "小猪排行"},
