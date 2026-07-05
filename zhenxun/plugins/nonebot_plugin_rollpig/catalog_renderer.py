@@ -26,12 +26,22 @@ from .runtime import ROLLPIG_TIMEZONE, rollpig_today
 from .store.models import CatalogSnapshot, DrawState, PigProgress
 
 RES_DIR = Path(__file__).parent / "resource"
+HARMONY_FONT_DIR = (
+    Path(__file__).resolve().parents[3] / "resources" / "font" / "HarmonyOS_Sans_SC"
+)
 CATALOG_TEMPLATE = "catalog.html"
 THUMB_CACHE_DIR = localstore.get_plugin_cache_dir() / "catalog_thumbs"
 CATALOG_CACHE_MAX_ENTRIES = 64
 CATALOG_CACHE_MAX_BYTES = 64 * 1024 * 1024
 NEW_BADGE_DAYS = 7
 NEW_BADGE_URI = (RES_DIR / "assets" / "new.png").as_uri()
+HARMONY_FONT_FILES = {
+    400: "HarmonyOS_SansSC_Regular.ttf",
+    500: "HarmonyOS_SansSC_Medium.ttf",
+    600: "HarmonyOS_SansSC_Semibold.ttf",
+    700: "HarmonyOS_SansSC_Bold.ttf",
+    900: "HarmonyOS_SansSC_Black.ttf",
+}
 
 
 @dataclass
@@ -52,6 +62,16 @@ def clear_catalog_runtime_cache() -> None:
         if not task.done():
             task.cancel()
     _catalog_render_tasks.clear()
+
+
+def get_harmony_font_faces() -> list[dict[str, str | int]]:
+    """把项目共享鸿蒙字体转成 file URI，供 htmlrender 的独立模板直接加载。"""
+    faces: list[dict[str, str | int]] = []
+    for weight, filename in HARMONY_FONT_FILES.items():
+        font_file = HARMONY_FONT_DIR / filename
+        if font_file.exists():
+            faces.append({"weight": weight, "uri": font_file.as_uri()})
+    return faces
 
 
 def get_expert_level(copies: int) -> int:
@@ -232,6 +252,7 @@ def _ranking_value(rank: int | None) -> str:
 def _build_template_payload(
     *,
     user_name: str,
+    user_avatar: str = "",
     snapshot: CatalogSnapshot,
     group_rank: int | None = None,
     total_rank: int | None = None,
@@ -326,10 +347,12 @@ def _build_template_payload(
     }
     return {
         "user_name": user_name,
+        "user_avatar": user_avatar,
         "stats": stats,
         "favorite": favorite,
         "cards": cards,
         "new_badge_uri": NEW_BADGE_URI,
+        "font_faces": get_harmony_font_faces(),
     }
 
 
@@ -338,6 +361,7 @@ def _build_cache_key(payload: dict[str, Any], snapshot: CatalogSnapshot) -> str:
     key_payload = {
         "resource_version": pig_resource_manager.resource_version,
         "user_name": payload["user_name"],
+        "user_avatar": payload["user_avatar"],
         "stats": payload["stats"],
         "favorite": payload["favorite"],
         "cards": [
@@ -379,7 +403,7 @@ async def _render_catalog_image_uncached(
                 template_path=RES_DIR,
                 template_name=CATALOG_TEMPLATE,
                 templates=payload,
-                pages={"viewport": {"width": 2260, "height": 10}},
+                pages={"viewport": {"width": 2580, "height": 10}},
                 wait=100,
             ),
             timeout=timeout,
@@ -399,6 +423,7 @@ async def _render_catalog_image_uncached(
 async def render_catalog_image(
     *,
     user_name: str,
+    user_avatar: str = "",
     snapshot: CatalogSnapshot,
     group_rank: int | None = None,
     total_rank: int | None = None,
@@ -407,6 +432,7 @@ async def render_catalog_image(
     started_at = time.perf_counter()
     payload = _build_template_payload(
         user_name=user_name,
+        user_avatar=user_avatar,
         snapshot=snapshot,
         group_rank=group_rank,
         total_rank=total_rank,

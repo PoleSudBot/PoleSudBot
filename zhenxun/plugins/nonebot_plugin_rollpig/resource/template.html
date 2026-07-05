@@ -3,13 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <style>
+      {% for font in font_faces %}
+      @font-face {
+        font-family: "HarmonyOS Sans SC";
+        src: url("{{ font.uri }}");
+        font-weight: {{ font.weight }};
+        font-style: normal;
+        font-display: swap;
+      }
+      {% endfor %}
+
       body {
         margin: 0;
         width: 800px;
         height: 800px;
         border-radius: 40px;
         background: #ffffff;
-        font-family: "Microsoft YaHei", sans-serif;
+        font-family: "HarmonyOS Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif;
         display: flex;
         justify-content: center;
         align-items: center;

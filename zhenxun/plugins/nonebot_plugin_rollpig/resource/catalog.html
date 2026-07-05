@@ -3,6 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <style>
+      {% for font in font_faces %}
+      @font-face {
+        font-family: "HarmonyOS Sans SC";
+        src: url("{{ font.uri }}");
+        font-weight: {{ font.weight }};
+        font-style: normal;
+        font-display: swap;
+      }
+      {% endfor %}
+
       :root {
         --bg: #ffffff;
         --text: #111111;
@@ -26,11 +36,11 @@
         padding: 34px;
         background: var(--bg);
         color: var(--text);
-        font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+        font-family: "HarmonyOS Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif;
       }
 
       .catalog {
-        width: 2180px;
+        width: 2460px;
         margin: 0 auto;
         padding: 34px;
         border: 3px solid var(--line);
@@ -40,22 +50,55 @@
 
       .header {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) 460px 420px;
+        grid-template-columns: minmax(0, 1fr) 500px 430px;
         gap: 18px;
         align-items: start;
       }
 
+      .title {
+        min-width: 0;
+        display: grid;
+        grid-template-columns: 86px minmax(0, 1fr);
+        gap: 18px;
+        align-items: center;
+      }
+
+      .user-avatar,
+      .user-avatar-placeholder {
+        width: 86px;
+        height: 86px;
+        border: 2px solid var(--line);
+        border-radius: 18px;
+        background: var(--soft);
+      }
+
+      .user-avatar {
+        object-fit: cover;
+      }
+
+      .user-avatar-placeholder {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--muted);
+        font-size: 28px;
+        font-weight: 700;
+      }
+
       .title-main {
-        font-size: 44px;
+        font-size: 46px;
         font-weight: 700;
         line-height: 1.15;
       }
 
       .title-sub {
-        margin-top: 10px;
-        font-size: 20px;
+        margin-top: 8px;
+        font-size: 22px;
         color: var(--muted);
         line-height: 1.45;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
         overflow-wrap: anywhere;
       }
 
@@ -155,20 +198,20 @@
         border-top: 2px solid var(--line);
         display: grid;
         grid-template-columns: repeat(15, minmax(0, 1fr));
-        gap: 12px;
+        gap: 14px;
       }
 
       .pig-card {
         position: relative;
         min-width: 0;
         aspect-ratio: 1 / 1;
-        padding: 8px 10px;
+        padding: 12px 12px 10px;
         border: 2px solid var(--line);
         border-radius: 14px;
         background: var(--bg);
         display: grid;
-        grid-template-rows: 62px minmax(0, 30px) 18px;
-        align-items: center;
+        grid-template-rows: 92px 26px 24px;
+        align-items: end;
         justify-items: center;
       }
 
@@ -180,31 +223,31 @@
 
       .new-icon {
         position: absolute;
-        top: -8px;
-        right: -8px;
-        width: 66px;
+        top: -48px;
+        right: -48px;
+        width: 160px;
         height: auto;
         z-index: 2;
       }
 
       .image-wrap {
-        width: 72px;
-        height: 62px;
+        width: 106px;
+        height: 88px;
         display: flex;
-        align-items: center;
+        align-items: flex-start;
         justify-content: center;
       }
 
       .pig-image {
-        max-width: 72px;
-        max-height: 62px;
+        max-width: 106px;
+        max-height: 88px;
         object-fit: contain;
       }
 
       .missing-image,
       .lock-mark {
-        width: 48px;
-        height: 48px;
+        width: 56px;
+        height: 56px;
         border: 2px solid var(--line);
         border-radius: 50%;
         display: flex;
@@ -239,27 +282,32 @@
       }
 
       .level {
-        font-size: 14px;
+        font-size: 16px;
         line-height: 1.1;
       }
 
-      .pig-name .level {
-        margin-left: 4px;
+      .pig-level {
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 17px;
+        line-height: 1.1;
       }
 
       .level-0 {
         color: var(--level-0);
-        font-weight: 500;
+        font-weight: 600;
       }
 
       .level-low {
         color: var(--level-low);
-        font-weight: 500;
+        font-weight: 600;
       }
 
       .level-mid {
         color: var(--level-mid);
-        font-weight: 600;
+        font-weight: 700;
       }
 
       .level-high {
@@ -269,21 +317,7 @@
 
       .level-max {
         color: var(--level-max);
-        font-weight: 800;
-      }
-
-      .pig-copies {
-        max-width: 100%;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        font-size: 13px;
-        color: var(--muted);
-        line-height: 1.2;
-      }
-
-      .pig-card.locked .pig-copies {
-        color: #8a8f96;
+        font-weight: 900;
       }
 
       .favorite {
@@ -321,6 +355,12 @@
         white-space: nowrap;
       }
 
+      .favorite-name .level {
+        margin-left: 6px;
+        font-size: 18px;
+        font-weight: 900;
+      }
+
       .favorite-meta {
         margin-top: 5px;
         font-size: 14px;
@@ -349,9 +389,16 @@
   <body>
     <main class="catalog">
       <section class="header">
-        <div>
-          <div class="title-main">我的猪圈</div>
-          <div class="title-sub">{{ user_name }} 的全量小猪图鉴 · 按资源顺序固定展示</div>
+        <div class="title">
+          {% if user_avatar %}
+          <img class="user-avatar" src="{{ user_avatar|e }}" />
+          {% else %}
+          <div class="user-avatar-placeholder">猪</div>
+          {% endif %}
+          <div>
+            <div class="title-main">小猪图鉴</div>
+            <div class="title-sub">{{ user_name }}</div>
+          </div>
         </div>
         <article class="rank-card top-favorite">
           <div class="favorite-image">
@@ -436,14 +483,14 @@
             {% if card.locked %}
             未解锁
             {% else %}
-            {{ card.name }} <span class="level {{ card.level_class }}">Lv.{{ card.level }}</span>
+            {{ card.name }}
             {% endif %}
           </div>
-          <div class="pig-copies">
+          <div class="pig-level">
             {% if card.locked %}
             &nbsp;
             {% else %}
-            累计 {{ card.copies }} 次
+            <span class="level {{ card.level_class }}">Lv.{{ card.level }}</span>
             {% endif %}
           </div>
         </article>

@@ -50,7 +50,7 @@ from .config import (
     get_resource_sync_on_startup,
     get_storage_backend,
 )
-from .catalog_renderer import render_catalog_image
+from .catalog_renderer import render_catalog_image, get_harmony_font_faces
 from .render_budget import html_render_budget
 from .resource_manager import pig_resource_manager
 from .roast_manager import roast_manager
@@ -1353,6 +1353,7 @@ async def send_rendered_pig(
                     "analysis": analysis,
                     "is_new": is_new,
                     "new_icon_uri": new_icon_uri,
+                    "font_faces": get_harmony_font_faces(),
                 },
             )
     except Exception as e:
@@ -2311,6 +2312,7 @@ async def _(bot: Bot, event: Event):
     )
 
     owner_name = sanitize_display_name(get_event_user_name(event), user_id)
+    avatar_uri = await get_avatar_uri(user_id)
     total_pigs = len(PIG_LIST)
     user_count = len(snapshot.draw_state.pig_ids)
     percent = int((user_count / total_pigs) * 100)
@@ -2324,6 +2326,7 @@ async def _(bot: Bot, event: Event):
     try:
         pic = await render_catalog_image(
             user_name=owner_name,
+            user_avatar=avatar_uri,
             snapshot=snapshot,
             group_rank=(
                 group_rank
