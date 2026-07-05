@@ -22,10 +22,7 @@ from zhenxun.utils.platform import PlatformUtils
 
 # 确保依赖插件先被 NoneBot 注册（必须在本地模块 import 之前）
 # data_manager.py 在模块加载时会调用 store.get_plugin_data_file()
-require("nonebot_plugin_htmlrender")
 require("nonebot_plugin_localstore")
-
-from nonebot_plugin_htmlrender import template_to_pic
 
 # 本地模块（在 require() 之后 import）
 from .ranking import (
@@ -1202,10 +1199,12 @@ async def build_panel_picture(
     footer: str = "",
 ) -> bytes:
     async with html_render_budget("panel"):
-        return await template_to_pic(
-            template_path=RES_DIR,
-            template_name="panel.html",
-            templates={
+        from zhenxun import ui
+
+        # 渲染服务依赖 NoneBot 运行时，延迟导入避免插件模块加载期抢先初始化服务。
+        return await ui.render_template(
+            RES_DIR / "panel.html",
+            {
                 "title": title,
                 "subtitle": subtitle,
                 "hero_avatar": hero_avatar,
@@ -1215,7 +1214,9 @@ async def build_panel_picture(
                 "rankings": rankings or [],
                 "footer": footer,
             },
-            pages={"viewport": {"width": 980, "height": 10}},
+            use_cache=False,
+            is_page=True,
+            viewport={"width": 980, "height": 10},
             wait=80,
         )
 
@@ -1343,10 +1344,12 @@ async def send_rendered_pig(
     pic = None
     try:
         async with html_render_budget("pig-card"):
-            pic = await template_to_pic(
-                template_path=RES_DIR,
-                template_name="template.html",
-                templates={
+            from zhenxun import ui
+
+            # 渲染服务依赖 NoneBot 运行时，延迟导入避免插件模块加载期抢先初始化服务。
+            pic = await ui.render_template(
+                RES_DIR / "template.html",
+                {
                     "avatar": avatar_uri,
                     "name": name,
                     "desc": desc,
@@ -1355,6 +1358,8 @@ async def send_rendered_pig(
                     "new_icon_uri": new_icon_uri,
                     "font_faces": get_harmony_font_faces(),
                 },
+                use_cache=False,
+                is_page=True,
             )
     except Exception as e:
         logger.error(f"图片渲染失败: pig_id={pig_id}, error={e}")

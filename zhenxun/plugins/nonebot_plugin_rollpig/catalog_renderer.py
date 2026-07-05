@@ -11,7 +11,6 @@ import time
 from typing import Any
 
 from nonebot.log import logger
-from nonebot_plugin_htmlrender import template_to_pic
 import nonebot_plugin_localstore as localstore
 from PIL import Image
 
@@ -30,6 +29,7 @@ HARMONY_FONT_DIR = (
     Path(__file__).resolve().parents[3] / "resources" / "font" / "HarmonyOS_Sans_SC"
 )
 CATALOG_TEMPLATE = "catalog.html"
+CATALOG_TEMPLATE_PATH = RES_DIR / CATALOG_TEMPLATE
 THUMB_CACHE_DIR = localstore.get_plugin_cache_dir() / "catalog_thumbs"
 CATALOG_CACHE_MAX_ENTRIES = 64
 CATALOG_CACHE_MAX_BYTES = 64 * 1024 * 1024
@@ -398,12 +398,16 @@ async def _render_catalog_image_uncached(
     render_started_at = time.perf_counter()
     timeout = get_catalog_render_timeout()
     async with html_render_budget("catalog"):
+        from zhenxun import ui
+
+        # 延迟导入 zhenxun 渲染入口，避免模块加载阶段提前触发 NoneBot 服务初始化。
         result = await asyncio.wait_for(
-            template_to_pic(
-                template_path=RES_DIR,
-                template_name=CATALOG_TEMPLATE,
-                templates=payload,
-                pages={"viewport": {"width": 2580, "height": 10}},
+            ui.render_template(
+                CATALOG_TEMPLATE_PATH,
+                payload,
+                use_cache=False,
+                is_page=True,
+                viewport={"width": 2580, "height": 10},
                 wait=100,
             ),
             timeout=timeout,
