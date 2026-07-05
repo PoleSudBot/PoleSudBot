@@ -6,7 +6,6 @@ import datetime
 import hashlib
 from io import BytesIO
 import json
-import math
 from pathlib import Path
 import time
 from typing import Any
@@ -29,10 +28,10 @@ from .store.models import CatalogSnapshot, DrawState, PigProgress
 RES_DIR = Path(__file__).parent / "resource"
 CATALOG_TEMPLATE = "catalog.html"
 THUMB_CACHE_DIR = localstore.get_plugin_cache_dir() / "catalog_thumbs"
-CATALOG_PAGE_SIZE = 30
 CATALOG_CACHE_MAX_ENTRIES = 64
 CATALOG_CACHE_MAX_BYTES = 64 * 1024 * 1024
 NEW_BADGE_DAYS = 7
+NEW_BADGE_URI = (RES_DIR / "assets" / "new.png").as_uri()
 
 
 @dataclass
@@ -56,7 +55,7 @@ def clear_catalog_runtime_cache() -> None:
 
 
 def get_expert_level(copies: int) -> int:
-    """图鉴渲染等级必须与抽猪成长文案保持同一套 copies -> EX Lv. 规则。"""
+    """图鉴渲染等级必须与抽猪成长文案保持同一套 copies -> Lv. 规则。"""
     return min(max(int(copies or 0) - 1, 0), get_growth_max_expert_level())
 
 
@@ -193,16 +192,8 @@ def _calculate_checkin_streak(
     return streak
 
 
-def _next_milestone(unlocked: int, total: int) -> int:
-    if total <= 0:
-        return 0
-    if unlocked >= total:
-        return total
-    return min(total, max(10, ((unlocked // 10) + 1) * 10))
-
-
 def _sort_progress_items(draw_state: DrawState) -> list[tuple[str, PigProgress]]:
-    """按成长强度排序图鉴卡；资源顺序只作为稳定兜底，不覆盖用户成长优先级。"""
+    """按成长强度排序摘要用小猪；展柜本身始终保持资源顺序。"""
     resource_order = {
         str(pig.get("id")): index
         for index, pig in enumerate(pig_resource_manager.pig_list)
@@ -219,56 +210,92 @@ def _sort_progress_items(draw_state: DrawState) -> list[tuple[str, PigProgress]]
     )
 
 
+def _level_class(level: int, max_level: int) -> str:
+    if level <= 0:
+        return "level-0"
+    if max_level <= 1:
+        return "level-max"
+    ratio = level / max_level
+    if ratio >= 1:
+        return "level-max"
+    if ratio >= 0.75:
+        return "level-high"
+    if ratio >= 0.4:
+        return "level-mid"
+    return "level-low"
+
+
+def _ranking_value(rank: int | None) -> str:
+    return f"#{rank}" if rank else "未上榜"
+
+
 def _build_template_payload(
     *,
     user_name: str,
     snapshot: CatalogSnapshot,
-    page: int,
+    group_rank: int | None = None,
+    total_rank: int | None = None,
 ) -> dict[str, Any]:
     today = rollpig_today()
     progress_items = _sort_progress_items(snapshot.draw_state)
     total_pigs = len(pig_resource_manager.pig_list)
     unlocked = len(snapshot.draw_state.pig_ids)
-    pages = max(1, math.ceil(max(1, unlocked) / CATALOG_PAGE_SIZE))
-    safe_page = max(1, min(int(page or 1), pages))
-    page_items = progress_items[
-        (safe_page - 1) * CATALOG_PAGE_SIZE : safe_page * CATALOG_PAGE_SIZE
-    ]
     max_level = get_growth_max_expert_level()
+    progress_map = snapshot.draw_state.progress
+    unlocked_ids = set(snapshot.draw_state.pig_ids)
 
     cards: list[dict[str, Any]] = []
-    for pig_id, progress in page_items:
-        pig = pig_resource_manager.pig_map.get(pig_id, {})
-        level = get_expert_level(progress.copies)
-        is_max = level >= max_level
-        is_new = (not is_max) and _is_recent_new(
-            progress.first_obtained_at,
+    for index, pig in enumerate(pig_resource_manager.pig_list, start=1):
+        pig_id = str(pig.get("id") or "")
+        progress = progress_map.get(pig_id)
+        locked = pig_id not in unlocked_ids or progress is None
+        level = get_expert_level(progress.copies) if progress else 0
+        is_max = (not locked) and level >= max_level
+        is_new = (not locked) and _is_recent_new(
+            progress.first_obtained_at if progress else None,
             today=today,
         )
-        badge = "MAX" if is_max else ("NEW" if is_new else "")
+        # 固定展柜需要稳定占位，未解锁项不泄露具体小猪图片与名称。
+        display_name = str(pig.get("name") or pig_id) if not locked else "未解锁"
+        level_class = _level_class(level, max_level)
+        card_class = " locked" if locked else ""
+        if is_max:
+            card_class += " max"
         cards.append(
             {
                 "id": pig_id,
-                "name": str(pig.get("name") or pig_id),
-                "image": _image_uri(pig_id),
+                "index": index,
+                "name": display_name,
+                "image": "" if locked else _image_uri(pig_id),
                 "level": level,
-                "copies": int(progress.copies or 0),
-                "badge": badge,
-                "badge_class": badge.lower(),
+                "level_class": level_class,
+                "copies": int(progress.copies or 0) if progress else 0,
+                "locked": locked,
+                "is_new": is_new,
+                "is_max": is_max,
+                "card_class": card_class,
             }
         )
 
     if progress_items:
         favorite_id, favorite_progress = progress_items[0]
         favorite_pig = pig_resource_manager.pig_map.get(favorite_id, {})
+        favorite_level = get_expert_level(favorite_progress.copies)
         favorite = {
             "name": str(favorite_pig.get("name") or favorite_id),
             "image": _image_uri(favorite_id),
-            "level": get_expert_level(favorite_progress.copies),
+            "level": favorite_level,
+            "level_class": _level_class(favorite_level, max_level),
             "copies": int(favorite_progress.copies or 0),
         }
     else:
-        favorite = {"name": "暂无", "image": "", "level": 0, "copies": 0}
+        favorite = {
+            "name": "暂无",
+            "image": "",
+            "level": 0,
+            "level_class": "level-0",
+            "copies": 0,
+        }
 
     levels = [get_expert_level(progress.copies) for _, progress in progress_items]
     progress_percent = (
@@ -278,8 +305,10 @@ def _build_template_payload(
         "unlocked": unlocked,
         "total": total_pigs,
         "progress_percent": progress_percent,
-        "max_level": max(levels, default=0),
         "maxed_count": sum(1 for level in levels if level >= max_level),
+        "locked_count": max(0, total_pigs - unlocked),
+        "max_level": max_level,
+        "duplicate_streak": max(0, int(snapshot.draw_state.duplicate_streak or 0)),
         "recent_new_count": sum(
             1
             for _, progress in progress_items
@@ -290,15 +319,17 @@ def _build_template_payload(
             today=today,
         ),
         "roasted_7d": int(snapshot.roasted_7d or 0),
-        "next_milestone": _next_milestone(unlocked, total_pigs),
-        "page": safe_page,
-        "pages": pages,
+        "group_rank": _ranking_value(group_rank),
+        "total_rank": _ranking_value(total_rank),
+        "has_group_rank": group_rank is not None,
+        "has_total_rank": total_rank is not None,
     }
     return {
         "user_name": user_name,
         "stats": stats,
         "favorite": favorite,
         "cards": cards,
+        "new_badge_uri": NEW_BADGE_URI,
     }
 
 
@@ -310,7 +341,14 @@ def _build_cache_key(payload: dict[str, Any], snapshot: CatalogSnapshot) -> str:
         "stats": payload["stats"],
         "favorite": payload["favorite"],
         "cards": [
-            (card["id"], card["level"], card["copies"], card["badge"])
+            (
+                card["id"],
+                card["locked"],
+                card["level"],
+                card["copies"],
+                card["is_new"],
+                card["is_max"],
+            )
             for card in payload["cards"]
         ],
         "recent_rolls": snapshot.recent_rolls,
@@ -341,7 +379,7 @@ async def _render_catalog_image_uncached(
                 template_path=RES_DIR,
                 template_name=CATALOG_TEMPLATE,
                 templates=payload,
-                pages={"viewport": {"width": 980, "height": 10}},
+                pages={"viewport": {"width": 2260, "height": 10}},
                 wait=100,
             ),
             timeout=timeout,
@@ -349,7 +387,7 @@ async def _render_catalog_image_uncached(
     finished_at = time.perf_counter()
     logger.info(
         "rollpig catalog rendered: "
-        f"user={payload['user_name']} page={payload['stats']['page']} "
+        f"user={payload['user_name']} cards={len(payload['cards'])} "
         f"render={finished_at - render_started_at:.2f}s "
         f"total={finished_at - started_at:.2f}s bytes={len(result)}"
     )
@@ -362,14 +400,16 @@ async def render_catalog_image(
     *,
     user_name: str,
     snapshot: CatalogSnapshot,
-    page: int = 1,
+    group_rank: int | None = None,
+    total_rank: int | None = None,
 ) -> bytes:
     """渲染图片版小猪图鉴；只消费快照，不修改抽猪状态或 copies。"""
     started_at = time.perf_counter()
     payload = _build_template_payload(
         user_name=user_name,
         snapshot=snapshot,
-        page=page,
+        group_rank=group_rank,
+        total_rank=total_rank,
     )
     cache_key = _build_cache_key(payload, snapshot)
     ttl = get_catalog_cache_seconds()
@@ -380,7 +420,7 @@ async def render_catalog_image(
         if cached_payload is not None:
             logger.debug(
                 "rollpig catalog cache hit: "
-                f"user={user_name} page={payload['stats']['page']} "
+                f"user={user_name} cards={len(payload['cards'])} "
                 f"bytes={len(cached_payload)}"
             )
             return cached_payload
@@ -401,7 +441,7 @@ async def render_catalog_image(
     if not render_owner:
         logger.debug(
             "rollpig catalog render coalesced: "
-            f"user={user_name} page={payload['stats']['page']}"
+            f"user={user_name} cards={len(payload['cards'])}"
         )
 
     try:

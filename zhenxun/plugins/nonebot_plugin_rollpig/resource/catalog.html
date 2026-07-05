@@ -8,8 +8,13 @@
         --text: #111111;
         --muted: #666666;
         --line: #1f2937;
-        --soft: #f3f4f6;
-        --accent: #f8d7e6;
+        --soft: #f4f5f6;
+        --lock: #d8dce0;
+        --level-0: #7a7f86;
+        --level-low: #66758a;
+        --level-mid: #4e7b7a;
+        --level-high: #7a6897;
+        --level-max: #9a5e73;
       }
 
       * {
@@ -18,54 +23,89 @@
 
       body {
         margin: 0;
-        padding: 32px;
+        padding: 34px;
         background: var(--bg);
         color: var(--text);
         font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
       }
 
       .catalog {
-        width: 900px;
+        width: 2180px;
         margin: 0 auto;
-        padding: 32px;
+        padding: 34px;
         border: 3px solid var(--line);
         border-radius: 24px;
         background: var(--bg);
       }
 
       .header {
-        display: flex;
-        align-items: flex-start;
-        justify-content: space-between;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 460px 420px;
         gap: 18px;
-      }
-
-      .title {
-        min-width: 0;
-        flex: 1;
+        align-items: start;
       }
 
       .title-main {
-        font-size: 40px;
+        font-size: 44px;
         font-weight: 700;
-        line-height: 1.2;
+        line-height: 1.15;
       }
 
       .title-sub {
-        margin-top: 8px;
+        margin-top: 10px;
         font-size: 20px;
         color: var(--muted);
-        line-height: 1.4;
+        line-height: 1.45;
         overflow-wrap: anywhere;
       }
 
-      .page-pill {
-        flex-shrink: 0;
-        padding: 10px 16px;
+      .rank-panel {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 0;
+      }
+
+      .rank-card,
+      .stat-card {
+        min-width: 0;
         border: 2px solid var(--line);
-        border-radius: 999px;
-        font-size: 18px;
+        border-radius: 16px;
+        background: var(--bg);
+      }
+
+      .rank-card {
+        padding: 14px 16px;
+      }
+
+      .rank-card.compact {
+        min-height: 106px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+      }
+
+      .rank-label,
+      .stat-label,
+      .info-label {
+        color: var(--muted);
+        font-size: 15px;
+        line-height: 1.25;
+      }
+
+      .rank-row {
+        margin-top: 10px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-size: 24px;
         font-weight: 700;
+        line-height: 1.2;
+        white-space: nowrap;
+      }
+
+      .rank-separator {
+        color: var(--muted);
+        font-weight: 500;
       }
 
       .stats {
@@ -73,46 +113,40 @@
         padding-top: 24px;
         border-top: 2px solid var(--line);
         display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 14px;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 13px;
+        align-items: stretch;
       }
 
       .stat-card {
-        min-width: 0;
-        padding: 16px;
-        border: 2px solid var(--line);
-        border-radius: 18px;
-        background: var(--bg);
-      }
-
-      .stat-label {
-        font-size: 17px;
-        color: var(--muted);
-        white-space: nowrap;
+        padding: 15px 16px;
       }
 
       .stat-value {
-        margin-top: 9px;
-        font-size: 27px;
+        margin-top: 8px;
+        font-size: 25px;
         font-weight: 700;
         line-height: 1.15;
         overflow-wrap: anywhere;
       }
 
       .progress {
-        margin-top: 18px;
-        height: 24px;
+        margin-top: 14px;
+        height: 20px;
         border: 2px solid var(--line);
         border-radius: 999px;
         overflow: hidden;
-        background: var(--soft);
+        background: #ffffff;
       }
 
       .progress-fill {
         width: {{ stats.progress_percent }}%;
         height: 100%;
-        background: var(--accent);
-        border-right: 2px solid var(--line);
+        background: var(--line);
+      }
+
+      .progress-strip {
+        margin-top: 12px;
       }
 
       .grid {
@@ -120,90 +154,124 @@
         padding-top: 24px;
         border-top: 2px solid var(--line);
         display: grid;
-        grid-template-columns: repeat(5, minmax(0, 1fr));
-        gap: 14px;
+        grid-template-columns: repeat(15, minmax(0, 1fr));
+        gap: 12px;
       }
 
       .pig-card {
         position: relative;
         min-width: 0;
-        height: 154px;
-        padding: 12px 10px 10px;
+        aspect-ratio: 1 / 1;
+        padding: 8px 10px;
         border: 2px solid var(--line);
-        border-radius: 16px;
+        border-radius: 14px;
         background: var(--bg);
         display: grid;
-        grid-template-rows: 66px 26px 22px 18px;
+        grid-template-rows: 62px minmax(0, 30px) 18px;
         align-items: center;
         justify-items: center;
       }
 
-      .pig-card.max {
-        background: #fff9e6;
+      .pig-card.locked {
+        color: #8a8f96;
+        background: var(--soft);
+        border-color: #7f8790;
       }
 
-      .badge {
+      .new-icon {
         position: absolute;
-        top: 8px;
-        right: 8px;
-        min-width: 38px;
-        height: 21px;
-        padding: 2px 7px;
-        border: 2px solid var(--line);
-        border-radius: 999px;
-        background: var(--bg);
-        font-size: 11px;
-        font-weight: 700;
-        line-height: 13px;
-        text-align: center;
-      }
-
-      .badge.new {
-        background: #e7f5ff;
-      }
-
-      .badge.max {
-        background: #ffe8a3;
+        top: -8px;
+        right: -8px;
+        width: 66px;
+        height: auto;
+        z-index: 2;
       }
 
       .image-wrap {
-        width: 74px;
-        height: 66px;
+        width: 72px;
+        height: 62px;
         display: flex;
         align-items: center;
         justify-content: center;
       }
 
       .pig-image {
-        max-width: 74px;
-        max-height: 66px;
+        max-width: 72px;
+        max-height: 62px;
         object-fit: contain;
       }
 
-      .missing-image {
-        width: 54px;
-        height: 54px;
+      .missing-image,
+      .lock-mark {
+        width: 48px;
+        height: 48px;
         border: 2px solid var(--line);
         border-radius: 50%;
-        background: var(--soft);
         display: flex;
         align-items: center;
         justify-content: center;
+        background: #ffffff;
         font-size: 18px;
         font-weight: 700;
       }
 
+      .lock-mark {
+        border-color: #7f8790;
+        background: #eef0f2;
+        color: #6b7280;
+      }
+
       .pig-name {
         max-width: 100%;
+        min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
         font-size: 16px;
-        font-weight: 700;
-        line-height: 1.25;
+        font-weight: 600;
+        color: var(--text);
+        line-height: 1.2;
       }
 
-      .pig-level,
+      .pig-card.locked .pig-name {
+        font-weight: 500;
+        color: #777d84;
+      }
+
+      .level {
+        font-size: 14px;
+        line-height: 1.1;
+      }
+
+      .pig-name .level {
+        margin-left: 4px;
+      }
+
+      .level-0 {
+        color: var(--level-0);
+        font-weight: 500;
+      }
+
+      .level-low {
+        color: var(--level-low);
+        font-weight: 500;
+      }
+
+      .level-mid {
+        color: var(--level-mid);
+        font-weight: 600;
+      }
+
+      .level-high {
+        color: var(--level-high);
+        font-weight: 700;
+      }
+
+      .level-max {
+        color: var(--level-max);
+        font-weight: 800;
+      }
+
       .pig-copies {
         max-width: 100%;
         overflow: hidden;
@@ -211,36 +279,23 @@
         white-space: nowrap;
         font-size: 13px;
         color: var(--muted);
-        line-height: 1.25;
+        line-height: 1.2;
       }
 
-      .footer {
-        margin-top: 24px;
-        padding-top: 18px;
-        border-top: 2px solid var(--line);
-        display: grid;
-        grid-template-columns: 1.3fr 2fr;
-        gap: 14px;
-      }
-
-      .favorite,
-      .chips {
-        min-width: 0;
-        border: 2px solid var(--line);
-        border-radius: 16px;
-        padding: 14px;
+      .pig-card.locked .pig-copies {
+        color: #8a8f96;
       }
 
       .favorite {
         display: grid;
-        grid-template-columns: 54px minmax(0, 1fr);
-        gap: 12px;
+        grid-template-columns: 64px minmax(0, 1fr);
+        gap: 14px;
         align-items: center;
       }
 
       .favorite-image {
-        width: 54px;
-        height: 54px;
+        width: 64px;
+        height: 64px;
         border: 2px solid var(--line);
         border-radius: 14px;
         display: flex;
@@ -248,23 +303,18 @@
         justify-content: center;
         overflow: hidden;
         background: var(--soft);
+        font-weight: 700;
       }
 
       .favorite-image img {
-        max-width: 48px;
-        max-height: 48px;
+        max-width: 58px;
+        max-height: 58px;
         object-fit: contain;
       }
 
-      .favorite-label,
-      .chip-label {
-        font-size: 14px;
-        color: var(--muted);
-      }
-
       .favorite-name {
-        margin-top: 5px;
-        font-size: 20px;
+        margin-top: 6px;
+        font-size: 21px;
         font-weight: 700;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -277,39 +327,64 @@
         color: var(--muted);
       }
 
-      .chips {
+      .top-favorite {
         display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 10px;
+        grid-template-columns: 72px minmax(0, 1fr);
+        gap: 14px;
+        align-items: center;
+        min-height: 106px;
       }
 
-      .chip {
-        min-width: 0;
-        padding: 8px 10px;
-        border: 2px solid var(--line);
-        border-radius: 999px;
-        background: var(--bg);
-        text-align: center;
-        font-size: 15px;
-        line-height: 1.25;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+      .top-favorite .favorite-image {
+        width: 72px;
+        height: 72px;
       }
 
-      .chip b {
-        font-size: 17px;
+      .top-favorite .favorite-image img {
+        max-width: 66px;
+        max-height: 66px;
       }
     </style>
   </head>
   <body>
     <main class="catalog">
       <section class="header">
-        <div class="title">
-          <div class="title-main">小猪图鉴</div>
-          <div class="title-sub">{{ user_name }} 的已解锁小猪</div>
+        <div>
+          <div class="title-main">我的猪圈</div>
+          <div class="title-sub">{{ user_name }} 的全量小猪图鉴 · 按资源顺序固定展示</div>
         </div>
-        <div class="page-pill">第 {{ stats.page }} / {{ stats.pages }} 页</div>
+        <article class="rank-card top-favorite">
+          <div class="favorite-image">
+            {% if favorite.image %}
+            <img src="{{ favorite.image|e }}" alt="" />
+            {% else %}
+            <span>猪</span>
+            {% endif %}
+          </div>
+          <div>
+            <div class="rank-label">本命小猪</div>
+            <div class="favorite-name">
+              {{ favorite.name }} <span class="level {{ favorite.level_class }}">Lv.{{ favorite.level }}</span>
+            </div>
+            <div class="favorite-meta">累计 {{ favorite.copies }} 次</div>
+          </div>
+        </article>
+        <div class="rank-panel">
+          <article class="rank-card compact">
+            <div class="rank-label">猪猪排名</div>
+            <div class="rank-row">
+              {% if stats.has_group_rank %}
+              <span>群 {{ stats.group_rank }}</span>
+              {% endif %}
+              {% if stats.has_group_rank and stats.has_total_rank %}
+              <span class="rank-separator">/</span>
+              {% endif %}
+              {% if stats.has_total_rank %}
+              <span>总 {{ stats.total_rank }}</span>
+              {% endif %}
+            </div>
+          </article>
+        </div>
       </section>
 
       <section class="stats">
@@ -322,57 +397,57 @@
           <div class="stat-value">{{ stats.progress_percent }}%</div>
         </article>
         <article class="stat-card">
-          <div class="stat-label">最高等级</div>
-          <div class="stat-value">EX {{ stats.max_level }}</div>
+          <div class="stat-label">连续重复</div>
+          <div class="stat-value">{{ stats.duplicate_streak }} 次</div>
         </article>
         <article class="stat-card">
-          <div class="stat-label">满级小猪</div>
-          <div class="stat-value">{{ stats.maxed_count }} 只</div>
+          <div class="stat-label">连续打卡</div>
+          <div class="stat-value">{{ stats.checkin_streak }} 天</div>
+        </article>
+        <article class="stat-card">
+          <div class="stat-label">近 7 天被烤</div>
+          <div class="stat-value">{{ stats.roasted_7d }} 次</div>
+        </article>
+        <article class="stat-card">
+          <div class="stat-label">近 7 天新猪</div>
+          <div class="stat-value">{{ stats.recent_new_count }} 只</div>
         </article>
       </section>
-      <div class="progress"><div class="progress-fill"></div></div>
+      <section class="progress-strip">
+        <div class="progress"><div class="progress-fill"></div></div>
+      </section>
 
       <section class="grid">
         {% for card in cards %}
-        <article class="pig-card{% if card.badge == 'MAX' %} max{% endif %}">
-          {% if card.badge %}
-          <div class="badge {{ card.badge_class }}">{{ card.badge }}</div>
+        <article class="pig-card{{ card.card_class }}">
+          {% if card.is_new and new_badge_uri %}
+          <img class="new-icon" src="{{ new_badge_uri|e }}" />
           {% endif %}
           <div class="image-wrap">
-            {% if card.image %}
+            {% if card.locked %}
+            <div class="lock-mark">?</div>
+            {% elif card.image %}
             <img class="pig-image" src="{{ card.image|e }}" alt="{{ card.name|e }}" />
             {% else %}
             <div class="missing-image">猪</div>
             {% endif %}
           </div>
-          <div class="pig-name">{{ card.name }}</div>
-          <div class="pig-level">EX Lv.{{ card.level }}</div>
-          <div class="pig-copies">累计 {{ card.copies }} 次</div>
-        </article>
-        {% endfor %}
-      </section>
-
-      <section class="footer">
-        <article class="favorite">
-          <div class="favorite-image">
-            {% if favorite.image %}
-            <img src="{{ favorite.image|e }}" alt="" />
+          <div class="pig-name">
+            {% if card.locked %}
+            未解锁
             {% else %}
-            <span>猪</span>
+            {{ card.name }} <span class="level {{ card.level_class }}">Lv.{{ card.level }}</span>
             {% endif %}
           </div>
-          <div>
-            <div class="favorite-label">本命猪</div>
-            <div class="favorite-name">{{ favorite.name }}</div>
-            <div class="favorite-meta">EX Lv.{{ favorite.level }} · 累计 {{ favorite.copies }} 次</div>
+          <div class="pig-copies">
+            {% if card.locked %}
+            &nbsp;
+            {% else %}
+            累计 {{ card.copies }} 次
+            {% endif %}
           </div>
         </article>
-        <article class="chips">
-          <div class="chip"><span class="chip-label">近 7 天新猪</span> <b>{{ stats.recent_new_count }}</b> 只</div>
-          <div class="chip"><span class="chip-label">连续打卡</span> <b>{{ stats.checkin_streak }}</b> 天</div>
-          <div class="chip"><span class="chip-label">近 7 天被烤</span> <b>{{ stats.roasted_7d }}</b> 次</div>
-          <div class="chip"><span class="chip-label">下个里程碑</span> <b>{{ stats.next_milestone }}</b> 只</div>
-        </article>
+        {% endfor %}
       </section>
     </main>
   </body>

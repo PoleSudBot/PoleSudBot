@@ -1407,7 +1407,7 @@ def test_catalog_snapshot_reads_recent_rolls_and_roasted_count(monkeypatch, tmp_
     assert data_file.read_text("utf-8") == saved_before
 
 
-def test_catalog_payload_sorts_marks_badges_and_uses_missing_placeholder(
+def test_catalog_payload_uses_resource_order_locks_missing_and_marks_new(
     monkeypatch,
     tmp_path,
 ):
@@ -1415,6 +1415,7 @@ def test_catalog_payload_sorts_marks_badges_and_uses_missing_placeholder(
     module.pig_resource_manager.pig_list = [
         {"id": "new-pig", "name": "新猪"},
         {"id": "old-pig", "name": "老猪"},
+        {"id": "locked-pig", "name": "隐藏猪"},
         {"id": "repeat-pig", "name": "复读猪"},
         {"id": "max-pig", "name": "满级猪"},
     ]
@@ -1450,30 +1451,73 @@ def test_catalog_payload_sorts_marks_badges_and_uses_missing_placeholder(
             recent_rolls={"2026-04-22": "max-pig", "2026-04-21": "repeat-pig"},
             roasted_7d=3,
         ),
-        page=1,
+        group_rank=2,
+        total_rank=5,
     )
 
     assert [card["id"] for card in payload["cards"]] == [
-        "max-pig",
-        "repeat-pig",
-        "old-pig",
         "new-pig",
+        "old-pig",
+        "locked-pig",
+        "repeat-pig",
+        "max-pig",
     ]
-    assert payload["cards"][0]["badge"] == "MAX"
-    assert payload["cards"][-1]["badge"] == "NEW"
+    assert [card["locked"] for card in payload["cards"]] == [
+        False,
+        False,
+        True,
+        False,
+        False,
+    ]
+    assert payload["cards"][0]["is_new"] is True
+    assert payload["cards"][2]["name"] == "未解锁"
+    assert payload["cards"][2]["image"] == ""
+    assert payload["cards"][3]["level_class"] == "level-mid"
+    assert payload["cards"][4]["is_max"] is True
+    assert payload["cards"][4]["level_class"] == "level-max"
     assert all(card["image"] == "" for card in payload["cards"])
     assert payload["stats"]["unlocked"] == 4
-    assert payload["stats"]["total"] == 4
-    assert payload["stats"]["progress_percent"] == 100.0
-    assert payload["stats"]["max_level"] == 5
+    assert payload["stats"]["total"] == 5
+    assert payload["stats"]["progress_percent"] == 80.0
     assert payload["stats"]["maxed_count"] == 1
     assert payload["stats"]["recent_new_count"] == 3
     assert payload["stats"]["checkin_streak"] == 2
     assert payload["stats"]["roasted_7d"] == 3
+    assert payload["stats"]["group_rank"] == "#2"
+    assert payload["stats"]["total_rank"] == "#5"
     assert payload["favorite"]["name"] == "满级猪"
 
 
-def test_catalog_payload_clamps_page_and_paginates(monkeypatch, tmp_path):
+def test_catalog_payload_keeps_visible_unranked_cards(monkeypatch, tmp_path):
+    module = load_rollpig_catalog_renderer_module(monkeypatch, tmp_path)
+    module.pig_resource_manager.pig_list = [{"id": "pig", "name": "猪"}]
+    module.pig_resource_manager.pig_map = {"pig": {"id": "pig", "name": "猪"}}
+
+    payload = module._build_template_payload(
+        user_name="user",
+        snapshot=FakeCatalogSnapshot(
+            draw_state=FakeDrawState(
+                pig_ids=["pig"],
+                progress={
+                    "pig": FakePigProgress(
+                        copies=1,
+                        first_obtained_at="2026-04-01T00:00:00Z",
+                    )
+                },
+            ),
+            recent_rolls={},
+        ),
+        group_rank=0,
+        total_rank=0,
+    )
+
+    assert payload["stats"]["has_group_rank"] is True
+    assert payload["stats"]["has_total_rank"] is True
+    assert payload["stats"]["group_rank"] == "未上榜"
+    assert payload["stats"]["total_rank"] == "未上榜"
+
+
+def test_catalog_payload_renders_all_cards_without_pagination(monkeypatch, tmp_path):
     module = load_rollpig_catalog_renderer_module(monkeypatch, tmp_path)
     pigs = [
         {"id": f"pig-{index:02d}", "name": f"小猪{index:02d}"}
@@ -1481,30 +1525,37 @@ def test_catalog_payload_clamps_page_and_paginates(monkeypatch, tmp_path):
     ]
     module.pig_resource_manager.pig_list = pigs
     module.pig_resource_manager.pig_map = {str(item["id"]): item for item in pigs}
+    unlocked_pigs = pigs[:2]
     progress = {
         str(item["id"]): FakePigProgress(
             copies=1,
             first_obtained_at="2026-04-01T00:00:00Z",
         )
-        for item in pigs
+        for item in unlocked_pigs
     }
 
     payload = module._build_template_payload(
         user_name="user",
         snapshot=FakeCatalogSnapshot(
             draw_state=FakeDrawState(
-                pig_ids=[str(item["id"]) for item in pigs],
+                pig_ids=[str(item["id"]) for item in unlocked_pigs],
                 progress=progress,
             ),
             recent_rolls={},
         ),
-        page=99,
     )
 
-    assert payload["stats"]["page"] == 2
-    assert payload["stats"]["pages"] == 2
-    assert len(payload["cards"]) == 1
-    assert payload["cards"][0]["id"] == "pig-30"
+    assert len(payload["cards"]) == 31
+    assert [card["id"] for card in payload["cards"][:3]] == [
+        "pig-00",
+        "pig-01",
+        "pig-02",
+    ]
+    assert payload["cards"][0]["locked"] is False
+    assert payload["cards"][1]["locked"] is False
+    assert all(card["locked"] for card in payload["cards"][2:])
+    assert "page" not in payload["stats"]
+    assert "pages" not in payload["stats"]
 
 
 @pytest.mark.asyncio
@@ -1539,28 +1590,28 @@ async def test_catalog_render_cache_and_singleflight_split_by_state(
         nonlocal calls
         calls += 1
         await asyncio.sleep(0.01)
-        page = kwargs["templates"]["stats"]["page"]
-        return f"catalog-page-{page}".encode()
+        rank = kwargs["templates"]["stats"]["total_rank"]
+        return f"catalog-rank-{rank}".encode()
 
     monkeypatch.setattr(module, "template_to_pic", slow_template_to_pic)
 
     first, second = await asyncio.gather(
-        module.render_catalog_image(user_name="user", snapshot=snapshot, page=1),
-        module.render_catalog_image(user_name="user", snapshot=snapshot, page=1),
+        module.render_catalog_image(user_name="user", snapshot=snapshot, total_rank=1),
+        module.render_catalog_image(user_name="user", snapshot=snapshot, total_rank=1),
     )
     cached = await module.render_catalog_image(
         user_name="user",
         snapshot=snapshot,
-        page=1,
+        total_rank=1,
     )
-    other_page = await module.render_catalog_image(
+    other_rank = await module.render_catalog_image(
         user_name="user",
         snapshot=snapshot,
-        page=2,
+        total_rank=2,
     )
 
-    assert first == second == cached == b"catalog-page-1"
-    assert other_page == b"catalog-page-2"
+    assert first == second == cached == "catalog-rank-#1".encode()
+    assert other_rank == "catalog-rank-#2".encode()
     assert calls == 2
 
 

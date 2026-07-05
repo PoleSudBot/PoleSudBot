@@ -123,8 +123,8 @@ __plugin_meta__ = PluginMetadata(
     开启猪圈日报 / 关闭猪圈日报 - 开关当前群的猪圈日报推送
     
     📊 统计指令：
-    我的猪圈 / 我的小猪 - 查看解锁进度、EX 等级与猪王排行
-    小猪图鉴 / 猪猪图鉴 / 完整图鉴 [页码] - 生成图片版已解锁小猪图鉴
+    我的猪圈 / 我的小猪 / 小猪图鉴 / 猪猪图鉴 / 完整图鉴
+      - 查看猪圈进度、猪猪排名与全量小猪图鉴
     猪王争霸榜 / 猪猪榜 / 猪猪排行 / 小猪榜 / 小猪排行 [数量] - 查看当前群图鉴排行
     猪猪总榜 / 猪猪总排行 [数量] - 查看全局图鉴排行
     本周小猪 - 生成本周猪猪总结长图
@@ -135,7 +135,7 @@ __plugin_meta__ = PluginMetadata(
     config=Config,
     extra={
         "author": "Felis2026",
-        "version": "0.6.5",
+        "version": "0.6.6",
         "configs": [
             {
                 "module": MODULE_NAME,
@@ -2263,34 +2263,46 @@ async def _(bot: Bot, event: Event):
     await cmd_summary_off.finish(MessageSegment.reply(event.message_id) + "已关闭本群猪圈日报。")
 
 
-# 6. 我的猪圈
-cmd_sty = on_command("我的猪圈", aliases={"我的小猪"}, block=True)
+# 6. 我的猪圈 / 小猪图鉴
+cmd_sty = on_command(
+    "我的猪圈",
+    aliases={"我的小猪", "小猪图鉴", "猪猪图鉴", "完整图鉴"},
+    block=True,
+)
 
 @cmd_sty.handle()
 @guard_group_enabled(cmd_sty)
 @guard_store_errors(cmd_sty)
 async def _(bot: Bot, event: Event):
-    user_id = str(event.user_id)
-    draw_state = await store.get_draw_state(user_id)
-    total_pigs = len(PIG_LIST)
-    user_count = len(draw_state.pig_ids)
-
-    if total_pigs <= 0:
+    if not get_catalog_enabled():
+        await cmd_sty.finish(MessageSegment.reply(event.message_id) + "图片版小猪图鉴当前未启用。")
+        return
+    if get_storage_backend() != "local":
+        await cmd_sty.finish(MessageSegment.reply(event.message_id) + "图片版小猪图鉴当前仅支持本地账册。")
+        return
+    if not PIG_LIST:
         await cmd_sty.finish(MessageSegment.reply(event.message_id) + "猪图鉴为空，请先检查资源文件。")
         return
 
-    percent = int((user_count / total_pigs) * 100)
+    user_id = str(event.user_id)
+    snapshot = await store.get_catalog_snapshot(user_id, days=14)
+    if not snapshot.draw_state.pig_ids:
+        await cmd_sty.finish(
+            MessageSegment.reply(event.message_id) + "你的猪圈空空如也！发送「今日小猪」开始收集。"
+        )
+        return
+
     group_rank: int | None = None
     total_rank: int | None = None
     if isinstance(event, GroupMessageEvent):
         rankings = await build_group_pig_rankings(bot, str(event.group_id))
         group_rank = get_group_rank_position(rankings, user_id)
-    if get_storage_backend() == "local":
-        global_rankings = await build_global_pig_rankings(
-            bot,
-            context_group_id=str(event.group_id) if isinstance(event, GroupMessageEvent) else "",
-        )
-        total_rank = get_group_rank_position(global_rankings, user_id)
+    global_rankings = await build_global_pig_rankings(
+        bot,
+        context_group_id=str(event.group_id) if isinstance(event, GroupMessageEvent) else "",
+    )
+    total_rank = get_group_rank_position(global_rankings, user_id)
+
     ranking_note = build_my_pigsty_ranking_note(
         group_rank=group_rank,
         total_rank=total_rank,
@@ -2299,7 +2311,9 @@ async def _(bot: Bot, event: Event):
     )
 
     owner_name = sanitize_display_name(get_event_user_name(event), user_id)
-    avatar_uri = await get_avatar_uri(user_id)
+    total_pigs = len(PIG_LIST)
+    user_count = len(snapshot.draw_state.pig_ids)
+    percent = int((user_count / total_pigs) * 100)
     fallback_text = build_my_pigsty_text(
         owner_name=owner_name,
         user_count=user_count,
@@ -2307,76 +2321,26 @@ async def _(bot: Bot, event: Event):
         percent=percent,
         ranking_note=ranking_note,
     )
-    stats = [
-        {"label": "已收集", "value": f"{user_count} / {total_pigs}"},
-        {"label": "收藏率", "value": f"{percent}%"},
-    ]
-    stats.extend(build_pigsty_growth_stats(draw_state))
-    notes = build_pigsty_growth_notes(draw_state)
-    if ranking_note:
-        notes.insert(0, ranking_note)
-    footer = build_my_pigsty_footer(user_count)
-    await send_rendered_panel(
-        cmd_sty,
-        event,
-        fallback_text=fallback_text,
-        title="我的猪圈",
-        subtitle=owner_name,
-        hero_avatar=avatar_uri,
-        show_hero_avatar=True,
-        stats=stats,
-        notes=notes,
-        footer=footer,
-    )
-
-
-# 6.5 图片版小猪图鉴
-cmd_catalog = on_command("小猪图鉴", aliases={"猪猪图鉴", "完整图鉴"}, block=True)
-
-
-@cmd_catalog.handle()
-@guard_group_enabled(cmd_catalog)
-@guard_store_errors(cmd_catalog)
-async def _(event: Event, args: Message = CommandArg()):
-    if not get_catalog_enabled():
-        await cmd_catalog.finish(MessageSegment.reply(event.message_id) + "图片版小猪图鉴当前未启用。")
-        return
-    if get_storage_backend() != "local":
-        await cmd_catalog.finish(MessageSegment.reply(event.message_id) + "图片版小猪图鉴当前仅支持本地账册。")
-        return
-
-    page = parse_catalog_page(args.extract_plain_text())
-    if page is None:
-        await cmd_catalog.finish(MessageSegment.reply(event.message_id) + "页码需要是正整数，例如：小猪图鉴 2")
-        return
-    if not PIG_LIST:
-        await cmd_catalog.finish(MessageSegment.reply(event.message_id) + "猪图鉴为空，请先检查资源文件。")
-        return
-
-    user_id = str(event.user_id)
-    snapshot = await store.get_catalog_snapshot(user_id, days=14)
-    if not snapshot.draw_state.pig_ids:
-        await cmd_catalog.finish(
-            MessageSegment.reply(event.message_id) + "你的猪圈空空如也！发送「今日小猪」开始收集。"
-        )
-        return
-
-    owner_name = sanitize_display_name(get_event_user_name(event), user_id)
     try:
         pic = await render_catalog_image(
             user_name=owner_name,
             snapshot=snapshot,
-            page=page,
+            group_rank=(
+                group_rank
+                if group_rank is not None
+                else (0 if isinstance(event, GroupMessageEvent) else None)
+            ),
+            total_rank=total_rank if total_rank is not None else 0,
         )
     except Exception as error:
-        logger.error(f"小猪图鉴渲染失败: user={user_id} page={page} error={error}")
-        await cmd_catalog.finish(MessageSegment.reply(event.message_id) + "小猪图鉴生成失败，请稍后再试。")
+        logger.error(f"小猪图鉴渲染失败: user={user_id} error={error}")
+        await cmd_sty.finish(MessageSegment.reply(event.message_id) + fallback_text)
         return
 
-    await cmd_catalog.finish(MessageSegment.reply(event.message_id) + MessageSegment.image(pic))
+    await cmd_sty.finish(MessageSegment.reply(event.message_id) + MessageSegment.image(pic))
 
 
-# 6.6 猪王争霸榜
+# 6.5 猪王争霸榜
 cmd_pig_king = on_command(
     "猪王争霸榜",
     aliases={"猪猪榜", "猪猪排行", "小猪榜", "小猪排行"},
