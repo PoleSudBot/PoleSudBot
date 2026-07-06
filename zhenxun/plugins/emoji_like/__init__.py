@@ -21,12 +21,12 @@ __plugin_meta__ = PluginMetadata(
 - `贴 ㊗️ 128077 ❤️`
 - `贴✨`
 
-仅支持单码位 emoji；组合 emoji 或协议端不支持时会静默跳过。
+仅支持单码位 emoji；一次最多贴 5 个，超出部分、组合 emoji 或协议端不支持时会静默跳过。
     """.strip(),
     supported_adapters={"~onebot.v11"},
     extra={
         "author": "k1yuyu",
-        "version": "0.1.1",
+        "version": "0.1.2",
         "menu_type": "一些工具",
         "commands": [
             {

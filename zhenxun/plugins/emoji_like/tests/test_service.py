@@ -80,6 +80,43 @@ async def test_apply_emoji_like_calls_napcat_api_for_legacy_emojis():
 
 
 @pytest.mark.asyncio
+async def test_apply_emoji_like_caps_api_calls_at_five():
+    bot = FakeBot()
+
+    results = await apply_emoji_likes(bot, 12345, "㊗️❤️©️®️☀️👍")
+
+    assert [result.emoji_id for result in results] == [
+        "12951",
+        "10084",
+        "169",
+        "174",
+        "9728",
+    ]
+    assert bot.calls == [
+        (
+            "set_msg_emoji_like",
+            {"message_id": 12345, "emoji_id": "12951"},
+        ),
+        (
+            "set_msg_emoji_like",
+            {"message_id": 12345, "emoji_id": "10084"},
+        ),
+        (
+            "set_msg_emoji_like",
+            {"message_id": 12345, "emoji_id": "169"},
+        ),
+        (
+            "set_msg_emoji_like",
+            {"message_id": 12345, "emoji_id": "174"},
+        ),
+        (
+            "set_msg_emoji_like",
+            {"message_id": 12345, "emoji_id": "9728"},
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_apply_emoji_like_supports_prefixed_numeric_id():
     bot = FakeBot()
 

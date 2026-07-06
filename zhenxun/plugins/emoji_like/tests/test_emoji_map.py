@@ -100,6 +100,18 @@ def test_extract_bare_multiple_legacy_emoji_queries():
     assert [result.emoji_id for result in results] == ["169", "174"]
 
 
+def test_extract_bare_emoji_queries_caps_at_five():
+    results = extract_emoji_queries("㊗️❤️©️®️☀️👍")
+
+    assert [result.emoji_id for result in results] == [
+        "12951",
+        "10084",
+        "169",
+        "174",
+        "9728",
+    ]
+
+
 def test_extract_prefixed_emoji_query():
     results = extract_emoji_queries("贴㊗️")
 
@@ -122,6 +134,18 @@ def test_extract_mixed_prefixed_emoji_and_numeric_id():
     results = extract_emoji_queries("贴 ㊗️ 128077 ❤️")
 
     assert [result.emoji_id for result in results] == ["12951", "128077", "10084"]
+
+
+def test_extract_prefixed_mixed_queries_caps_at_five():
+    results = extract_emoji_queries("贴 128077 10084 12951 ©️ ®️ ☀️")
+
+    assert [result.emoji_id for result in results] == [
+        "128077",
+        "10084",
+        "12951",
+        "169",
+        "174",
+    ]
 
 
 def test_extract_unsupported_query_returns_none():

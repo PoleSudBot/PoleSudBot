@@ -5,6 +5,7 @@ import unicodedata
 
 VARIATION_SELECTOR_16 = "\ufe0f"
 COMMAND_PREFIX = "贴"
+MAX_EMOJI_LIKE_COUNT = 5
 MAX_UINT32 = 0xFFFFFFFF
 ZERO_WIDTH_JOINER = "\u200d"
 KEYCAP_COMBINING_MARK = "\u20e3"
@@ -123,7 +124,7 @@ def extract_emoji_queries(raw_text: str) -> list[EmojiLookupResult]:
         return []
 
     if not text.startswith(COMMAND_PREFIX):
-        return lookup_emoji_ids(text)
+        return lookup_emoji_ids(text)[:MAX_EMOJI_LIKE_COUNT]
 
     results: list[EmojiLookupResult] = []
     for token in text.removeprefix(COMMAND_PREFIX).strip().split():
@@ -131,4 +132,5 @@ def extract_emoji_queries(raw_text: str) -> list[EmojiLookupResult]:
             results.append(result)
         else:
             results.extend(lookup_emoji_ids(token))
-    return results
+    # 限制单条消息触发的协议调用次数，避免长串 emoji 一次性刷出过多 API 请求。
+    return results[:MAX_EMOJI_LIKE_COUNT]
