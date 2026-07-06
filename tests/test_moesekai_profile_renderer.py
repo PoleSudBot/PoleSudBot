@@ -180,6 +180,9 @@ async def test_build_render_payload_prefers_leader_character_for_theme_and_foote
     async def fake_load_announcement() -> None:
         return None
 
+    async def fake_prefetch_profile_static_assets(*_args, **_kwargs) -> None:
+        return None
+
     monkeypatch.setattr(
         profile_renderer.profile_provider,
         "get_raw_profile",
@@ -212,6 +215,11 @@ async def test_build_render_payload_prefers_leader_character_for_theme_and_foote
         profile_renderer,
         "_load_announcement_html",
         fake_load_announcement,
+    )
+    monkeypatch.setattr(
+        profile_renderer,
+        "_prefetch_profile_static_assets",
+        fake_prefetch_profile_static_assets,
     )
 
     payload = await profile_renderer._build_render_payload("jp", "123")

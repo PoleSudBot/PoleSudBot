@@ -1,26 +1,21 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path, PurePosixPath
 import re
-import time
 from typing import Any
 
-import httpx
+from zhenxun.services.sekai_resource.profile_static import (
+    ProfileStaticAssetProvider,
+)
+from zhenxun.services.sekai_resource.profile_static import (
+    profile_static_provider as profile_static_asset_provider,
+)
 
-from zhenxun.services.sekai_resource.config import get_settings as get_resource_settings
-from zhenxun.utils.exception import AllURIsFailedError
-
-from ..adapters.runtime import AsyncHttpx, logger
+from ..adapters.runtime import AsyncHttpx
 from ..config import get_settings
-from ..constants import MODULE_NAME, PROFILE_STATIC_ASSET_DIR, SERVER_SET, STATE_DIR
-from ..storage import JsonStateStore, PathBinaryFileStore
+from ..constants import SERVER_SET
 
 _PROFILE_API_PLACEHOLDER_RE = re.compile(r"(?i)%7buser_id%7d")
 _PROFILE_DIFF_ORDER = ("easy", "normal", "hard", "expert", "master", "append")
-_PROFILE_STATIC_MISS_STORE = JsonStateStore(
-    STATE_DIR / "profile_static_miss_cache.json"
-)
 
 
 class ProfileRenderError(RuntimeError):
@@ -463,175 +458,16 @@ class ProfileProcessor:
         }
 
 
-class ProfileStaticAssetProvider:
-    def __init__(
-        self,
-        store: PathBinaryFileStore | None = None,
-        miss_store: JsonStateStore | None = None,
-    ) -> None:
-        self._store = store or PathBinaryFileStore(PROFILE_STATIC_ASSET_DIR)
-        self._miss_store = miss_store or _PROFILE_STATIC_MISS_STORE
-        self._miss_state_cache: dict[str, float] | None = None
-
-    @staticmethod
-    def _normalize_relative_path(relative_path: str) -> str:
-        normalized = PurePosixPath(str(relative_path).strip("/"))
-        if not normalized.parts:
-            raise ValueError("relative_path 不能为空")
-        return normalized.as_posix()
-
-    @staticmethod
-    def _build_url(base_url: str, relative_path: str) -> str:
-        return f"{base_url.rstrip('/')}/{relative_path.lstrip('/')}"
-
-    def _get_local_path(self, relative_path: str) -> Path | None:
-        path = self._store.resolve_path(self._normalize_relative_path(relative_path))
-        return path if path.is_file() else None
-
-    @staticmethod
-    def _normalize_miss_state(
-        payload: Any,
-        *,
-        now: float,
-    ) -> tuple[dict[str, float], bool]:
-        if not isinstance(payload, dict):
-            return {}, False
-        changed = False
-        result: dict[str, float] = {}
-        for url, expire_at in payload.items():
-            try:
-                expire_ts = float(expire_at)
-            except (TypeError, ValueError):
-                changed = True
-                continue
-            if expire_ts <= now:
-                changed = True
-                continue
-            result[str(url)] = expire_ts
-        return result, changed
-
-    def _load_miss_state(self) -> dict[str, float]:
-        now = time.time()
-        if self._miss_state_cache is None:
-            payload = self._miss_store.load({})
-            normalized, changed = self._normalize_miss_state(payload, now=now)
-            self._miss_state_cache = normalized
-            if changed:
-                self._miss_store.save(normalized)
-            return normalized
-
-        expired = [
-            url for url, expire_at in self._miss_state_cache.items() if expire_at <= now
-        ]
-        if not expired:
-            return self._miss_state_cache
-        for url in expired:
-            self._miss_state_cache.pop(url, None)
-        self._miss_store.save(self._miss_state_cache)
-        return self._miss_state_cache
-
-    def _record_missing(self, url: str) -> None:
-        payload = self._load_miss_state()
-        payload[url] = (
-            time.time() + get_resource_settings().asset_miss_cache_ttl_seconds
-        )
-        self._miss_state_cache = payload
-        self._miss_store.save(payload)
-
-    def _clear_missing(self, url: str) -> None:
-        payload = self._load_miss_state()
-        if url in payload:
-            payload.pop(url, None)
-            self._miss_state_cache = payload
-            self._miss_store.save(payload)
-
-    async def ensure_local_path(
-        self,
-        relative_candidates: list[str],
-        *,
-        timeout: float = 20,
-    ) -> Path | None:
-        for relative_path in relative_candidates:
-            normalized = self._normalize_relative_path(relative_path)
-            if local_path := self._get_local_path(normalized):
-                return local_path
-
-            for base_url in get_settings().profile_static_asset_bases:
-                candidate_url = self._build_url(base_url, normalized)
-                if candidate_url in self._load_miss_state():
-                    continue
-                try:
-                    content = await AsyncHttpx.get_content(
-                        candidate_url,
-                        timeout=timeout,
-                    )
-                except AllURIsFailedError as exc:
-                    last_error = exc.exceptions[-1] if exc.exceptions else None
-                    if (
-                        isinstance(last_error, httpx.HTTPStatusError)
-                        and last_error.response.status_code == 404
-                    ):
-                        self._record_missing(candidate_url)
-                    continue
-                except httpx.HTTPStatusError as exc:
-                    if exc.response.status_code == 404:
-                        self._record_missing(candidate_url)
-                    continue
-                except httpx.RequestError:
-                    continue
-                if not content:
-                    continue
-
-                self._clear_missing(candidate_url)
-                return self._store.save(normalized, content)
-        return None
-
-    async def get_json(self, relative_path: str) -> Any:
-        path = await self.ensure_local_path([relative_path])
-        if path is None:
-            return {}
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.warning(
-                f"MoeSekai profile 静态 JSON 解析失败: {relative_path}",
-                MODULE_NAME,
-                e=exc,
-            )
-            return {}
-
-    async def get_text(self, relative_path: str) -> str | None:
-        path = await self.ensure_local_path([relative_path])
-        if path is None:
-            return None
-        try:
-            return path.read_text(encoding="utf-8")
-        except OSError as exc:
-            logger.warning(
-                f"MoeSekai profile 静态文本读取失败: {relative_path}",
-                MODULE_NAME,
-                e=exc,
-            )
-            return None
-
-    async def get_costume_icon(self, card_id: int) -> Path | None:
-        return await self.ensure_local_path([f"costume_icons/{card_id}.png"])
-
-    async def get_base_chibi(self, base_name: str) -> Path | None:
-        return await self.ensure_local_path(
-            [
-                f"base_chibis/{base_name}.png",
-                f"base_chibis/{base_name}.webp",
-            ]
-        )
-
-    async def get_honor_asset_svg(self, filename: str) -> str | None:
-        return await self.get_text(f"honor_assets/{filename}")
-
-    async def get_credits(self) -> dict[str, Any]:
-        payload = await self.get_json("credits.json")
-        return payload if isinstance(payload, dict) else {}
-
-
 profile_provider = ProfileProvider()
-profile_static_asset_provider = ProfileStaticAssetProvider()
+
+__all__ = [
+    "ProfileApiError",
+    "ProfileAssetError",
+    "ProfileProcessingError",
+    "ProfileProcessor",
+    "ProfileProvider",
+    "ProfileRenderError",
+    "ProfileStaticAssetProvider",
+    "profile_provider",
+    "profile_static_asset_provider",
+]

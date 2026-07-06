@@ -42,6 +42,13 @@ from zhenxun.services.sekai_resource.asset_fetcher import asset_fetcher
 import zhenxun.services.sekai_resource.assets as service_assets_module
 from zhenxun.services.sekai_resource.assets import AssetFetchRequest, AssetProvider
 from zhenxun.services.sekai_resource.master_data import MasterDataProvider
+import zhenxun.services.sekai_resource.profile_static as profile_static_module
+from zhenxun.services.sekai_resource.storage import (
+    JsonStateStore as ResourceJsonStateStore,
+)
+from zhenxun.services.sekai_resource.storage import (
+    PathBinaryFileStore as ResourcePathBinaryFileStore,
+)
 from zhenxun.utils.exception import AllURIsFailedError
 
 
@@ -1093,14 +1100,20 @@ async def test_profile_static_asset_provider_uses_source_fallback_and_local_cach
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ):
+    miss_store = ResourceJsonStateStore(tmp_path / "profile_static_miss.json")
     provider = ProfileStaticAssetProvider(
-        store=PathBinaryFileStore(tmp_path / "profile_static"),
-        miss_store=JsonStateStore(tmp_path / "profile_static_miss.json"),
+        store=ResourcePathBinaryFileStore(tmp_path / "assets"),
+        manifest_store=ResourceJsonStateStore(tmp_path / "asset_index.json"),
+        miss_store=miss_store,
+        legacy_store=ResourcePathBinaryFileStore(tmp_path / "legacy_empty"),
     )
     calls: list[str] = []
 
     class _FakeSettings:
         asset_miss_cache_ttl_seconds = 3600
+        asset_batch_fetch_concurrency = 2
+        asset_source_fetch_concurrency = 1
+        asset_source_fetch_all = False
         profile_static_asset_bases: ClassVar[list[str]] = [
             "https://a.example.com",
             "https://b.example.com",
@@ -1116,11 +1129,13 @@ async def test_profile_static_asset_provider_uses_source_fallback_and_local_cach
         return b'{"1001":{"author":"tester","source_type":"original"}}'
 
     monkeypatch.setattr(
-        "zhenxun.plugins.moesekai.providers.profile.get_settings",
+        profile_static_module,
+        "get_settings",
         lambda: _FakeSettings(),
     )
     monkeypatch.setattr(
-        "zhenxun.plugins.moesekai.providers.profile.AsyncHttpx.get_content",
+        profile_static_module.asset_fetcher,
+        "fetch_content",
         fake_get_content,
     )
 
@@ -1140,20 +1155,24 @@ def test_profile_static_asset_provider_uses_resource_miss_ttl(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ):
+    miss_store = ResourceJsonStateStore(tmp_path / "profile_static_miss.json")
     provider = ProfileStaticAssetProvider(
-        store=PathBinaryFileStore(tmp_path / "profile_static"),
-        miss_store=JsonStateStore(tmp_path / "profile_static_miss.json"),
+        store=ResourcePathBinaryFileStore(tmp_path / "assets"),
+        manifest_store=ResourceJsonStateStore(tmp_path / "asset_index.json"),
+        miss_store=miss_store,
+        legacy_store=ResourcePathBinaryFileStore(tmp_path / "legacy_empty"),
     )
 
     monkeypatch.setattr(time, "time", lambda: 1000.0)
     monkeypatch.setattr(
-        "zhenxun.plugins.moesekai.providers.profile.get_resource_settings",
+        service_asset_cache_module,
+        "get_settings",
         lambda: SimpleNamespace(asset_miss_cache_ttl_seconds=42),
     )
 
     provider._record_missing("https://a.example.com/missing.png")
 
-    assert provider._miss_store.load({}) == {
+    assert miss_store.load({}) == {
         "https://a.example.com/missing.png": 1042.0
     }
 
@@ -1164,13 +1183,18 @@ async def test_profile_static_asset_provider_unwraps_all_uris_failed_404(
     tmp_path,
 ):
     provider = ProfileStaticAssetProvider(
-        store=PathBinaryFileStore(tmp_path / "profile_static"),
-        miss_store=JsonStateStore(tmp_path / "profile_static_miss.json"),
+        store=ResourcePathBinaryFileStore(tmp_path / "assets"),
+        manifest_store=ResourceJsonStateStore(tmp_path / "asset_index.json"),
+        miss_store=ResourceJsonStateStore(tmp_path / "profile_static_miss.json"),
+        legacy_store=ResourcePathBinaryFileStore(tmp_path / "legacy_empty"),
     )
     calls: list[str] = []
 
     class _FakeSettings:
         asset_miss_cache_ttl_seconds = 3600
+        asset_batch_fetch_concurrency = 2
+        asset_source_fetch_concurrency = 1
+        asset_source_fetch_all = False
         profile_static_asset_bases: ClassVar[list[str]] = [
             "https://a.example.com",
             "https://b.example.com",
@@ -1188,11 +1212,13 @@ async def test_profile_static_asset_provider_unwraps_all_uris_failed_404(
         return b'{"1001":{"author":"tester","source_type":"original"}}'
 
     monkeypatch.setattr(
-        "zhenxun.plugins.moesekai.providers.profile.get_settings",
+        profile_static_module,
+        "get_settings",
         lambda: _FakeSettings(),
     )
     monkeypatch.setattr(
-        "zhenxun.plugins.moesekai.providers.profile.AsyncHttpx.get_content",
+        profile_static_module.asset_fetcher,
+        "fetch_content",
         fake_get_content,
     )
 
@@ -1203,3 +1229,66 @@ async def test_profile_static_asset_provider_unwraps_all_uris_failed_404(
         "https://a.example.com/credits.json",
         "https://b.example.com/credits.json",
     ]
+
+
+@pytest.mark.asyncio
+async def test_profile_static_asset_provider_migrates_legacy_cache(tmp_path):
+    legacy_store = ResourcePathBinaryFileStore(tmp_path / "legacy_profile_static")
+    legacy_store.save("credits.json", b'{"1001":{"author":"legacy"}}')
+    provider = ProfileStaticAssetProvider(
+        store=ResourcePathBinaryFileStore(tmp_path / "assets"),
+        manifest_store=ResourceJsonStateStore(tmp_path / "asset_index.json"),
+        miss_store=ResourceJsonStateStore(tmp_path / "profile_static_miss.json"),
+        legacy_store=legacy_store,
+    )
+
+    path = await provider.ensure_local_path(["credits.json"])
+
+    assert path is not None
+    assert path.read_bytes() == b'{"1001":{"author":"legacy"}}'
+    assert "profile_static" in path.parts
+
+
+@pytest.mark.asyncio
+async def test_profile_static_asset_provider_prefetches_many_with_batch_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    provider = ProfileStaticAssetProvider(
+        store=ResourcePathBinaryFileStore(tmp_path / "assets"),
+        manifest_store=ResourceJsonStateStore(tmp_path / "asset_index.json"),
+        miss_store=ResourceJsonStateStore(tmp_path / "profile_static_miss.json"),
+        legacy_store=ResourcePathBinaryFileStore(tmp_path / "legacy_empty"),
+    )
+    active = 0
+    max_active = 0
+
+    class _FakeSettings:
+        asset_miss_cache_ttl_seconds = 3600
+        asset_batch_fetch_concurrency = 2
+        asset_source_fetch_concurrency = 1
+        asset_source_fetch_all = False
+        profile_static_asset_bases: ClassVar[list[str]] = ["https://a.example.com"]
+
+    async def fake_fetch_content(url: str, *, timeout: float | None = None, **_kwargs):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return url.encode()
+
+    monkeypatch.setattr(profile_static_module, "get_settings", lambda: _FakeSettings())
+    monkeypatch.setattr(
+        profile_static_module.asset_fetcher,
+        "fetch_content",
+        fake_fetch_content,
+    )
+
+    paths = await provider.ensure_many_local_paths(
+        [["a.png"], ["b.png"], ["c.png"]],
+        concurrency=2,
+    )
+
+    assert all(path is not None for path in paths)
+    assert max_active == 2

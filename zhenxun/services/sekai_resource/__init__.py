@@ -35,6 +35,7 @@ from .master_data import (
     master_data_provider,
     master_data_service,
 )
+from .profile_static import ProfileStaticAssetProvider, profile_static_provider
 
 __all__ = [
     "MASTER_DATASET_KEYS",
@@ -52,6 +53,7 @@ __all__ = [
     "MasterDataProvider",
     "MasterDataService",
     "MasterSourceConfig",
+    "ProfileStaticAssetProvider",
     "RegionUpdateResult",
     "SekaiResourceSettings",
     "SourceRevisionInfo",
@@ -67,6 +69,7 @@ __all__ = [
     "normalize_alias",
     "normalize_difficulty",
     "parse_constants_csv",
+    "profile_static_provider",
     "refresh_settings",
     "register_configs",
     "sync_music_aliases",

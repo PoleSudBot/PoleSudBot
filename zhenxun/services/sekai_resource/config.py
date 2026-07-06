@@ -76,6 +76,10 @@ DEFAULT_B30_CONSTANTS_URL = (
     "1B8tX9VL2PcSJKyuHFVd2UT_8kYlY4ZdwHwg9MfWOPug/"
     "gviz/tq?tqx=out:csv&gid=1855810409"
 )
+DEFAULT_PROFILE_STATIC_ASSET_BASES = [
+    "https://raw.githubusercontent.com/Exmeaning/Exmeaning-Image-hosting/main",
+    "https://cdn.jsdelivr.net/gh/Exmeaning/Exmeaning-Image-hosting@main",
+]
 LEGACY_MOESEKAI_B30_CONSTANTS_URL = (
     "https://moe.exmeaning.com/data/pjskb30/merged_chart.csv"
 )
@@ -312,6 +316,9 @@ class SekaiResourceSettings(BaseModel):
     asset_source_order: list[str] = Field(
         default_factory=lambda: DEFAULT_ASSET_SOURCE_ORDER.copy()
     )
+    profile_static_asset_bases: list[str] = Field(
+        default_factory=lambda: DEFAULT_PROFILE_STATIC_ASSET_BASES.copy()
+    )
     audio_format_priority: list[str] = Field(default_factory=lambda: ["mp3", "flac"])
     b30_constants_url: str = DEFAULT_B30_CONSTANTS_URL
     b30_constants_timeout_seconds: float = 10.0
@@ -320,6 +327,7 @@ class SekaiResourceSettings(BaseModel):
     @field_validator(
         "master_source_order",
         "asset_source_order",
+        "profile_static_asset_bases",
         "audio_format_priority",
     )
     @classmethod
@@ -449,6 +457,14 @@ REGISTER_CONFIGS = [
         value=list(REGISTER_DEFAULTS.asset_source_order),
         default_value=list(REGISTER_DEFAULTS.asset_source_order),
         help="SekaiResource 静态资源源站优先级",
+        type=list[str],
+    ),
+    RegisterConfig(
+        module=MODULE_NAME,
+        key="SEKAI_RESOURCE_PROFILE_STATIC_ASSET_BASES",
+        value=list(REGISTER_DEFAULTS.profile_static_asset_bases),
+        default_value=list(REGISTER_DEFAULTS.profile_static_asset_bases),
+        help="SekaiResource 个人档案静态资源源站列表",
         type=list[str],
     ),
     RegisterConfig(
@@ -623,6 +639,12 @@ def get_settings() -> SekaiResourceSettings:
             defaults.asset_source_order,
             legacy_key="MOESEKAI_ASSET_SOURCE_ORDER",
         ),
+        "profile_static_asset_bases": _get_compat_config(
+            "SEKAI_RESOURCE_PROFILE_STATIC_ASSET_BASES",
+            defaults.profile_static_asset_bases,
+            legacy_key="MOESEKAI_PROFILE_STATIC_ASSET_BASES",
+            legacy_default=defaults.profile_static_asset_bases,
+        ),
         "audio_format_priority": _get_compat_config(
             "SEKAI_RESOURCE_AUDIO_FORMAT_PRIORITY",
             defaults.audio_format_priority,
@@ -669,6 +691,7 @@ __all__ = [
     "DEFAULT_B30_CONSTANTS_URL",
     "DEFAULT_MASTER_SOURCES",
     "DEFAULT_MASTER_SOURCE_ORDER",
+    "DEFAULT_PROFILE_STATIC_ASSET_BASES",
     "MASTER_DATASET_KEYS",
     "REGISTER_CONFIGS",
     "MasterSourceConfig",

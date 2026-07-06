@@ -16,6 +16,7 @@ from zhenxun.services.sekai_resource import (
     asset_provider,
     b30_constants_provider,
     master_data_provider,
+    profile_static_provider,
     sync_music_aliases,
 )
 ```
@@ -112,6 +113,9 @@ changed_results = await master_data_provider.probe_next_updates()
 | 表情 | `get_stamp_image(server, assetbundle)` |
 | 表情本地路径 | `get_stamp_image_local_path(server, assetbundle)` |
 | 角色 cutout | `get_character_image(server, assetbundle)` |
+| 个人档案静态素材 | `profile_static_provider.ensure_local_path([...])` |
+| 批量个人档案静态素材 | `profile_static_provider.ensure_many_local_paths([...])` |
+| 个人档案 credits | `profile_static_provider.get_credits()` |
 
 资产来源按 `SEKAI_RESOURCE_ASSET_SOURCE_ORDER` 配置尝试，默认顺序为 `uni`、`haruki-main`、`haruki-jp-dedicated`、`legacy-viewer`。`haruki-jp-dedicated` 只会用于日服。
 
@@ -123,6 +127,7 @@ changed_results = await master_data_provider.probe_next_updates()
 - 404 会进入负缓存，避免短时间内重复请求确定不存在的资源。
 - 所有资源读取都可能返回 `None`；调用方不要假设图片或音频一定存在。
 - 需要给渲染器传文件路径时优先用 `*_local_path`；没有本地路径时再考虑 bytes/base64 或占位图。
+- 个人档案小人、服装 icon、honor SVG、credits.json 统一落在 `profile_static_provider`，不要再从 MoeSekai 插件内直接访问 GitHub raw 或维护私有下载循环。
 
 卡牌特训辅助：
 - `asset_provider.has_after_training(card)` 判断卡牌是否存在特训后资源。
@@ -196,6 +201,7 @@ changed = await b30_constants_provider.refresh_if_needed(force=False)
 | `SEKAI_RESOURCE_ASSET_BATCH_FETCH_CONCURRENCY` | 批量静态资源下载并发数，默认 `12` |
 | `SEKAI_RESOURCE_ASSET_SOURCE_FETCH_CONCURRENCY` | 单个静态资源多源竞速并发数，默认 `4` |
 | `SEKAI_RESOURCE_ASSET_SOURCE_FETCH_ALL` | 是否让单个静态资源同时请求全部候选源，默认 `false` |
+| `SEKAI_RESOURCE_PROFILE_STATIC_ASSET_BASES` | 个人档案静态素材源站列表 |
 | `SEKAI_RESOURCE_AUDIO_FORMAT_PRIORITY` | 短音频格式优先级，默认 `mp3`、`flac` |
 | `SEKAI_RESOURCE_ASSET_MISS_CACHE_TTL_SECONDS` | 404 负缓存 TTL，0 表示不缓存缺失状态 |
 | `SEKAI_RESOURCE_B30_CONSTANTS_URL` | B30 社区定数 CSV 地址 |
@@ -205,6 +211,7 @@ changed = await b30_constants_provider.refresh_if_needed(force=False)
 兼容规则：
 - `get_settings()` 会先读 `SEKAI_RESOURCE_*` 新配置。
 - 对仍保留旧键兼容的配置项，当新配置只是注册默认值、用户没有显式配置时，会回退读取旧 `MOESEKAI_*` 配置，避免升级后遮蔽历史配置。
+- `SEKAI_RESOURCE_PROFILE_STATIC_ASSET_BASES` 会兼容读取旧 `MOESEKAI_PROFILE_STATIC_ASSET_BASES`，升级时不需要立刻改旧配置。
 - 新增并发配置没有历史 `MOESEKAI_*` 键；需要调优时直接配置对应的 `SEKAI_RESOURCE_*` 键。
 - 修改配置后如需在同一进程内立即生效，调用 `refresh_settings()` 清理 settings 缓存。
 
@@ -216,6 +223,7 @@ changed = await b30_constants_provider.refresh_if_needed(force=False)
 | `data/sekai_resource/state/master_state.json` | 已落地主数据状态 |
 | `data/sekai_resource/state/master_probe_state.json` | 数据源探测状态 |
 | `data/sekai_resource/assets/` | 静态资源镜像缓存 |
+| `data/sekai_resource/assets/profile_static/` | 个人档案小人、服装 icon、honor SVG、credits 等静态素材 |
 | `data/sekai_resource/state/asset_cache_index.json` | 资产缓存索引 |
 | `data/sekai_resource/state/asset_miss_cache.json` | 资源缺失负缓存 |
 | `data/sekai_resource/state/music_alias_snapshot.json` | 歌曲别名快照 |

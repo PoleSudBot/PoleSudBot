@@ -158,6 +158,66 @@ def _is_high_rarity(rarity: str) -> bool:
     return "4" in text or "birthday" in text
 
 
+def _build_chibi_candidate_group(member: dict[str, Any]) -> list[str]:
+    card_id = int(member.get("cardId") or 0)
+    character_id = int(member.get("characterId") or 0)
+    support_unit = str(member.get("supportUnit") or "")
+    rarity = str(member.get("rarity") or "")
+    relative_fallbacks: list[str] = []
+
+    if _is_high_rarity(rarity) and card_id > 0:
+        relative_fallbacks.append(f"costume_icons/{card_id}.png")
+
+    base_name = _base_chibi_name(character_id, support_unit)
+    relative_fallbacks.extend(
+        [
+            f"base_chibis/{base_name}.png",
+            f"base_chibis/{base_name}.webp",
+        ]
+    )
+    if base_name != str(character_id) and character_id > 0:
+        relative_fallbacks.extend(
+            [
+                f"base_chibis/{character_id}.png",
+                f"base_chibis/{character_id}.webp",
+            ]
+        )
+    relative_fallbacks.extend(["base_chibis/1.webp", "base_chibis/1.png"])
+    return relative_fallbacks
+
+
+def _profile_static_group_key(candidates: list[str]) -> tuple[str, ...]:
+    return tuple(str(item).strip("/") for item in candidates if str(item).strip("/"))
+
+
+async def _prefetch_profile_static_assets(
+    members: list[Any],
+    honors: list[Any],
+) -> None:
+    groups: list[list[str]] = [["credits.json"]]
+    for member in members:
+        if isinstance(member, dict):
+            groups.append(_build_chibi_candidate_group(member))
+    for honor in honors:
+        if not isinstance(honor, dict):
+            continue
+        rarity = str(honor.get("rarity") or "low").strip() or "low"
+        for filename in (_HONOR_DECO_MAP.get(rarity), _HONOR_MIDDLE_MAP.get(rarity)):
+            if filename:
+                groups.append([f"honor_assets/{filename}"])
+
+    # 相同候选组只预取一次；实际渲染阶段仍保留缺图兜底和报错语义。
+    deduped_groups: list[list[str]] = []
+    seen: set[tuple[str, ...]] = set()
+    for group in groups:
+        key = _profile_static_group_key(group)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped_groups.append(group)
+    await profile_static_asset_provider.ensure_many_local_paths(deduped_groups)
+
+
 def _normalize_star_view(rarity: str) -> tuple[int, bool]:
     text = str(rarity or "").lower()
     if "birthday" in text:
@@ -256,33 +316,8 @@ async def _ensure_card_thumbnail_uri(server: str, member: dict[str, Any]) -> str
 
 async def _ensure_chibi_uri(member: dict[str, Any]) -> str:
     card_id = int(member.get("cardId") or 0)
-    character_id = int(member.get("characterId") or 0)
-    support_unit = str(member.get("supportUnit") or "")
-    rarity = str(member.get("rarity") or "")
-    relative_fallbacks = []
-
-    if _is_high_rarity(rarity) and card_id > 0:
-        if local_path := await profile_static_asset_provider.get_costume_icon(card_id):
-            return local_path.absolute().as_uri()
-
-    base_name = _base_chibi_name(character_id, support_unit)
-    relative_fallbacks.extend(
-        [
-            f"base_chibis/{base_name}.png",
-            f"base_chibis/{base_name}.webp",
-        ]
-    )
-    if base_name != str(character_id) and character_id > 0:
-        relative_fallbacks.extend(
-            [
-                f"base_chibis/{character_id}.png",
-                f"base_chibis/{character_id}.webp",
-            ]
-        )
-    relative_fallbacks.extend(["base_chibis/1.webp", "base_chibis/1.png"])
-
     local_path = await profile_static_asset_provider.ensure_local_path(
-        relative_fallbacks
+        _build_chibi_candidate_group(member)
     )
     if local_path is None:
         raise ProfileAssetError(f"小人资源缺失: {card_id}")
@@ -420,10 +455,11 @@ async def _build_render_payload(server: str, game_id: str) -> dict[str, Any]:
     theme_color = _theme_color(theme_character_id)
     theme_dark = _shade_color(theme_color, -15)
 
-    credits_data, announcement_html = await asyncio.gather(
-        profile_static_asset_provider.get_credits(),
+    _, announcement_html = await asyncio.gather(
+        _prefetch_profile_static_assets(members, processed.get("honors", [])),
         _load_announcement_html(),
     )
+    credits_data = await profile_static_asset_provider.get_credits()
 
     avatar_uri = await _ensure_card_thumbnail_uri(server, leader)
 
