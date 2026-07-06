@@ -3,11 +3,11 @@ from typing import ClassVar
 
 from tortoise import fields
 from tortoise.exceptions import IntegrityError
+from tortoise.transactions import in_transaction
 
-from zhenxun.models.goods_info import GoodsInfo
 from zhenxun.services.db_context import Model
 from zhenxun.utils.enum import CacheType, GoldHandle
-from zhenxun.utils.exception import GoodsNotFound, InsufficientGold
+from zhenxun.utils.exception import InsufficientGold
 
 from .user_gold_log import UserGoldLog
 
@@ -24,7 +24,7 @@ class UserConsole(Model):
     sign = fields.ReverseRelation["SignUser"]  # type: ignore
     """好感度"""
     props: dict[str, int] = fields.JSONField(default={})  # type: ignore
-    """道具"""
+    """历史道具数据，运行时不再读写"""
     platform = fields.CharField(255, null=True, description="平台")
     """平台"""
     create_time = fields.DatetimeField(auto_now_add=True, description="创建时间")
@@ -141,75 +141,66 @@ class UserConsole(Model):
         )
 
     @classmethod
-    async def add_props(
-        cls, user_id: str, goods_uuid: str, num: int = 1, platform: str | None = None
+    async def transfer_gold(
+        cls,
+        from_user_id: str,
+        to_user_id: str,
+        gold: int,
+        platform: str | None = None,
     ):
-        """添加道具
+        """转账金币
 
         参数:
-            user_id: 用户id
-            goods_uuid: 道具uuid
-            num: 道具数量.
+            from_user_id: 转出用户id
+            to_user_id: 转入用户id
+            gold: 金币
             platform: 平台.
+
+        异常:
+            ValueError: 金币数量非法或转账双方相同
+            InsufficientGold: 金币不足
         """
-        user, _ = await cls.get_or_create_user(user_id=user_id, platform=platform)
-        if goods_uuid not in user.props:
-            user.props[goods_uuid] = 0
-        user.props[goods_uuid] += num
-        await user.save(update_fields=["props"])
+        if gold <= 0:
+            raise ValueError("转账金额必须为正整数")
+        if from_user_id == to_user_id:
+            raise ValueError("不能给自己转账")
 
-    @classmethod
-    async def add_props_by_name(
-        cls, user_id: str, name: str, num: int = 1, platform: str | None = None
-    ):
-        """根据名称添加道具
+        # 先确保双方用户存在，再在同一个事务内锁定两行，避免一边扣款成功另一边入账失败。
+        await cls.get_or_create_user(from_user_id, platform)
+        await cls.get_or_create_user(to_user_id, platform)
+        async with in_transaction() as connection:
+            # 固定锁顺序，降低两个用户互相转账时数据库死锁的概率。
+            locked_users = {}
+            for user_id in sorted((from_user_id, to_user_id)):
+                locked_users[user_id] = (
+                    await cls.filter(user_id=user_id)
+                    .using_db(connection)
+                    .select_for_update()
+                    .get()
+                )
+            from_user = locked_users[from_user_id]
+            to_user = locked_users[to_user_id]
+            if from_user.gold < gold:
+                raise InsufficientGold()
 
-        参数:
-            user_id: 用户id
-            name: 道具名称
-            num: 道具数量.
-            platform: 平台.
-        """
-        if goods := await GoodsInfo.get_or_none(goods_name=name):
-            return await cls.add_props(user_id, goods.uuid, num, platform)
-        raise GoodsNotFound("未找到商品...")
-
-    @classmethod
-    async def use_props(
-        cls, user_id: str, goods_uuid: str, num: int = 1, platform: str | None = None
-    ):
-        """添加道具
-
-        参数:
-            user_id: 用户id
-            goods_uuid: 道具uuid
-            num: 道具数量.
-            platform: 平台.
-        """
-        user, _ = await cls.get_or_create_user(user_id=user_id, platform=platform)
-
-        if goods_uuid not in user.props or user.props[goods_uuid] < num:
-            raise GoodsNotFound("未找到商品或道具数量不足...")
-        user.props[goods_uuid] -= num
-        if user.props[goods_uuid] <= 0:
-            del user.props[goods_uuid]
-        await user.save(update_fields=["props"])
-
-    @classmethod
-    async def use_props_by_name(
-        cls, user_id: str, name: str, num: int = 1, platform: str | None = None
-    ):
-        """根据名称添加道具
-
-        参数:
-            user_id: 用户id
-            name: 道具名称
-            num: 道具数量.
-            platform: 平台.
-        """
-        if goods := await GoodsInfo.get_or_none(goods_name=name):
-            return await cls.use_props(user_id, goods.uuid, num, platform)
-        raise GoodsNotFound("未找到商品...")
+            from_user.gold -= gold
+            to_user.gold += gold
+            await from_user.save(using_db=connection, update_fields=["gold"])
+            await to_user.save(using_db=connection, update_fields=["gold"])
+            await UserGoldLog.create(
+                using_db=connection,
+                user_id=from_user_id,
+                gold=gold,
+                handle=GoldHandle.TRANSFER_OUT,
+                source=f"wallet:{to_user_id}",
+            )
+            await UserGoldLog.create(
+                using_db=connection,
+                user_id=to_user_id,
+                gold=gold,
+                handle=GoldHandle.TRANSFER_IN,
+                source=f"wallet:{from_user_id}",
+            )
 
     @classmethod
     async def _run_script(cls):

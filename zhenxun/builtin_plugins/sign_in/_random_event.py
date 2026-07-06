@@ -12,7 +12,7 @@ def random_event(impression: float) -> int:
     返回:
         额外金币
     """
-    # 过渡期先停掉签到道具掉落，只保留额外金币，让旧库存自然消耗。
+    # 签到随机事件只产出金币，避免重新引入已下线的道具库存系统。
     gold = random.randint(
         1, random.randint(1, int(1 if impression < 1 else impression))
     )

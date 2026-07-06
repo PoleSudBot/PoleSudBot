@@ -10,6 +10,7 @@ from nonebot_plugin_alconna import (
     store_true,
 )
 from nonebot_plugin_apscheduler import scheduler
+from nonebot_plugin_uninfo import Uninfo
 
 from zhenxun.configs.utils import (
     Command,
@@ -22,7 +23,6 @@ from zhenxun.utils.depends import UserName
 from zhenxun.utils.message import MessageUtils
 
 from ._data_source import SignManage
-from .goods_register import Uninfo
 from .utils import clear_sign_data_pic
 
 __plugin_meta__ = PluginMetadata(

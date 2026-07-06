@@ -1,6 +1,5 @@
 from datetime import datetime
 from pathlib import Path
-import uuid
 
 import nonebot
 from nonebot.adapters import Bot
@@ -9,16 +8,13 @@ from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 from tortoise import Tortoise
 from tortoise.exceptions import IntegrityError, OperationalError
-import ujson as json
 
 from zhenxun.models.bot_connect_log import BotConnectLog
 from zhenxun.models.bot_console import BotConsole
-from zhenxun.models.goods_info import GoodsInfo
 from zhenxun.models.group_member_info import GroupInfoUser
 from zhenxun.models.sign_user import SignUser
 from zhenxun.models.user_console import UserConsole
 from zhenxun.services.log import logger
-from zhenxun.utils.decorator.shop import shop_register
 from zhenxun.utils.manager.priority_manager import PriorityLifecycle
 from zhenxun.utils.manager.zhenxun_repo_manager import ZhenxunRepoManager
 from zhenxun.utils.platform import PlatformUtils
@@ -137,11 +133,6 @@ async def _():
     except Exception as e:
         logger.error(f"资源检查或更新失败: {e}", "资源检查")
     """签到与用户的数据迁移"""
-    if goods_list := await GoodsInfo.filter(uuid__isnull=True).all():
-        for goods in goods_list:
-            goods.uuid = uuid.uuid1()  # type: ignore
-        await GoodsInfo.bulk_update(goods_list, ["uuid"], 10)
-    await shop_register.load_register()
     if (
         not await UserConsole.annotate().count()
         and not await SignUser.annotate().count()
@@ -156,10 +147,6 @@ async def _():
             db = Tortoise.get_connection("default")
             old_sign_list = await db.execute_query_dict(SIGN_SQL)
             old_bag_list = await db.execute_query_dict(BAG_SQL)
-            goods = {
-                g["goods_name"]: g["uuid"]
-                for g in await GoodsInfo.annotate().values("goods_name", "uuid")
-            }
             create_list = []
             sign_id_list = []
             max_uid = max(user2uid.values()) + 1 if user2uid else 0
@@ -169,18 +156,12 @@ async def _():
                     b for b in old_bag_list if b["user_id"] == old_sign["user_id"]
                 ]:
                     old_bag = old_bag[0]
-                    property = json.loads(old_bag["property"])
-                    props = {}
-                    if property:
-                        for name, num in property.items():
-                            if name in goods:
-                                props[goods[name]] = num
+                    # 旧背包表只继续迁移金币余额；道具库存系统已经下线，避免继续绑定旧商品表。
                     create_list.append(
                         UserConsole(
                             user_id=old_sign["user_id"],
                             platform="qq",
                             uid=user2uid.get(old_sign["user_id"]) or max_uid,
-                            props=props,
                             gold=old_bag["gold"],
                         )
                     )

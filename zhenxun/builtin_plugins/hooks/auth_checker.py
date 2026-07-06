@@ -107,7 +107,7 @@ CACHE_SWEEP_INTERVAL = 1.0
 CPU_COUNT = os.cpu_count() or 4
 COMMAND_MATCHER_CONCURRENCY = max(8, min(48, CPU_COUNT * 4))
 HEAVY_COMMAND_CONCURRENCY = max(1, min(3, CPU_COUNT // 2))
-HEAVY_COMMAND_MODULES = frozenset({"shop", "sign_in"})
+HEAVY_COMMAND_MODULES = frozenset({"sign_in", "wallet"})
 
 # 全局信号量与计数器
 HOOKS_ACTIVE_COUNT = 0

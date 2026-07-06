@@ -7,7 +7,6 @@ import pytest
 
 nonebot.init()
 
-from zhenxun.builtin_plugins.shop._data_source import SHOP_TRANSITION_NOTICE, ShopManage
 from zhenxun.builtin_plugins.sign_in import _data_source as sign_data_source
 from zhenxun.builtin_plugins.sign_in._random_event import random_event
 from zhenxun.models.sign_user import SignUser
@@ -42,7 +41,7 @@ def test_random_event_only_returns_gold(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
-async def test_handle_sign_in_adds_gold_once_and_never_adds_props(
+async def test_handle_sign_in_adds_gold_once(
     monkeypatch: pytest.MonkeyPatch,
 ):
     calls: dict[str, object] = {}
@@ -61,9 +60,6 @@ async def test_handle_sign_in_adds_gold_once_and_never_adds_props(
         user_id: str, gold: int, handle: str, platform: str | None = None
     ):
         calls["add_gold"] = (user_id, gold, handle, platform)
-
-    async def fail_add_props(*_args, **_kwargs):
-        raise AssertionError("过渡期签到不应再发放道具")
 
     async def fake_get_card(
         _user,
@@ -88,12 +84,6 @@ async def test_handle_sign_in_adds_gold_once_and_never_adds_props(
     monkeypatch.setattr(sign_data_source.PlatformUtils, "get_platform", lambda _s: "qq")
     monkeypatch.setattr(sign_data_source.SignUser, "sign", fake_sign)
     monkeypatch.setattr(sign_data_source.UserConsole, "add_gold", fake_add_gold)
-    monkeypatch.setattr(
-        sign_data_source.UserConsole,
-        "add_props_by_name",
-        fail_add_props,
-        raising=False,
-    )
     monkeypatch.setattr(sign_data_source, "get_card", fake_get_card)
     monkeypatch.setattr(sign_data_source, "random_event", lambda _impression: 7)
     monkeypatch.setattr(sign_data_source.random, "randint", lambda _start, _end: 10)
@@ -215,12 +205,3 @@ async def test_sign_user_sign_resets_temporary_probabilities(
         "bot_id": "bot_3",
         "platform": "qq",
     }
-
-
-@pytest.mark.asyncio
-async def test_shop_buy_prop_returns_transition_notice():
-    assert ShopManage.get_transition_notice() == SHOP_TRANSITION_NOTICE
-    assert (
-        await ShopManage.buy_prop("user_4", "神秘药水", 2, "qq")
-        == SHOP_TRANSITION_NOTICE
-    )

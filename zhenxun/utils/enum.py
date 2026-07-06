@@ -97,6 +97,10 @@ class GoldHandle(StrEnum):
     """获取"""
     PLUGIN = "PLUGIN"
     """插件花费"""
+    TRANSFER_OUT = "TRANSFER_OUT"
+    """转出"""
+    TRANSFER_IN = "TRANSFER_IN"
+    """转入"""
 
 
 class PropHandle(StrEnum):
