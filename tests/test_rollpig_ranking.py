@@ -408,11 +408,14 @@ def load_rollpig_catalog_renderer_module(
     fake_nonebot_log = types.ModuleType("nonebot.log")
     fake_nonebot_log.logger = FakeLogger()
 
-    async def fake_template_to_pic(*_args, **_kwargs):
+    async def fake_render_template(*_args, **_kwargs):
         return b"catalog"
 
-    fake_htmlrender = types.ModuleType("nonebot_plugin_htmlrender")
-    fake_htmlrender.template_to_pic = fake_template_to_pic
+    fake_zhenxun = types.ModuleType("zhenxun")
+    fake_zhenxun.__path__ = []
+    fake_ui = types.ModuleType("zhenxun.ui")
+    fake_ui.render_template = fake_render_template
+    fake_zhenxun.ui = fake_ui
 
     fake_localstore = types.ModuleType("nonebot_plugin_localstore")
     fake_localstore.get_plugin_cache_dir = lambda: tmp_path / "cache"
@@ -445,7 +448,8 @@ def load_rollpig_catalog_renderer_module(
 
     for name, module in {
         "nonebot.log": fake_nonebot_log,
-        "nonebot_plugin_htmlrender": fake_htmlrender,
+        "zhenxun": fake_zhenxun,
+        "zhenxun.ui": fake_ui,
         "nonebot_plugin_localstore": fake_localstore,
         package_name: fake_package,
         f"{package_name}.config": fake_config,
@@ -688,6 +692,7 @@ def load_rollpig_plugin_module(
 
     fake_catalog_renderer = types.ModuleType(f"{package_name}.catalog_renderer")
     fake_catalog_renderer.render_catalog_image = fake_render_catalog_image
+    fake_catalog_renderer.get_harmony_font_faces = lambda: []
 
     fake_render_budget = types.ModuleType(f"{package_name}.render_budget")
     fake_render_budget.html_render_budget = lambda _label: FakeAsyncContext()
@@ -1255,6 +1260,18 @@ def test_sort_falls_back_to_user_id_when_progress_is_missing():
     assert [entry.user_id for entry in rankings] == ["10001", "20002"]
 
 
+def test_rank_limit_defaults_to_ten(monkeypatch):
+    module = load_rollpig_plugin_module(
+        monkeypatch,
+        fake_store=object(),
+        fake_data_manager=object(),
+        group_members=[],
+    )
+
+    # 未传数量时使用统一默认值，保证群榜和总榜共享的解析入口不会退回旧的 5 人。
+    assert module.parse_rank_limit("") == 10
+
+
 @pytest.mark.asyncio
 async def test_group_rankings_only_query_member_progress(monkeypatch):
     class FakeManager:
@@ -1586,14 +1603,14 @@ async def test_catalog_render_cache_and_singleflight_split_by_state(
     )
     calls = 0
 
-    async def slow_template_to_pic(*_args, **kwargs):
+    async def slow_render_template(_template_path, templates, **_kwargs):
         nonlocal calls
         calls += 1
         await asyncio.sleep(0.01)
-        rank = kwargs["templates"]["stats"]["total_rank"]
+        rank = templates["stats"]["total_rank"]
         return f"catalog-rank-{rank}".encode()
 
-    monkeypatch.setattr(module, "template_to_pic", slow_template_to_pic)
+    monkeypatch.setattr(sys.modules["zhenxun.ui"], "render_template", slow_render_template)
 
     first, second = await asyncio.gather(
         module.render_catalog_image(user_name="user", snapshot=snapshot, total_rank=1),
