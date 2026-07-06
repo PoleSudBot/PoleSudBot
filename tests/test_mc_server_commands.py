@@ -37,6 +37,20 @@ def test_mc_commands_accept_common_short_aliases():
     assert mctoggle_command().parse("mctg all on").matched
 
 
+def test_mc_commands_reject_compact_alias_prefixes():
+    assert not mcwhitelist_command().parse("mcwy怎么样了").matched
+    assert not mcsend_command().parse("mcs大家好").matched
+    assert not mctime_command().parse("mct今日").matched
+    assert not mcrcon_command().parse("mcrlist").matched
+    assert not mcchart_command().parse("mcc3d").matched
+    assert not mcinfo_command().parse("mcinfox").matched
+
+    assert mcsend_command().parse("mcs 大家好").matched
+    assert mctime_command().parse("mct 今日").matched
+    assert mcrcon_command().parse("mcr list").matched
+    assert mcchart_command().parse("mcc 3d").matched
+
+
 def test_mcbind_keeps_empty_and_address_modes():
     empty = mcbind_command().parse("mcbind")
     address = mcbind_command().parse("mcbind mc.example.com:25565")
@@ -134,7 +148,6 @@ def test_mctime_target_parser_supports_player_name():
     assert resolve_mctime_query(parsed.query("parts"), self_qq_id="10000") == (
         MctimeQuery("player", "Letemps")
     )
-
 
 
 def test_mctime_target_parser_supports_relative_range_after_player_name():

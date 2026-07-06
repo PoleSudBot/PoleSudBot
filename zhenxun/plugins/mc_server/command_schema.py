@@ -20,13 +20,14 @@ class MctimeQuery:
 
 
 def _command_meta() -> CommandMeta:
-    return CommandMeta(compact=True, strict=False)
+    # MC 短别名较多，禁止紧凑匹配，避免普通聊天里的 mc... 文本被误当指令。
+    return CommandMeta(compact=False, strict=False)
 
 
 def _with_shortcuts(command: Alconna, *aliases: str) -> Alconna:
     # 单测直接调用 Alconna.parse，不经过 NoneBot matcher，所以 schema 也注册快捷命令。
     for alias in aliases:
-        command.shortcut(alias, command=command.command)
+        command.shortcut(alias, command=command.command, compact=False)
     return command
 
 
