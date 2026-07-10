@@ -132,7 +132,10 @@ class ApiDataSource:
             nickname=user.user_name,
             remark="",
             is_ban=await BanConsole.is_ban(user_id),
-            chat_count=await ChatHistory.filter(user_id=user_id).count(),
+            chat_count=await ChatHistory.filter(
+                user_id=user_id,
+                direction="in",
+            ).count(),
             call_count=await Statistics.filter(user_id=user_id).count(),
             like_plugin=like_plugin,
         )
@@ -264,7 +267,10 @@ class ApiDataSource:
             name=group.group_name,
             member_count=group.member_count,
             max_member_count=group.max_member_count,
-            chat_count=await ChatHistory.filter(group_id=group_id).count(),
+            chat_count=await ChatHistory.filter(
+                group_id=group_id,
+                direction="in",
+            ).count(),
             call_count=await Statistics.filter(group_id=group_id).count(),
             like_plugin=like_plugin,
             level=group.level,

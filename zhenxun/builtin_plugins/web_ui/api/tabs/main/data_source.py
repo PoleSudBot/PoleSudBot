@@ -107,6 +107,7 @@ class ApiDataSource:
         # 今日累计接收消息
         select_bot.received_messages = await ChatHistory.filter(
             bot_id=select_bot.self_id,
+            direction="in",
             create_time__gte=now - timedelta(hours=now.hour),
         ).count()
         # 群聊数量

@@ -44,7 +44,10 @@ async def _():
             for group in group_list:
                 try:
                     last_message = (
-                        await ChatHistory.filter(group_id=group.group_id)
+                        await ChatHistory.filter(
+                            group_id=group.group_id,
+                            direction="in",
+                        )
                         .annotate()
                         .order_by("-create_time")
                         .first()

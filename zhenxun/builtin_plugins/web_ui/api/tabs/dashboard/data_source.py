@@ -83,6 +83,7 @@ class ApiDataSource:
         ).count()
         bot_info.received_messages = await ChatHistory.filter(
             bot_id=bot_info.self_id,
+            direction="in",
             create_time__gte=now - timedelta(hours=now.hour, minutes=now.minute),
         ).count()
         bot_info.connect_time = bot_live.get(bot.self_id) or 0
@@ -114,7 +115,7 @@ class ApiDataSource:
             QueryChatCallCount: 数据内容
         """
         now = datetime.now()
-        query = ChatHistory
+        query = ChatHistory.filter(direction="in")
         if bot_id:
             query = query.filter(bot_id=bot_id)
         chat_all_count = await query.annotate().count()
@@ -148,7 +149,7 @@ class ApiDataSource:
             AllChatAndCallCount: 数据内容
         """
         now = datetime.now()
-        query = ChatHistory
+        query = ChatHistory.filter(direction="in")
         if bot_id:
             query = query.filter(bot_id=bot_id)
         chat_week_count = await query.filter(

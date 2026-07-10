@@ -10,6 +10,7 @@ from nonebot_plugin_alconna.matcher import AlconnaMatcher
 
 from zhenxun.configs.config import Config
 from zhenxun.models.bot_message_store import BotMessageStore
+from zhenxun.services.chat_history import create_outgoing_record
 from zhenxun.services.log import logger
 from zhenxun.utils.auto_withdraw import record_triggered_bot_message
 from zhenxun.utils.enum import BotSentType
@@ -146,8 +147,46 @@ def _resolve_manual_withdraw_user_id(
         return str(user_id) if user_id is not None else None
     if user_id is not None:
         return str(user_id)
-    if api == "send_group_msg":
+    if api == "send_group_msg" or (
+        api == "send_msg" and data.get("message_type") == "group"
+    ):
         return source_context.source_user_id if source_context else None
+    return None
+
+
+def _normalize_bot_message_record(
+    api: str, data: dict[str, Any], source_context: SendSourceContext | None
+) -> tuple[str | None, str | None, str, Message | str] | None:
+    """把普通发送 API 归一成消息账本所需字段，forward API 本轮不入库。"""
+    message: Message | str = data.get("message", "")
+    if api == "send_group_msg":
+        group_id = data.get("group_id")
+        return (
+            source_context.source_user_id if source_context else None,
+            str(group_id) if group_id is not None else None,
+            "group",
+            message,
+        )
+    if api == "send_private_msg":
+        user_id = data.get("user_id")
+        return (
+            str(user_id) if user_id is not None else None,
+            None,
+            "private",
+            message,
+        )
+    if api == "send_msg":
+        user_id = data.get("user_id")
+        group_id = data.get("group_id")
+        message_type = str(data.get("message_type") or "")
+        if message_type == "group" and user_id is None and source_context:
+            user_id = source_context.source_user_id
+        return (
+            str(user_id) if user_id is not None else None,
+            str(group_id) if group_id is not None else None,
+            message_type,
+            message,
+        )
     return None
 
 
@@ -268,6 +307,31 @@ def replace_message(message: Message) -> str:
     return result
 
 
+async def _record_outgoing_chat_history(
+    bot: Bot,
+    *,
+    user_id: str | None,
+    group_id: str | None,
+    message_type: str,
+    message: Message | str,
+    result: Any,
+) -> None:
+    """独立记录结构化历史，任何失败都不反向影响消息发送或旧审计。"""
+    if not Config.get_config("chat_history", "FLAG"):
+        return
+    try:
+        await create_outgoing_record(
+            bot,
+            user_id=user_id,
+            group_id=group_id,
+            message_type=message_type,
+            message=message,
+            result=result,
+        )
+    except Exception as e:
+        logger.warning("记录ChatHistory出站消息失败", "chat_history", e=e)
+
+
 @Bot.on_called_api
 async def handle_api_result(
     bot: Bot, exception: Exception | None, api: str, data: dict[str, Any], result: Any
@@ -277,9 +341,6 @@ async def handle_api_result(
     source_context = _resolve_source_context()
     message_id = await _record_triggered_message(bot, result, source_context)
     user_id = _resolve_manual_withdraw_user_id(api, data, source_context)
-    group_id = data.get("group_id")
-    message: Message = data.get("message", "")
-    message_type = data.get("message_type")
     try:
         if user_id and message_id:
             MessageManager.add(str(user_id), str(message_id))
@@ -290,15 +351,17 @@ async def handle_api_result(
         logger.warning(
             f"收集消息id发生错误...data: {data}, result: {result}", LOG_COMMAND, e=e
         )
-    if api != "send_msg":
-        return
     if not Config.get_config("hook", "RECORD_BOT_SENT_MESSAGES"):
         return
+    record = _normalize_bot_message_record(api, data, source_context)
+    if record is None:
+        return
+    store_user_id, store_group_id, message_type, message = record
     try:
         await BotMessageStore.create(
             bot_id=bot.self_id,
-            user_id=user_id,
-            group_id=group_id,
+            user_id=store_user_id,
+            group_id=store_group_id,
             sent_type=BotSentType.GROUP
             if message_type == "group"
             else BotSentType.PRIVATE,
@@ -316,6 +379,15 @@ async def handle_api_result(
             LOG_COMMAND,
             e=e,
         )
+    # 两个账本顺序执行但故障隔离，旧审计失败仍会尝试写入ChatHistory。
+    await _record_outgoing_chat_history(
+        bot,
+        user_id=store_user_id,
+        group_id=store_group_id,
+        message_type=message_type,
+        message=message,
+        result=result,
+    )
 
 
 _patch_runtime_context()

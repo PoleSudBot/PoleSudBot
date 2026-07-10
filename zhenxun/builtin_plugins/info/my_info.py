@@ -137,6 +137,7 @@ async def get_activity_history(
         await ChatHistory.filter(
             user_id=user_id,
             group_id=group_id,
+            direction="in",
             create_time__gte=filter_start,
             create_time__lt=today_start,
         )
@@ -200,7 +201,11 @@ async def get_user_info(
     relation = lik2relation.get(str(sign_level), "未知")
     remaining_impression = max(0.0, next_impression - impression)
 
-    chat_count = await ChatHistory.filter(user_id=user_id, group_id=group_id).count()
+    chat_count = await ChatHistory.filter(
+        user_id=user_id,
+        group_id=group_id,
+        direction="in",
+    ).count()
     stat_count = await Statistics.filter(user_id=user_id, group_id=group_id).count()
 
     uid = f"{user.uid}".rjust(12, "0")
