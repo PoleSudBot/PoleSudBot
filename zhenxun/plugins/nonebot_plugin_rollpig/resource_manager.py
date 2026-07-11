@@ -18,7 +18,10 @@ import nonebot_plugin_localstore as localstore
 from PIL import Image, UnidentifiedImageError
 
 from .config import (
+    get_official_gif_resource_enabled,
+    get_official_gif_resource_manifest_url,
     get_private_resource_manifest_url,
+    get_private_resource_manifests,
     get_private_resource_token,
     get_proxy,
     get_resource_manifest_url,
@@ -42,9 +45,11 @@ PRIVATE_RESOURCE_DIR = CACHE_ROOT / "private_active"
 PRIVATE_IMAGE_DIR = PRIVATE_RESOURCE_DIR / "images"
 PRIVATE_PREVIOUS_RESOURCE_DIR = CACHE_ROOT / "private_previous"
 PRIVATE_STATE_FILE = CACHE_ROOT / "private_state.json"
+PRIVATE_OVERLAY_ROOT = CACHE_ROOT / "private_overlays"
 
 PIG_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
-ALLOWED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+IMAGE_SUFFIX_PRIORITY = (".gif", ".png", ".webp", ".jpg", ".jpeg")
+ALLOWED_IMAGE_SUFFIXES = set(IMAGE_SUFFIX_PRIORITY)
 IMAGE_FORMAT_SUFFIXES = {
     "GIF": {".gif"},
     "JPEG": {".jpg", ".jpeg"},
@@ -76,6 +81,64 @@ class ImageSyncReport:
     def extend(self, other: "ImageSyncReport") -> None:
         self.accepted_mismatches.extend(other.accepted_mismatches)
         self.skipped.extend(other.skipped)
+
+
+@dataclass(frozen=True)
+class ResourceOverlaySource:
+    name: str
+    manifest_url: str
+    token: str | None
+    active_dir: Path
+    previous_dir: Path
+    state_file: Path
+
+
+def _resource_overlay_sources() -> list[ResourceOverlaySource]:
+    """按由低到高的覆盖优先级构建远程 overlay 列表。"""
+
+    sources: list[ResourceOverlaySource] = []
+    official_url = get_official_gif_resource_manifest_url()
+    if get_official_gif_resource_enabled() and official_url:
+        root = PRIVATE_OVERLAY_ROOT / "official-gif"
+        sources.append(
+            ResourceOverlaySource(
+                name="official-gif",
+                manifest_url=official_url,
+                token=None,
+                active_dir=root / "active",
+                previous_dir=root / "previous",
+                state_file=root / "state.json",
+            )
+        )
+
+    legacy_url = get_private_resource_manifest_url()
+    configured = get_private_resource_manifests()
+    configured_urls = {item.manifest_url for item in configured}
+    if legacy_url and legacy_url not in configured_urls:
+        sources.append(
+            ResourceOverlaySource(
+                name="legacy-private",
+                manifest_url=legacy_url,
+                token=get_private_resource_token(),
+                active_dir=PRIVATE_RESOURCE_DIR,
+                previous_dir=PRIVATE_PREVIOUS_RESOURCE_DIR,
+                state_file=PRIVATE_STATE_FILE,
+            )
+        )
+
+    for item in configured:
+        root = PRIVATE_OVERLAY_ROOT / item.name
+        sources.append(
+            ResourceOverlaySource(
+                name=item.name,
+                manifest_url=item.manifest_url,
+                token=item.token,
+                active_dir=root / "active",
+                previous_dir=root / "previous",
+                state_file=root / "state.json",
+            )
+        )
+    return sources
 
 
 class RollPigResourceManager:
@@ -130,18 +193,21 @@ class RollPigResourceManager:
         )
 
     def _load_private_overlay(self) -> None:
-        """叠加私有资源缓存；私有包异常时保留当前公有/内置资源继续运行。"""
-        if not get_private_resource_manifest_url():
-            return
-        if not (PRIVATE_RESOURCE_DIR / "pig.json").exists():
-            return
-        try:
-            self._apply_private_overlay(
-                PRIVATE_RESOURCE_DIR,
-                resource_version=self._read_private_state_version(),
-            )
-        except Exception as error:
-            logger.warning(f"rollpig 私有资源缓存读取失败，已忽略: {error}")
+        """依优先级叠加所有可用缓存；单包损坏不影响其余资源。"""
+
+        for source in _resource_overlay_sources():
+            if not (source.active_dir / "pig.json").exists():
+                continue
+            try:
+                self._apply_private_overlay(
+                    source.active_dir,
+                    resource_version=self._read_private_state_version(source),
+                )
+            except Exception as error:
+                logger.warning(
+                    "rollpig 资源包缓存读取失败，已忽略: "
+                    f"pack={source.name}, error={error}"
+                )
 
     def _apply_private_overlay(
         self,
@@ -205,7 +271,7 @@ class RollPigResourceManager:
 
     def find_image_file(self, pig_id: str) -> Path | None:
         for image_dir in self.image_dirs:
-            for suffix in ALLOWED_IMAGE_SUFFIXES:
+            for suffix in IMAGE_SUFFIX_PRIORITY:
                 image_file = image_dir / f"{pig_id}{suffix}"
                 if image_file.exists():
                     return image_file
@@ -223,17 +289,25 @@ class RollPigResourceManager:
         """串行同步公有资源与私有 overlay；后台任务忙时可直接跳过。"""
         if not wait_if_busy and self._sync_lock.locked():
             return (
-                ResourceSyncResult(updated=False, skipped=True, message="已有资源同步任务运行中"),
+                ResourceSyncResult(
+                    updated=False,
+                    skipped=True,
+                    message="已有资源同步任务运行中",
+                ),
                 ResourceSyncResult(updated=False, skipped=True, message=""),
             )
 
         async with self._sync_lock:
             public_result = await self._sync_from_remote_unlocked(force=force)
             try:
-                private_result = await self._sync_private_from_remote_unlocked(force=force)
+                private_result = await self._sync_private_from_remote_unlocked(
+                    force=force
+                )
             except Exception as error:
                 # 私有 overlay 是附加包，同步失败要报告，但不能让公有资源更新失效。
-                logger.warning(f"rollpig 私有资源同步失败，继续使用当前私有缓存: {error}")
+                logger.warning(
+                    f"rollpig 私有资源同步失败，继续使用当前私有缓存: {error}"
+                )
                 private_result = ResourceSyncResult(
                     updated=False,
                     skipped=False,
@@ -251,7 +325,11 @@ class RollPigResourceManager:
                 self.reload()
             return result
 
-    async def _sync_from_remote_unlocked(self, *, force: bool = False) -> ResourceSyncResult:
+    async def _sync_from_remote_unlocked(
+        self,
+        *,
+        force: bool = False,
+    ) -> ResourceSyncResult:
         """从静态 manifest 同步资源；同步成功前不替换当前 active 快照。"""
         if not get_resource_sync_enabled() and not force:
             return ResourceSyncResult(
@@ -342,20 +420,53 @@ class RollPigResourceManager:
         *,
         force: bool = False,
     ) -> ResourceSyncResult:
-        """同步私有 overlay；未配置私有 URL 时静默跳过。"""
+        """依次同步所有 overlay；单包失败不阻断后续资源包。"""
         if not get_resource_sync_enabled() and not force:
             return ResourceSyncResult(updated=False, skipped=True, message="")
-
-        manifest_url = get_private_resource_manifest_url()
-        if not manifest_url:
+        sources = _resource_overlay_sources()
+        if not sources:
             return ResourceSyncResult(updated=False, skipped=True, message="")
+
+        results: list[ResourceSyncResult] = []
+        for source in sources:
+            try:
+                results.append(
+                    await self._sync_overlay_source_unlocked(source, force=force)
+                )
+            except Exception as error:
+                logger.warning(
+                    "rollpig 资源包同步失败，继续使用当前缓存: "
+                    f"pack={source.name}, error={error}"
+                )
+                results.append(
+                    ResourceSyncResult(
+                        updated=False,
+                        skipped=False,
+                        message=f"{source.name} 同步失败：{error}",
+                    )
+                )
+        return ResourceSyncResult(
+            updated=any(item.updated for item in results),
+            skipped=all(item.skipped for item in results),
+            resource_version="+".join(
+                item.resource_version for item in results if item.resource_version
+            ),
+            message="\n".join(item.message for item in results if item.message),
+        )
+
+    async def _sync_overlay_source_unlocked(
+        self,
+        source: ResourceOverlaySource,
+        *,
+        force: bool,
+    ) -> ResourceSyncResult:
+        """同步单个 overlay 到自己的原子缓存目录。"""
 
         timeout = get_resource_sync_timeout()
         max_size = get_resource_max_file_size()
         headers: dict[str, str] = {}
-        private_token = get_private_resource_token()
-        if private_token:
-            headers["Authorization"] = f"Bearer {private_token}"
+        if source.token:
+            headers["Authorization"] = f"Bearer {source.token}"
 
         async with httpx.AsyncClient(
             timeout=timeout,
@@ -365,7 +476,7 @@ class RollPigResourceManager:
         ) as client:
             manifest = await self._download_json(
                 client,
-                manifest_url,
+                source.manifest_url,
                 max_size=max_size,
             )
             if manifest.get("overlay") is not True:
@@ -373,22 +484,25 @@ class RollPigResourceManager:
             resource_version = str(manifest.get("resource_version") or "").strip()
             if not resource_version:
                 raise ValueError("私有资源 manifest 缺少 resource_version")
-            if not force and resource_version == self._read_private_state_version():
+            if (
+                not force
+                and resource_version == self._read_private_state_version(source)
+            ):
                 return ResourceSyncResult(
                     updated=False,
                     skipped=True,
                     resource_version=resource_version,
-                    message="私有资源已是最新版本",
+                    message=f"{source.name} 已是最新版本",
                 )
 
-            staging_dir = CACHE_ROOT / f".incoming_private_{int(time.time())}"
+            staging_dir = source.active_dir.parent / f".incoming_{int(time.time())}"
             if staging_dir.exists():
                 shutil.rmtree(staging_dir)
             (staging_dir / "images").mkdir(parents=True, exist_ok=True)
             try:
                 image_report = await self._download_private_manifest_files(
                     client,
-                    manifest_url=manifest_url,
+                    manifest_url=source.manifest_url,
                     manifest=manifest,
                     staging_dir=staging_dir,
                     max_size=max_size,
@@ -397,6 +511,7 @@ class RollPigResourceManager:
                 self._activate_private_staging_dir(
                     staging_dir,
                     resource_version,
+                    source=source,
                     image_report=image_report,
                 )
             except Exception:
@@ -409,7 +524,7 @@ class RollPigResourceManager:
             skipped=False,
             resource_version=resource_version,
             message=self._build_sync_message(
-                "私有资源",
+                source.name,
                 resource_version,
                 image_report,
             ),
@@ -648,7 +763,7 @@ class RollPigResourceManager:
 
     def _find_image_in_dirs(self, pig_id: str, image_dirs: list[Path]) -> Path | None:
         for image_dir in image_dirs:
-            for suffix in ALLOWED_IMAGE_SUFFIXES:
+            for suffix in IMAGE_SUFFIX_PRIORITY:
                 image_file = image_dir / f"{pig_id}{suffix}"
                 if image_file.exists():
                     return image_file
@@ -827,9 +942,13 @@ class RollPigResourceManager:
         except Exception:
             return "cache"
 
-    def _read_private_state_version(self) -> str:
+    def _read_private_state_version(
+        self,
+        source: ResourceOverlaySource | None = None,
+    ) -> str:
+        state_file = source.state_file if source else PRIVATE_STATE_FILE
         try:
-            state = json.loads(self._read_json_text(PRIVATE_STATE_FILE))
+            state = json.loads(self._read_json_text(state_file))
             if state.get("partial") is True:
                 return "private"
             return str(state.get("resource_version") or "private")
@@ -841,16 +960,20 @@ class RollPigResourceManager:
         staging_dir: Path,
         resource_version: str,
         *,
+        source: ResourceOverlaySource | None = None,
         image_report: ImageSyncReport | None = None,
     ) -> None:
-        CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-        if PRIVATE_PREVIOUS_RESOURCE_DIR.exists():
-            shutil.rmtree(PRIVATE_PREVIOUS_RESOURCE_DIR)
-        if PRIVATE_RESOURCE_DIR.exists():
-            PRIVATE_RESOURCE_DIR.rename(PRIVATE_PREVIOUS_RESOURCE_DIR)
-        staging_dir.rename(PRIVATE_RESOURCE_DIR)
+        active_dir = source.active_dir if source else PRIVATE_RESOURCE_DIR
+        previous_dir = source.previous_dir if source else PRIVATE_PREVIOUS_RESOURCE_DIR
+        state_file = source.state_file if source else PRIVATE_STATE_FILE
+        active_dir.parent.mkdir(parents=True, exist_ok=True)
+        if previous_dir.exists():
+            shutil.rmtree(previous_dir)
+        if active_dir.exists():
+            active_dir.rename(previous_dir)
+        staging_dir.rename(active_dir)
         image_report = image_report or ImageSyncReport([], [])
-        PRIVATE_STATE_FILE.write_text(
+        state_file.write_text(
             json.dumps(
                 {
                     "resource_version": resource_version,

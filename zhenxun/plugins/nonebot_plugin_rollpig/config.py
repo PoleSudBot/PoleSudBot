@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -13,6 +14,10 @@ DEFAULT_RESOURCE_MANIFEST_URL = (
 DEFAULT_PRIVATE_RESOURCE_MANIFEST_URL = (
     "https://pig.felislab.cc/resources/rollpig-pjsk/manifest.json"
 )
+DEFAULT_OFFICIAL_GIF_RESOURCE_MANIFEST_URL = (
+    "https://pig.felislab.cc/resources/rollpig-gif/manifest.json"
+)
+RESOURCE_PACK_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 base_config = ZhenxunConfig.get(MODULE_NAME)
 
 
@@ -23,6 +28,14 @@ class GroupSettings(BaseModel):
         True,
         description="是否为当前群发送猪圈日报",
     )
+
+
+class PrivateResourceManifestConfig(BaseModel):
+    """远程私有资源包配置。"""
+
+    name: str
+    manifest_url: str
+    token: Optional[str] = None
 
 
 class Config(BaseModel):
@@ -49,6 +62,13 @@ class Config(BaseModel):
     RESOURCE_MAX_FILE_SIZE: int = 10 * 1024 * 1024
     PRIVATE_RESOURCE_MANIFEST_URL: Optional[str] = DEFAULT_PRIVATE_RESOURCE_MANIFEST_URL
     PRIVATE_RESOURCE_TOKEN: Optional[str] = None
+    OFFICIAL_GIF_RESOURCE_ENABLED: bool = True
+    OFFICIAL_GIF_RESOURCE_MANIFEST_URL: Optional[str] = (
+        DEFAULT_OFFICIAL_GIF_RESOURCE_MANIFEST_URL
+    )
+    PRIVATE_RESOURCE_MANIFESTS: list[PrivateResourceManifestConfig] = Field(
+        default_factory=list
+    )
     CATALOG_ENABLED: bool = True
     CATALOG_CACHE_SECONDS: int = 300
     CATALOG_RENDER_TIMEOUT: float = 8.0
@@ -78,6 +98,11 @@ class Config(BaseModel):
     rollpig_resource_max_file_size: Optional[int] = None
     rollpig_private_resource_manifest_url: Optional[str] = None
     rollpig_private_resource_token: Optional[str] = None
+    rollpig_official_gif_resource_enabled: Optional[bool] = None
+    rollpig_official_gif_resource_manifest_url: Optional[str] = None
+    rollpig_private_resource_manifests: Optional[
+        list[PrivateResourceManifestConfig]
+    ] = None
     rollpig_catalog_enabled: Optional[bool] = None
     rollpig_catalog_cache_seconds: Optional[int] = None
     rollpig_catalog_render_timeout: Optional[float] = None
@@ -218,6 +243,48 @@ def get_private_resource_manifest_url() -> Optional[str]:
 
 def get_private_resource_token() -> Optional[str]:
     return _get_str("PRIVATE_RESOURCE_TOKEN")
+
+
+def get_official_gif_resource_enabled() -> bool:
+    return _get_bool("OFFICIAL_GIF_RESOURCE_ENABLED", True)
+
+
+def get_official_gif_resource_manifest_url() -> Optional[str]:
+    raw_value = base_config.get(
+        "OFFICIAL_GIF_RESOURCE_MANIFEST_URL",
+        DEFAULT_OFFICIAL_GIF_RESOURCE_MANIFEST_URL,
+    )
+    if raw_value is None:
+        return DEFAULT_OFFICIAL_GIF_RESOURCE_MANIFEST_URL
+    return str(raw_value).strip() or None
+
+
+def get_private_resource_manifests() -> list[PrivateResourceManifestConfig]:
+    """按配置顺序返回合法且名称唯一的私有资源包。"""
+
+    raw_items = base_config.get("PRIVATE_RESOURCE_MANIFESTS", []) or []
+    if not isinstance(raw_items, list):
+        return []
+
+    manifests: list[PrivateResourceManifestConfig] = []
+    names: set[str] = set()
+    for raw_item in raw_items:
+        try:
+            item = PrivateResourceManifestConfig.model_validate(raw_item)
+        except (TypeError, ValueError):
+            continue
+        item.name = item.name.strip()
+        item.manifest_url = item.manifest_url.strip()
+        item.token = item.token.strip() if item.token else None
+        if (
+            not RESOURCE_PACK_NAME_PATTERN.fullmatch(item.name)
+            or not item.manifest_url
+            or item.name in names
+        ):
+            continue
+        names.add(item.name)
+        manifests.append(item)
+    return manifests
 
 
 def get_catalog_enabled() -> bool:

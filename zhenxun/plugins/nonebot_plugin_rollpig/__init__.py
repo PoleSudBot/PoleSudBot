@@ -33,6 +33,7 @@ from .ranking import (
 
 from .config import (
     Config,
+    DEFAULT_OFFICIAL_GIF_RESOURCE_MANIFEST_URL,
     DEFAULT_RESOURCE_MANIFEST_URL,
     DEFAULT_PRIVATE_RESOURCE_MANIFEST_URL,
     GroupSettings,
@@ -48,6 +49,7 @@ from .config import (
     get_storage_backend,
 )
 from .catalog_renderer import render_catalog_image, get_harmony_font_faces
+from .card_renderer import render_pig_card_image
 from .render_budget import html_render_budget
 from .resource_manager import pig_resource_manager
 from .roast_manager import roast_manager
@@ -132,7 +134,7 @@ __plugin_meta__ = PluginMetadata(
     config=Config,
     extra={
         "author": "Felis2026",
-        "version": "0.6.6",
+        "version": "0.7.0",
         "configs": [
             {
                 "module": MODULE_NAME,
@@ -301,6 +303,30 @@ __plugin_meta__ = PluginMetadata(
                 "default_value": None,
                 "help": "私有小猪资源 Bearer Token",
                 "type": str,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "OFFICIAL_GIF_RESOURCE_ENABLED",
+                "value": True,
+                "default_value": True,
+                "help": "是否同步并优先使用官方 GIF 动态小猪资源包",
+                "type": bool,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "OFFICIAL_GIF_RESOURCE_MANIFEST_URL",
+                "value": DEFAULT_OFFICIAL_GIF_RESOURCE_MANIFEST_URL,
+                "default_value": DEFAULT_OFFICIAL_GIF_RESOURCE_MANIFEST_URL,
+                "help": "官方 GIF 动态小猪资源 manifest URL",
+                "type": str,
+            },
+            {
+                "module": MODULE_NAME,
+                "key": "PRIVATE_RESOURCE_MANIFESTS",
+                "value": [],
+                "default_value": [],
+                "help": "额外私有资源包列表，按配置顺序叠加并允许每包独立 token",
+                "type": list,
             },
             {
                 "module": MODULE_NAME,
@@ -1329,42 +1355,67 @@ def build_daily_summary_panel(summary: dict) -> dict[str, object]:
     }
 
 
+async def _render_pig_card_html(
+    pig_data: dict,
+    avatar_file: Path | None,
+    *,
+    is_new: bool,
+) -> bytes:
+    """保留旧 HTML 卡片作为 PIL 异常时的可靠回退。"""
+
+    avatar_uri = avatar_file.as_uri() if avatar_file else ""
+    new_icon_file = ASSET_DIR / "new.png"
+    new_icon_uri = new_icon_file.as_uri() if new_icon_file.exists() else ""
+    async with html_render_budget("pig-card-fallback"):
+        from zhenxun import ui
+
+        # HTML 只承担异常回退，继续延迟导入以避免插件加载期初始化渲染服务。
+        return await ui.render_template(
+            RES_DIR / "template.html",
+            {
+                "avatar": avatar_uri,
+                "name": pig_data.get("name", "未知小猪"),
+                "desc": pig_data.get("description", ""),
+                "analysis": pig_data.get("analysis", "你今天是只神秘小猪。"),
+                "is_new": is_new,
+                "new_icon_uri": new_icon_uri,
+                "font_faces": get_harmony_font_faces(),
+            },
+            use_cache=False,
+            is_page=True,
+        )
+
+
 async def send_rendered_pig(
     matcher, event, pig_data: dict, extra_text: str = "", is_new: bool = False
 ):
-    pig_id = pig_data.get("id", "")
+    pig_id = str(pig_data.get("id") or "")
     avatar_file = find_image_file(pig_id)
-    avatar_uri = avatar_file.as_uri() if avatar_file else ""
-    name = pig_data.get("name", "未知小猪")
-    desc = pig_data.get("description", "")
-    analysis = pig_data.get("analysis", "你今天是只神秘小猪。")
-    new_icon_file = ASSET_DIR / "new.png"
-    new_icon_uri = new_icon_file.as_uri() if new_icon_file.exists() else ""
-
-    pic = None
     try:
-        async with html_render_budget("pig-card"):
-            from zhenxun import ui
-
-            # 渲染服务依赖 NoneBot 运行时，延迟导入避免插件模块加载期抢先初始化服务。
-            pic = await ui.render_template(
-                RES_DIR / "template.html",
-                {
-                    "avatar": avatar_uri,
-                    "name": name,
-                    "desc": desc,
-                    "analysis": analysis,
-                    "is_new": is_new,
-                    "new_icon_uri": new_icon_uri,
-                    "font_faces": get_harmony_font_faces(),
-                },
-                use_cache=False,
-                is_page=True,
+        render_result = await render_pig_card_image(
+            pig_data,
+            avatar_file,
+            is_new=is_new,
+        )
+        pic = render_result.data
+    except Exception as error:
+        logger.exception(
+            "rollpig PIL 卡片渲染失败，回退 HTML: "
+            f"pig_id={pig_id}, image={avatar_file}, error={error}"
+        )
+        try:
+            pic = await _render_pig_card_html(
+                pig_data,
+                avatar_file,
+                is_new=is_new,
             )
-    except Exception as e:
-        logger.error(f"图片渲染失败: pig_id={pig_id}, error={e}")
-        await matcher.finish("图片生成失败。")
-        return
+        except Exception as fallback_error:
+            logger.exception(
+                "rollpig HTML 卡片回退失败: "
+                f"pig_id={pig_id}, image={avatar_file}, error={fallback_error}"
+            )
+            await matcher.finish("图片生成失败。")
+            return
 
     msg = MessageSegment.reply(event.message_id)
     if extra_text:

@@ -3,12 +3,14 @@ import asyncio
 import base64
 import hashlib
 import importlib.util
+from io import BytesIO
 import json
 from pathlib import Path
 import sys
 import types
 import uuid
 
+from PIL import Image
 import pytest
 
 ROLLPIG_PLUGIN_DIR = (
@@ -25,6 +27,7 @@ ROLLPIG_RESOURCE_MANAGER_PATH = ROLLPIG_PLUGIN_DIR / "resource_manager.py"
 ROLLPIG_ROAST_MANAGER_PATH = ROLLPIG_PLUGIN_DIR / "roast_manager.py"
 ROLLPIG_RUNTIME_PATH = ROLLPIG_PLUGIN_DIR / "runtime.py"
 ROLLPIG_CATALOG_RENDERER_PATH = ROLLPIG_PLUGIN_DIR / "catalog_renderer.py"
+ROLLPIG_CARD_RENDERER_PATH = ROLLPIG_PLUGIN_DIR / "card_renderer.py"
 VALID_PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/"
     "iZk9HQAAAABJRU5ErkJggg=="
@@ -42,6 +45,9 @@ class FakeLogger:
         return None
 
     def error(self, *_args, **_kwargs):
+        return None
+
+    def exception(self, *_args, **_kwargs):
         return None
 
 
@@ -361,6 +367,9 @@ def load_rollpig_resource_manager_module(
     fake_config.get_resource_sync_timeout = lambda: 10.0
     fake_config.get_private_resource_manifest_url = lambda: None
     fake_config.get_private_resource_token = lambda: None
+    fake_config.get_official_gif_resource_enabled = lambda: False
+    fake_config.get_official_gif_resource_manifest_url = lambda: None
+    fake_config.get_private_resource_manifests = lambda: []
 
     fake_localstore = types.ModuleType("nonebot_plugin_localstore")
     fake_localstore.get_plugin_data_dir = lambda: tmp_path / "cache"
@@ -467,6 +476,13 @@ def load_rollpig_catalog_renderer_module(
     )
     module.clear_catalog_runtime_cache()
     return module
+
+
+def load_rollpig_card_renderer_module():
+    return load_module_from_path(
+        f"rollpig_card_renderer_test_{uuid.uuid4().hex}",
+        ROLLPIG_CARD_RENDERER_PATH,
+    )
 
 
 def load_rollpig_runtime_module(monkeypatch: pytest.MonkeyPatch):
@@ -672,6 +688,9 @@ def load_rollpig_plugin_module(
     fake_config.DEFAULT_PRIVATE_RESOURCE_MANIFEST_URL = (
         "https://pig.felislab.cc/resources/rollpig-pjsk/manifest.json"
     )
+    fake_config.DEFAULT_OFFICIAL_GIF_RESOURCE_MANIFEST_URL = (
+        "https://pig.felislab.cc/resources/rollpig-gif/manifest.json"
+    )
     fake_config.GroupSettings = type("GroupSettings", (), {})
     fake_config.MODULE_NAME = "nonebot_plugin_rollpig"
     fake_config.get_proxy = lambda: None
@@ -693,6 +712,16 @@ def load_rollpig_plugin_module(
     fake_catalog_renderer = types.ModuleType(f"{package_name}.catalog_renderer")
     fake_catalog_renderer.render_catalog_image = fake_render_catalog_image
     fake_catalog_renderer.get_harmony_font_faces = lambda: []
+
+    async def fake_render_pig_card_image(*_args, **_kwargs):
+        return types.SimpleNamespace(
+            data=b"card",
+            image_format="png",
+            renderer="pillow",
+        )
+
+    fake_card_renderer = types.ModuleType(f"{package_name}.card_renderer")
+    fake_card_renderer.render_pig_card_image = fake_render_pig_card_image
 
     fake_render_budget = types.ModuleType(f"{package_name}.render_budget")
     fake_render_budget.html_render_budget = lambda _label: FakeAsyncContext()
@@ -778,6 +807,11 @@ def load_rollpig_plugin_module(
         sys.modules,
         f"{package_name}.catalog_renderer",
         fake_catalog_renderer,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        f"{package_name}.card_renderer",
+        fake_card_renderer,
     )
     monkeypatch.setitem(
         sys.modules,
@@ -2088,6 +2122,93 @@ def test_rollpig_private_resource_url_can_be_disabled(monkeypatch):
     )
 
 
+def test_rollpig_resource_overlay_sources_keep_legacy_and_configured_order(monkeypatch):
+    module = load_rollpig_config_module(
+        monkeypatch,
+        {
+            "PRIVATE_RESOURCE_MANIFEST_URL": "https://example.com/legacy.json",
+            "PRIVATE_RESOURCE_TOKEN": "legacy-token",
+            "PRIVATE_RESOURCE_MANIFESTS": [
+                {
+                    "name": "custom-one",
+                    "manifest_url": "https://example.com/one.json",
+                    "token": "one-token",
+                },
+                {
+                    "name": "custom-two",
+                    "manifest_url": "https://example.com/two.json",
+                },
+            ],
+        },
+    )
+
+    assert module.get_official_gif_resource_enabled()
+    assert (
+        module.get_official_gif_resource_manifest_url()
+        == module.DEFAULT_OFFICIAL_GIF_RESOURCE_MANIFEST_URL
+    )
+    assert [item.name for item in module.get_private_resource_manifests()] == [
+        "custom-one",
+        "custom-two",
+    ]
+    assert module.get_private_resource_manifests()[0].token == "one-token"
+
+
+def test_rollpig_resource_overlay_sources_skip_invalid_and_duplicate_entries(
+    monkeypatch,
+):
+    module = load_rollpig_config_module(
+        monkeypatch,
+        {
+            "PRIVATE_RESOURCE_MANIFESTS": [
+                {"name": "valid", "manifest_url": "https://example.com/a.json"},
+                {"name": "bad/name", "manifest_url": "https://example.com/b.json"},
+                {"name": "valid", "manifest_url": "https://example.com/c.json"},
+                {"name": "empty", "manifest_url": "   "},
+            ]
+        },
+    )
+
+    assert [item.name for item in module.get_private_resource_manifests()] == ["valid"]
+
+
+@pytest.mark.asyncio
+async def test_rollpig_card_falls_back_to_html_when_pillow_fails(monkeypatch):
+    module = load_rollpig_plugin_module(
+        monkeypatch,
+        fake_store=types.SimpleNamespace(),
+        fake_data_manager=types.SimpleNamespace(),
+        group_members=[],
+    )
+    sent: list[object] = []
+
+    async def fail_pillow(*_args, **_kwargs):
+        raise OSError("broken gif")
+
+    async def render_html(*_args, **_kwargs):
+        return b"fallback-card"
+
+    class CaptureMatcher:
+        async def finish(self, message):
+            sent.append(message)
+
+    class CaptureMessageSegment:
+        reply = staticmethod(lambda _message_id: "reply:")
+        image = staticmethod(lambda data: f"image:{data.decode()}")
+
+    monkeypatch.setattr(module, "render_pig_card_image", fail_pillow)
+    monkeypatch.setattr(module, "_render_pig_card_html", render_html)
+    monkeypatch.setattr(module, "MessageSegment", CaptureMessageSegment)
+
+    await module.send_rendered_pig(
+        CaptureMatcher(),
+        types.SimpleNamespace(message_id=123),
+        {"id": "pig", "name": "普通小猪"},
+    )
+
+    assert sent == ["reply:image:fallback-card"]
+
+
 def test_rollpig_date_str_uses_business_timezone(monkeypatch):
     module = load_rollpig_runtime_module(monkeypatch)
     real_datetime = module.datetime.datetime
@@ -2224,6 +2345,152 @@ def test_rollpig_private_overlay_adds_pigs_rules_and_image_priority(
     )
     assert manager.find_image_file("public-pig") == public_image_dir / "public-pig.png"
     assert manager.resource_version.endswith("+private-v1")
+
+
+def test_rollpig_resource_prefers_gif_over_png_in_same_overlay(monkeypatch, tmp_path):
+    module = load_rollpig_resource_manager_module(monkeypatch, tmp_path)
+    manager = module.RollPigResourceManager()
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    image_dir.joinpath("pig.png").write_bytes(VALID_PNG_BYTES)
+    image_dir.joinpath("pig.gif").write_bytes(b"gif")
+    manager.image_dirs = [image_dir]
+
+    assert manager.find_image_file("pig") == image_dir / "pig.gif"
+
+
+def test_rollpig_resource_overlay_sources_follow_fixed_precedence(
+    monkeypatch,
+    tmp_path,
+):
+    module = load_rollpig_resource_manager_module(monkeypatch, tmp_path)
+    monkeypatch.setattr(module, "get_official_gif_resource_enabled", lambda: True)
+    monkeypatch.setattr(
+        module,
+        "get_official_gif_resource_manifest_url",
+        lambda: "https://example.com/gif.json",
+    )
+    monkeypatch.setattr(
+        module,
+        "get_private_resource_manifest_url",
+        lambda: "https://example.com/legacy.json",
+    )
+    monkeypatch.setattr(
+        module,
+        "get_private_resource_manifests",
+        lambda: [
+            types.SimpleNamespace(
+                name="custom",
+                manifest_url="https://example.com/custom.json",
+                token="token",
+            )
+        ],
+    )
+
+    sources = module._resource_overlay_sources()
+
+    assert [source.name for source in sources] == [
+        "official-gif",
+        "legacy-private",
+        "custom",
+    ]
+    assert sources[-1].token == "token"
+
+
+@pytest.mark.asyncio
+async def test_rollpig_overlay_sync_continues_after_one_pack_fails(
+    monkeypatch,
+    tmp_path,
+):
+    module = load_rollpig_resource_manager_module(monkeypatch, tmp_path)
+    manager = module.RollPigResourceManager()
+    sources = [
+        types.SimpleNamespace(name="broken"),
+        types.SimpleNamespace(name="healthy"),
+    ]
+    monkeypatch.setattr(module, "_resource_overlay_sources", lambda: sources)
+    monkeypatch.setattr(module, "get_resource_sync_enabled", lambda: True)
+
+    async def sync_source(source, *, force):
+        if source.name == "broken":
+            raise ValueError("broken manifest")
+        return module.ResourceSyncResult(
+            updated=True,
+            skipped=False,
+            resource_version="healthy-v1",
+            message="healthy 同步完成",
+        )
+
+    monkeypatch.setattr(manager, "_sync_overlay_source_unlocked", sync_source)
+
+    result = await manager._sync_private_from_remote_unlocked(force=True)
+
+    assert result.updated
+    assert not result.skipped
+    assert "broken 同步失败" in result.message
+    assert "healthy 同步完成" in result.message
+
+
+@pytest.mark.asyncio
+async def test_rollpig_pillow_card_renders_static_png(tmp_path):
+    module = load_rollpig_card_renderer_module()
+    image_file = tmp_path / "pig.png"
+    Image.new("RGBA", (240, 240), (255, 120, 160, 255)).save(image_file)
+
+    result = await module.render_pig_card_image(
+        {
+            "id": "pig",
+            "name": "普通小猪",
+            "description": "今天也要好好生活。",
+            "analysis": "这是一段用于验证 Pillow 卡片换行和布局的分析文字。",
+        },
+        image_file,
+        is_new=True,
+    )
+
+    rendered = Image.open(BytesIO(result.data))
+    assert result.image_format == "png"
+    assert result.renderer == "pillow"
+    assert rendered.size == (800, 800)
+
+
+@pytest.mark.asyncio
+async def test_rollpig_pillow_card_preserves_gif_frames_and_duration(tmp_path):
+    module = load_rollpig_card_renderer_module()
+    image_file = tmp_path / "pig.gif"
+    frames = [
+        Image.new("RGBA", (240, 240), color)
+        for color in ((255, 0, 0, 255), (0, 0, 255, 255))
+    ]
+    frames[0].save(
+        image_file,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=[40, 120],
+        loop=0,
+    )
+
+    result = await module.render_pig_card_image(
+        {
+            "id": "pig",
+            "name": "动态小猪",
+            "description": "会动",
+            "analysis": "GIF 头像应逐帧合成到同一张卡片底图。",
+        },
+        image_file,
+    )
+
+    rendered = Image.open(BytesIO(result.data))
+    durations = []
+    for frame_index in range(rendered.n_frames):
+        rendered.seek(frame_index)
+        durations.append(rendered.info["duration"])
+    assert result.image_format == "gif"
+    assert result.renderer == "pillow-gif"
+    assert rendered.size == (800, 800)
+    assert rendered.n_frames == 2
+    assert durations == [40, 120]
 
 
 def test_rollpig_private_overlay_rejects_duplicate_pig_ids(monkeypatch, tmp_path):

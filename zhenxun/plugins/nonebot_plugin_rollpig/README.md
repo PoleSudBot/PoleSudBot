@@ -45,6 +45,9 @@
 | `RESOURCE_MAX_FILE_SIZE` | `10485760` | 单个资源文件下载大小上限 |
 | `PRIVATE_RESOURCE_MANIFEST_URL` | `https://pig.felislab.cc/resources/rollpig-pjsk/manifest.json` | 私有资源 overlay manifest URL，设为空字符串可关闭 |
 | `PRIVATE_RESOURCE_TOKEN` | `None` | 私有资源 Bearer Token |
+| `OFFICIAL_GIF_RESOURCE_ENABLED` | `True` | 是否同步并优先使用官方 GIF 动态小猪资源包 |
+| `OFFICIAL_GIF_RESOURCE_MANIFEST_URL` | `https://pig.felislab.cc/resources/rollpig-gif/manifest.json` | 官方 GIF 资源 manifest URL |
+| `PRIVATE_RESOURCE_MANIFESTS` | `[]` | 额外资源包列表；每项填写 `name`、`manifest_url` 与可选 `token`，后配置的包优先级更高 |
 | `CATALOG_ENABLED` | `True` | 是否启用图片版小猪图鉴命令 |
 | `CATALOG_CACHE_SECONDS` | `300` | 同一图鉴状态图片缓存秒数，设为 `0` 可关闭缓存 |
 | `CATALOG_RENDER_TIMEOUT` | `8.0` | 单张小猪图鉴渲染超时时间 |
@@ -60,6 +63,7 @@
 - 顶部会展示收集进度、黑白进度条、当前群猪猪排名和本地总排名。
 - 缩略图从当前 active/private/builtin 资源快照读取并缓存到 localstore cache；命令执行时不会临时远程拉图，缺图会显示占位。
 - 渲染结果使用同状态 TTL 缓存和同 key 合流，避免多人同时触发时重复占用 Chromium。
+- 普通小猪卡片使用真寻 `BuildImage` 与 Pillow 绘制；GIF 小猪逐帧合成动态卡片，异常时回退旧 HTML 静态卡片。
 
 ## 资源同步
 
@@ -74,8 +78,22 @@
 - 仓库不再携带小猪图片，生产环境部署后会自动下载到 localstore 的 `resources/active/images/`。
 - 小猪图片优先从私有 overlay 缓存读取，其次读取公有 active 缓存；首次同步完成前可能暂时无图。
 - 私有 overlay 默认指向上游 PJSK 包；启用资源同步后会缓存到 localstore 的 `resources/private_active/`，优先级高于公有资源。
+- 资源覆盖顺序为内置、公有、官方 GIF、旧私有包、`PRIVATE_RESOURCE_MANIFESTS`；同一包内优先使用 GIF，图片版图鉴固定读取 GIF 首帧。
+- 额外资源包分别缓存到 `resources/private_overlays/<name>/`，单包同步失败不会阻断其它包更新。
 - 私有 `pig.json` 默认只追加新 ID；如需覆盖公有小猪文案，必须通过 `pig_overrides.json` 显式声明。
 - 本地特色的 `new.png` 贴纸位于 `resource/assets/new.png`，不属于小猪图片同步范围。
+
+额外资源包配置示例：
+
+```json
+[
+  {
+    "name": "custom-pack",
+    "manifest_url": "https://example.com/rollpig/manifest.json",
+    "token": "optional-bearer-token"
+  }
+]
+```
 
 manifest 示例：
 
