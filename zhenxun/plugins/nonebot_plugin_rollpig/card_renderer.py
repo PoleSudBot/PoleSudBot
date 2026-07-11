@@ -7,7 +7,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal
 
-from PIL import Image, ImageDraw, ImageOps, ImageSequence
+from PIL import Image, ImageDraw, ImageSequence
 
 from zhenxun.utils._build_image import BuildImage
 
@@ -178,17 +178,11 @@ def _prepare_card(pig_data: Mapping[str, Any], *, is_new: bool) -> _PreparedCard
     return _PreparedCard(canvas=canvas, avatar_y=avatar_y)
 
 
-def _normalize_avatar(image: Image.Image) -> Image.Image:
-    return ImageOps.fit(
-        image.convert("RGBA"),
-        (AVATAR_SIZE, AVATAR_SIZE),
-        method=Image.Resampling.LANCZOS,
-    )
-
-
 def _paste_avatar(canvas: Image.Image, avatar: Image.Image, avatar_y: int) -> None:
-    normalized = _normalize_avatar(avatar)
-    canvas.alpha_composite(normalized, ((CANVAS_SIZE[0] - AVATAR_SIZE) // 2, avatar_y))
+    """按资源原始画布居中合成头像，不额外裁切、缩放或补留白。"""
+
+    source = avatar.convert("RGBA")
+    canvas.alpha_composite(source, ((CANVAS_SIZE[0] - source.width) // 2, avatar_y))
 
 
 def _normalize_duration(value: object) -> int:

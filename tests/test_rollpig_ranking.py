@@ -2454,6 +2454,19 @@ async def test_rollpig_pillow_card_renders_static_png(tmp_path):
     assert rendered.size == (800, 800)
 
 
+def test_rollpig_pillow_avatar_preserves_original_canvas_size():
+    module = load_rollpig_card_renderer_module()
+    canvas = Image.new("RGBA", (800, 800), (255, 255, 255, 255))
+    avatar = Image.new("RGBA", (400, 200), (255, 0, 0, 255))
+
+    module._paste_avatar(canvas, avatar, 100)
+
+    assert canvas.getpixel((199, 100)) == (255, 255, 255, 255)
+    assert canvas.getpixel((200, 100)) == (255, 0, 0, 255)
+    assert canvas.getpixel((599, 299)) == (255, 0, 0, 255)
+    assert canvas.getpixel((600, 299)) == (255, 255, 255, 255)
+
+
 @pytest.mark.asyncio
 async def test_rollpig_pillow_card_preserves_gif_frames_and_duration(tmp_path):
     module = load_rollpig_card_renderer_module()
