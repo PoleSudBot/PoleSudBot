@@ -175,7 +175,7 @@ class ApiDataSource:
             QueryCount: 数据内容
         """
         now = datetime.now()
-        query = ChatHistory
+        query = ChatHistory.filter(direction="in")
         if bot_id:
             query = query.filter(bot_id=bot_id)
         all_count = await query.annotate().count()
@@ -296,7 +296,9 @@ class ApiDataSource:
         返回:
             list[ActiveGroup]: 活跃群组列表
         """
-        query = cls.__get_query(ChatHistory, date_type, bot_id)
+        query = cls.__get_query(
+            ChatHistory.filter(direction="in"), date_type, bot_id
+        )
         data_list = (
             await query.annotate(count=Count("id"))
             .filter(group_id__not_isnull=True)

@@ -93,17 +93,22 @@ async def get_activity_rank(
     group_id: str | None,
     start_time: datetime,
     end_time: datetime,
+    direction: str | None = None,
 ) -> int | None:
     """计算用户在当前群过去七日的活动排行"""
     if not group_id:
         return None
+    filters = {
+        "group_id": group_id,
+        "create_time__gte": start_time,
+        "create_time__lt": end_time,
+    }
+    # 只有 ChatHistory 存在方向语义，Statistics 保持原有调用统计口径。
+    if direction:
+        filters["direction"] = direction
     # 群排行必须限定在当前群消息/调用记录内，避免私聊和跨群数据混入趋势摘要。
     ranked_user_ids = (
-        await model.filter(
-            group_id=group_id,
-            create_time__gte=start_time,
-            create_time__lt=end_time,
-        )
+        await model.filter(**filters)
         .annotate(count=Count("id"))
         .group_by("user_id")
         .order_by("-count")
@@ -235,7 +240,12 @@ async def get_user_info(
     gold_group_rank = await get_rank(UserConsole, user_id, "gold", group_id)
     gold_total_rank = await get_rank(UserConsole, user_id, "gold")
     chat_week_rank = await get_activity_rank(
-        ChatHistory, user_id, group_id, activity_start, activity_end
+        ChatHistory,
+        user_id,
+        group_id,
+        activity_start,
+        activity_end,
+        direction="in",
     )
     call_week_rank = await get_activity_rank(
         Statistics, user_id, group_id, activity_start, activity_end

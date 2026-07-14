@@ -90,21 +90,25 @@ _reply_message_cache: dict[str, tuple[dict[str, Any] | None, float]] = {}
 
 SEGMENT_PLACEHOLDER_MAP = {
     "face": "[emoji]",
+    "emoji": "[emoji]",
     "record": "[voice]",
+    "audio": "[voice]",
     "video": "[video]",
     "file": "[file]",
     "json": "[card]",
     "xml": "[card]",
+    "card": "[card]",
     "forward": "[forward]",
+    "reference": "[forward]",
     "share": "[share]",
 }
 
 
 try:
-    from zhenxun.models.chat_history import ChatHistory
+    from zhenxun.services.chat_history import ChatHistoryQuery
 except ImportError:
-    ChatHistory = None
-    logger.warning("无法导入 ChatHistory 模型，数据库历史记录功能不可用。")
+    ChatHistoryQuery = None
+    logger.warning("无法导入 ChatHistoryQuery 服务，数据库历史记录功能不可用。")
 
 
 def _normalize_segments(message: Any) -> list[dict[str, Any]]:
@@ -290,10 +294,12 @@ def _segment_to_text(
 
     if seg_type == "text":
         return _compact_whitespace(str(seg_data.get("text", "")))
-    if seg_type == "at" and "qq" in seg_data:
-        qq = str(seg_data["qq"])
-        default_at_name = _truncate_username(f"user_{qq[-4:]}")
-        return f"@{user_info_cache.get(qq, default_at_name)}"
+    if seg_type in {"at", "mention"}:
+        target = seg_data.get("qq") if seg_type == "at" else seg_data.get("target")
+        if target is not None:
+            target_id = str(target)
+            default_at_name = _truncate_username(f"user_{target_id[-4:]}")
+            return f"@{user_info_cache.get(target_id, default_at_name)}"
     if seg_type == "image":
         summary = seg_data.get("summary")
         return f"[img]{_compact_whitespace(str(summary))}" if summary else "[img]"
@@ -327,24 +333,47 @@ def _timestamp_to_scope_datetime(timestamp: int) -> datetime:
     return datetime.fromtimestamp(timestamp, get_scope_timezone())
 
 
+def _db_row_value(message: Any, key: str, default: Any = None) -> Any:
+    """兼容服务层字典投影和旧测试使用的模型对象。"""
+    if isinstance(message, dict):
+        return message.get(key, default)
+    return getattr(message, key, default)
+
+
+def _get_db_query_direction() -> str:
+    """按配置在查询阶段决定是否纳入 Bot 的出站消息。"""
+    return "in" if base_config.get("EXCLUDE_BOT_MESSAGES", False) else "all"
+
+
 def _format_db_messages(db_messages: list[Any]) -> list[dict[str, Any]]:
-    """将 ChatHistory 行转换成后续处理函数可复用的消息字典。"""
+    """将 ChatHistory 服务投影转换成后续处理函数可复用的消息字典。"""
     formatted_messages: list[dict[str, Any]] = []
     for msg in db_messages:
-        user_id = str(getattr(msg, "user_id", "") or "")
-        numeric_user_id = int(user_id) if user_id.isdigit() else 0
-        plain_text = getattr(msg, "plain_text", None) or ""
-        create_time = getattr(msg, "create_time", None)
+        direction = str(_db_row_value(msg, "direction", "in") or "in")
+        # 出站记录沿用现有 user_id 存储语义，展示发送者时必须改用真实 bot_id。
+        sender_field = "bot_id" if direction == "out" else "user_id"
+        sender_id = str(_db_row_value(msg, sender_field, "") or "")
+        normalized_sender_id: int | str = (
+            int(sender_id) if sender_id.isdigit() else sender_id
+        )
+        plain_text = str(_db_row_value(msg, "plain_text", "") or "")
+        readable_text = plain_text or str(_db_row_value(msg, "text", "") or "")
+        create_time = _db_row_value(msg, "create_time")
+        segments = _db_row_value(msg, "segments")
+        # 新记录优先消费 canonical segments，旧记录缺失时才退回可读文本。
+        if not isinstance(segments, list) or not segments:
+            segments = [{"type": "text", "data": {"text": readable_text}}]
 
         formatted_messages.append(
             {
-                "message_id": getattr(msg, "id", None),
-                "user_id": numeric_user_id,
+                "message_id": _db_row_value(msg, "message_id"),
+                "user_id": normalized_sender_id,
                 "time": int(create_time.timestamp()) if create_time else 0,
-                "message_type": "group",
-                "message": [{"type": "text", "data": {"text": plain_text}}],
-                "raw_message": plain_text,
-                "sender": {"user_id": numeric_user_id},
+                "message_type": _db_row_value(msg, "message_type", "group")
+                or "group",
+                "message": segments,
+                "raw_message": readable_text,
+                "sender": {"user_id": normalized_sender_id},
                 "_summary_source": "db",
             }
         )
@@ -360,11 +389,10 @@ async def _fetch_raw_messages_from_db(
         f"尝试从数据库获取群 {group_id} 的最近 {count} 条聊天记录", command="DB历史"
     )
     try:
-        db_messages = (
-            await ChatHistory.filter(group_id=group_id_str)
-            .order_by("-create_time")
-            .limit(count)
-            .all()
+        db_messages = await ChatHistoryQuery.structured_recent(
+            group_id=group_id_str,
+            direction=_get_db_query_direction(),
+            limit=count,
         )
         if not db_messages:
             logger.warning(
@@ -377,13 +405,9 @@ async def _fetch_raw_messages_from_db(
         formatted_messages = _format_db_messages(list(reversed(db_messages)))
         logger.debug(
             "从数据库成功获取并格式化 "
-            f"{len(formatted_messages)} 条消息 (使用 plain_text)",
+            f"{len(formatted_messages)} 条结构化消息",
             command="DB历史",
             group_id=group_id,
-        )
-        logger.warning(
-            "使用数据库历史记录时，图片、@、引用回复等非文本信息可能无法正确处理。",
-            command="DB历史",
         )
         return formatted_messages
     except Exception as e:
@@ -414,12 +438,8 @@ async def _fetch_raw_messages_from_db_time_range(
     safe_limit = max(0, int(limit))
     start_dt = _timestamp_to_scope_datetime(start_ts)
     end_dt = _timestamp_to_scope_datetime(end_ts)
-    end_lookup = "create_time__lte" if include_end else "create_time__lt"
-    filters = {
-        "group_id": group_id_str,
-        "create_time__gte": start_dt,
-        end_lookup: end_dt,
-    }
+    # 服务层范围查询使用闭区间；排除末秒时将上界退回一整秒保持旧语义。
+    query_end = end_dt if include_end else _timestamp_to_scope_datetime(end_ts - 1)
 
     logger.debug(
         "尝试从数据库按时间范围获取群 "
@@ -430,12 +450,14 @@ async def _fetch_raw_messages_from_db_time_range(
         if safe_limit <= 0:
             return _DbTimeRangeFetchResult(messages=[], has_more=False)
 
-        # 时间范围可能远大于 API 上限，额外多取一条只用于判断是否仍有缺失。
-        db_messages = (
-            await ChatHistory.filter(**filters)
-            .order_by("-create_time", "-id")
-            .limit(safe_limit + 1)
-            .all()
+        # 时间范围可能远大于 API 上限，倒序额外多取一条以保留最新记录并判断缺失。
+        db_messages = await ChatHistoryQuery.structured_range(
+            start=start_dt,
+            end=query_end,
+            group_id=group_id_str,
+            direction=_get_db_query_direction(),
+            descending=True,
+            limit=safe_limit + 1,
         )
         has_more = len(db_messages) > safe_limit
         if has_more:
@@ -444,13 +466,9 @@ async def _fetch_raw_messages_from_db_time_range(
         messages = _format_db_messages(list(reversed(db_messages)))
         logger.debug(
             "从数据库按时间范围成功获取并格式化 "
-            f"{len(messages)} 条消息，has_more={has_more} (使用 plain_text)",
+            f"{len(messages)} 条结构化消息，has_more={has_more}",
             command="DB历史",
             group_id=group_id,
-        )
-        logger.warning(
-            "使用数据库历史记录时，图片、@、引用回复等非文本信息可能无法正确处理。",
-            command="DB历史",
         )
         return _DbTimeRangeFetchResult(
             messages=messages,
@@ -540,9 +558,10 @@ async def _supplement_time_scope_with_db(
     coverage_complete = False
     warning_message = build_partial_coverage_warning(scope, fetch_count)
 
-    if not ChatHistory:
+    if not ChatHistoryQuery:
         logger.warning(
-            "时间范围超过 API 覆盖范围，但 ChatHistory 不可用，无法补全数据库历史。",
+            "时间范围超过 API 覆盖范围，但 ChatHistoryQuery 不可用，"
+            "无法补全数据库历史。",
             command="DB历史",
             group_id=group_id,
         )
@@ -602,7 +621,7 @@ async def get_group_messages(
     cache_ttl = int(base_config.get("MESSAGE_CACHE_TTL_SECONDS", 300))
     max_len = int(base_config.get("SUMMARY_MAX_LENGTH", 1000))
     fetch_count = scope.fetch_count(max_len)
-    source_key = "db" if use_db and ChatHistory else "api"
+    source_key = "db" if use_db and ChatHistoryQuery else "api"
     cache_key = f"{group_id}:{fetch_count}:{source_key}"
 
     if cache_ttl > 0 and not target_user_ids and not scope.is_time_based:
@@ -620,7 +639,7 @@ async def get_group_messages(
     warning_message: str | None = None
     coverage_complete = True
 
-    if use_db and ChatHistory:
+    if use_db and ChatHistoryQuery:
         if scope.is_time_based:
             # DB 主路径直接按时间查询，避免“最近 N 条”先截断后再过滤导致范围缺失。
             db_result = await _fetch_raw_messages_from_db_time_range(
@@ -640,9 +659,10 @@ async def get_group_messages(
             raw_messages = await _fetch_raw_messages_from_db(group_id, fetch_count)
         source = "db"
     else:
-        if use_db and not ChatHistory:
+        if use_db and not ChatHistoryQuery:
             logger.warning(
-                "配置了使用数据库历史但 ChatHistory 模型导入失败，回退到 API 获取。"
+                "配置了使用数据库历史但 ChatHistoryQuery 服务导入失败，"
+                "回退到 API 获取。"
             )
         raw_messages = await _fetch_raw_messages_from_api(bot, group_id, fetch_count)
         source = "api"
@@ -816,7 +836,7 @@ async def _prefetch_reply_messages(
     for msg in messages:
         for segment in _normalize_segments(msg.get("message", [])):
             if segment.get("type") == "reply":
-                reply_id = str(segment.get("data", {}).get("id", "")).strip()
+                reply_id = _extract_reply_segment_id(segment)
                 if reply_id:
                     reply_ids.add(reply_id)
 
@@ -837,11 +857,17 @@ def _collect_user_ids_from_segments(
     segments: list[dict[str, Any]],
     user_ids_to_fetch: set[str],
 ) -> None:
+    """收集 API at 与核心 mention 两种消息段中的用户 ID。"""
     for segment in segments:
         seg_type = segment.get("type")
         seg_data = segment.get("data", {})
-        if seg_type == "at" and "qq" in seg_data:
-            user_ids_to_fetch.add(str(seg_data["qq"]))
+        target = None
+        if seg_type == "at":
+            target = seg_data.get("qq")
+        elif seg_type == "mention":
+            target = seg_data.get("target")
+        if target is not None:
+            user_ids_to_fetch.add(str(target))
 
 
 def _collect_user_ids(
@@ -908,6 +934,12 @@ def _build_reply_preview(
     )
 
 
+def _extract_reply_segment_id(segment: dict[str, Any]) -> str:
+    """兼容 API reply.id 与核心 canonical reply.message_id。"""
+    segment_data = segment.get("data", {})
+    return str(segment_data.get("id") or segment_data.get("message_id") or "").strip()
+
+
 def _render_message_segments(
     message: dict[str, Any],
     user_info_cache: dict[str, str],
@@ -919,9 +951,8 @@ def _render_message_segments(
 
     for segment in _normalize_segments(message.get("message", [])):
         seg_type = segment.get("type")
-        seg_data = segment.get("data", {})
         if seg_type == "reply":
-            reply_id = str(seg_data.get("id", "")).strip()
+            reply_id = _extract_reply_segment_id(segment)
             if not reply_id:
                 text_segments.append("[回复消息]")
                 continue

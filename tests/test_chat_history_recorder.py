@@ -200,7 +200,7 @@ def test_normalize_message_segments_keeps_lightweight_media_metadata():
     }
     assert segments[3] == {
         "type": "audio",
-        "data": {"file": "voice.silk", "url": "https://example.com/v"},
+        "data": {"file": "voice.silk"},
     }
     assert "base64://" not in readable_text
 
@@ -240,7 +240,8 @@ def test_normalize_unimsg_uses_cross_platform_contract():
         "type": "mention",
         "data": {"target": "123", "kind": "user"},
     }
-    assert segments[2]["data"]["url"].endswith("...[truncated]")
+    for segment in segments:
+        assert "url" not in segment["data"]
     assert segments[6] == {"type": "emoji", "data": {"id": "88"}}
     assert segments[7] == {
         "type": "reply",
@@ -257,7 +258,8 @@ def test_normalize_unimsg_uses_cross_platform_contract():
     assert readable_text == (
         "看看@123[图片][语音][视频][文件][表情:88][引用消息][合并转发][卡片]"
     )
-    assert len(segments[2]["data"]["url"]) == 512
+    assert segments[2]["data"] == {"name": "pic.png"}
+    assert segments[5]["data"] == {"name": "file.zip"}
 
 
 def test_normalize_unknown_segment_keeps_safe_metadata():
@@ -266,6 +268,7 @@ def test_normalize_unknown_segment_keeps_safe_metadata():
             "type": "platform_magic",
             "data": {
                 "value": "ok",
+                "url": "https://example.com/temporary",
                 "raw": "base64://large-payload",
                 "nested": {},
             },
@@ -586,6 +589,10 @@ async def test_chat_history_query_text_range_selects_only_lightweight_fields(
         "text",
         "message_id",
         "reply_to_message_id",
+        "direction",
+        "bot_id",
+        "platform",
+        "message_type",
     )
     assert "segments" not in query.value_fields
     assert query.order_fields == ("create_time", "id")
@@ -611,7 +618,73 @@ async def test_chat_history_query_structured_range_includes_segments(monkeypatch
     assert query is not None
     assert "segments" in query.value_fields
     assert "segment_types" in query.value_fields
+    assert "direction" in query.value_fields
+    assert "bot_id" in query.value_fields
+    assert "platform" in query.value_fields
+    assert "message_type" in query.value_fields
     assert query.limit_value == 200
+
+
+@pytest.mark.asyncio
+async def test_chat_history_query_structured_range_can_read_newest_first(monkeypatch):
+    monkeypatch.setattr(recorder_mod, "ChatHistory", _FakeChatHistory)
+    start = datetime(2026, 6, 17, 0, 0, 0)
+    end = start + timedelta(hours=24)
+
+    await ChatHistoryQuery.structured_range(
+        start=start,
+        end=end,
+        group_id="2000",
+        descending=True,
+        limit=200,
+    )
+
+    query = _FakeChatHistory.last_query
+    assert query is not None
+    assert query.order_fields == ("-create_time", "-id")
+
+
+@pytest.mark.asyncio
+async def test_chat_history_query_text_recent_uses_lightweight_projection(monkeypatch):
+    monkeypatch.setattr(recorder_mod, "ChatHistory", _FakeChatHistory)
+    _FakeChatHistory.rows = [{"id": 1, "text": "hello"}]
+
+    rows = await ChatHistoryQuery.text_recent(
+        group_id="2000",
+        direction="all",
+        limit=MAX_QUERY_LIMIT + 1,
+    )
+
+    query = _FakeChatHistory.last_query
+    assert rows == _FakeChatHistory.rows
+    assert query is not None
+    assert query.filters == [{"group_id": "2000"}]
+    assert query.order_fields == ("-create_time", "-id")
+    assert query.limit_value == MAX_QUERY_LIMIT
+    assert "segments" not in query.value_fields
+    assert "direction" in query.value_fields
+    assert "bot_id" in query.value_fields
+
+
+@pytest.mark.asyncio
+async def test_chat_history_query_structured_recent_includes_segments(monkeypatch):
+    monkeypatch.setattr(recorder_mod, "ChatHistory", _FakeChatHistory)
+    _FakeChatHistory.rows = [{"id": 1, "segments": []}]
+
+    rows = await ChatHistoryQuery.structured_recent(
+        group_id="2000",
+        direction="in",
+        limit=250,
+    )
+
+    query = _FakeChatHistory.last_query
+    assert rows == _FakeChatHistory.rows
+    assert query is not None
+    assert query.filters == [{"group_id": "2000"}, {"direction": "in"}]
+    assert query.order_fields == ("-create_time", "-id")
+    assert query.limit_value == 250
+    assert "segments" in query.value_fields
+    assert "segment_types" in query.value_fields
 
 
 @pytest.mark.asyncio

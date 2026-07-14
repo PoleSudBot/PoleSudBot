@@ -161,6 +161,78 @@ class _FailingChatHistory:
         raise RuntimeError("db down")
 
 
+class _FakeChatHistoryQueryService:
+    @staticmethod
+    def _row_value(row, key: str, default=None):
+        if isinstance(row, dict):
+            return row.get(key, default)
+        return getattr(row, key, default)
+
+    @classmethod
+    def _filter_rows(cls, **kwargs) -> list[SimpleNamespace]:
+        _FakeChatHistory.filters.append(kwargs)
+        rows = list(_FakeChatHistory.rows)
+        group_id = kwargs.get("group_id")
+        if group_id is not None:
+            rows = [
+                row
+                for row in rows
+                if str(cls._row_value(row, "group_id")) == str(group_id)
+            ]
+        direction = kwargs.get("direction")
+        if direction != "all":
+            rows = [
+                row
+                for row in rows
+                if cls._row_value(row, "direction", "in") == direction
+            ]
+        start = kwargs.get("start")
+        if start is not None:
+            rows = [row for row in rows if cls._row_value(row, "create_time") >= start]
+        end = kwargs.get("end")
+        if end is not None:
+            rows = [row for row in rows if cls._row_value(row, "create_time") <= end]
+        return rows
+
+    @staticmethod
+    def _to_dict(row) -> dict:
+        return dict(row) if isinstance(row, dict) else vars(row).copy()
+
+    @classmethod
+    async def structured_recent(cls, **kwargs) -> list[dict]:
+        rows = cls._filter_rows(**kwargs)
+        rows.sort(
+            key=lambda row: (
+                cls._row_value(row, "create_time"),
+                cls._row_value(row, "id"),
+            ),
+            reverse=True,
+        )
+        return [cls._to_dict(row) for row in rows[: kwargs["limit"]]]
+
+    @classmethod
+    async def structured_range(cls, **kwargs) -> list[dict]:
+        rows = cls._filter_rows(**kwargs)
+        rows.sort(
+            key=lambda row: (
+                cls._row_value(row, "create_time"),
+                cls._row_value(row, "id"),
+            ),
+            reverse=kwargs.get("descending", False),
+        )
+        return [cls._to_dict(row) for row in rows[: kwargs["limit"]]]
+
+
+class _FailingChatHistoryQueryService:
+    @classmethod
+    async def structured_recent(cls, **_kwargs):
+        raise RuntimeError("db down")
+
+    @classmethod
+    async def structured_range(cls, **_kwargs):
+        raise RuntimeError("db down")
+
+
 class _FakeBot:
     self_id = "999"
 
@@ -226,6 +298,14 @@ def summary_modules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     services_module = types.ModuleType("zhenxun.services")
     monkeypatch.setitem(sys.modules, "zhenxun.services", services_module)
     monkeypatch.setitem(sys.modules, "zhenxun.services.log", logger_module)
+
+    chat_history_service_module = types.ModuleType("zhenxun.services.chat_history")
+    chat_history_service_module.ChatHistoryQuery = _FakeChatHistoryQueryService
+    monkeypatch.setitem(
+        sys.modules,
+        "zhenxun.services.chat_history",
+        chat_history_service_module,
+    )
 
     path_config_module = types.ModuleType("zhenxun.configs.path_config")
     path_config_module.TEMP_PATH = tmp_path
@@ -336,13 +416,29 @@ def _db_row(
     user_id: str = "1",
     text: str | None = None,
     row_id: int | None = None,
+    *,
+    message_id: str | None = None,
+    direction: str = "in",
+    bot_id: str = "999",
+    segments: list[dict] | None = None,
+    plain_text: str | None = None,
 ) -> SimpleNamespace:
+    content = text or f"db-{timestamp}"
     return SimpleNamespace(
         id=row_id or timestamp,
         user_id=user_id,
         group_id="123",
-        plain_text=text or f"db-{timestamp}",
+        text=content,
+        plain_text=content if plain_text is None else plain_text,
         create_time=_dt(timestamp),
+        message_id=message_id,
+        reply_to_message_id=None,
+        direction=direction,
+        bot_id=bot_id,
+        platform="qq",
+        message_type="group",
+        segments=segments,
+        segment_types=[],
     )
 
 
@@ -354,6 +450,121 @@ def _scope(module, start_ts: int = 100, end_ts: int = 220):
         start_ts=start_ts,
         end_ts=end_ts,
     )
+
+
+def test_format_db_messages_uses_platform_identity_and_structured_segments(
+    summary_modules,
+):
+    m = summary_modules.message_processing
+    segments = [
+        {"type": "mention", "data": {"target": "123"}},
+        {"type": "text", "data": {"text": "看看"}},
+        {"type": "image", "data": {"summary": "测试图片"}},
+    ]
+    row = vars(
+        _db_row(
+            100,
+            user_id="1",
+            message_id="platform-100",
+            direction="out",
+            bot_id="999",
+            segments=segments,
+        )
+    )
+
+    formatted = m._format_db_messages([row])
+
+    assert formatted == [
+        {
+            "message_id": "platform-100",
+            "user_id": 999,
+            "time": 100,
+            "message_type": "group",
+            "message": segments,
+            "raw_message": "db-100",
+            "sender": {"user_id": 999},
+            "_summary_source": "db",
+        }
+    ]
+
+
+def test_format_db_messages_falls_back_without_segments_or_platform_id(
+    summary_modules,
+):
+    m = summary_modules.message_processing
+    row = vars(
+        _db_row(
+            100,
+            text="legacy readable",
+            plain_text="",
+            message_id=None,
+            segments=None,
+        )
+    )
+
+    formatted = m._format_db_messages([row])
+
+    assert formatted[0]["message_id"] is None
+    assert formatted[0]["message"] == [
+        {"type": "text", "data": {"text": "legacy readable"}}
+    ]
+    assert formatted[0]["raw_message"] == "legacy readable"
+
+
+def test_summary_segment_rendering_supports_canonical_chat_history_types(
+    summary_modules,
+):
+    m = summary_modules.message_processing
+    user_cache = {"123": "Alice"}
+
+    assert (
+        m._segment_to_text(
+            {"type": "mention", "data": {"target": "123"}}, user_cache
+        )
+        == "@Alice"
+    )
+    assert m._segment_to_text({"type": "audio", "data": {}}, user_cache) == "[voice]"
+    assert m._segment_to_text({"type": "emoji", "data": {}}, user_cache) == "[emoji]"
+    assert (
+        m._segment_to_text({"type": "reference", "data": {}}, user_cache)
+        == "[forward]"
+    )
+    assert m._segment_to_text({"type": "card", "data": {}}, user_cache) == "[card]"
+
+
+def test_summary_reply_accepts_canonical_message_id(summary_modules):
+    m = summary_modules.message_processing
+
+    content, reply = m._render_message_segments(
+        {
+            "message": [
+                {"type": "reply", "data": {"message_id": "platform-99"}},
+                {"type": "text", "data": {"text": "继续"}},
+            ]
+        },
+        {},
+        {},
+    )
+
+    assert content == "继续"
+    assert reply is not None
+    assert reply.message_id == "platform-99"
+
+
+@pytest.mark.asyncio
+async def test_db_history_query_direction_follows_bot_exclusion_config(summary_modules):
+    m = summary_modules.message_processing
+    _FakeChatHistory.rows = [_db_row(100)]
+    _FakeChatHistory.filters = []
+
+    await m._fetch_raw_messages_from_db(123, 10)
+
+    assert _FakeChatHistory.filters[-1]["direction"] == "all"
+
+    summary_modules.base_config.values["EXCLUDE_BOT_MESSAGES"] = True
+    await m._fetch_raw_messages_from_db(123, 10)
+
+    assert _FakeChatHistory.filters[-1]["direction"] == "in"
 
 
 def _load_summary_handler(monkeypatch: pytest.MonkeyPatch, summary_modules):
@@ -625,7 +836,7 @@ async def test_time_scope_includes_boundary_second_and_deduplicates_api_overlap(
 
     assert contents.count("api-boundary") == 1
     assert "db-boundary" in contents
-    assert contents == ["old", "api-boundary", "db-boundary", "new"]
+    assert contents == ["old", "db-boundary", "api-boundary", "new"]
     assert result.source == "api+db"
 
 
@@ -672,7 +883,7 @@ async def test_time_scope_keeps_api_partial_result_when_db_supplement_fails(
 ):
     m = summary_modules.message_processing
     summary_modules.base_config.values["SUMMARY_MAX_LENGTH"] = 2
-    monkeypatch.setattr(m, "ChatHistory", _FailingChatHistory)
+    monkeypatch.setattr(m, "ChatHistoryQuery", _FailingChatHistoryQueryService)
     bot = _FakeBot([_raw_message(160), _raw_message(180)])
 
     result = await m.get_group_messages(bot, 123, _scope(summary_modules.scope))
@@ -710,8 +921,8 @@ async def test_use_db_time_scope_queries_by_time_range(summary_modules):
     assert result.source == "db"
     assert result.coverage_complete is True
     assert result.warning_message is None
-    assert _FakeChatHistory.filters[0]["create_time__gte"] == _dt(100)
-    assert _FakeChatHistory.filters[0]["create_time__lte"] == _dt(220)
+    assert _FakeChatHistory.filters[0]["start"] == _dt(100)
+    assert _FakeChatHistory.filters[0]["end"] == _dt(220)
 
 
 @pytest.mark.asyncio

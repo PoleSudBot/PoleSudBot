@@ -24,7 +24,6 @@ SEGMENT_SCAN_MAX_ROWS = 50000
 _MAX_DATA_VALUE_LENGTH = 512
 _MEDIA_KEYS = {
     "file",
-    "url",
     "summary",
     "file_size",
     "file_unique",
@@ -43,6 +42,24 @@ _SEGMENT_TYPE_ALIASES = {
     "hyper": "card",
 }
 _MEDIA_SEGMENTS = {"image", "audio", "video", "file"}
+_TEXT_PROJECTION_FIELDS = (
+    "id",
+    "user_id",
+    "create_time",
+    "text",
+    "message_id",
+    "reply_to_message_id",
+    "direction",
+    "bot_id",
+    "platform",
+    "message_type",
+)
+_STRUCTURED_PROJECTION_FIELDS = (
+    *_TEXT_PROJECTION_FIELDS,
+    "plain_text",
+    "segments",
+    "segment_types",
+)
 _PLACEHOLDER_MAP = {
     "mention": "@{target}",
     "emoji": "[表情:{id}]",
@@ -64,7 +81,7 @@ def _to_str(value: Any) -> str | None:
 
 
 def _truncate(value: Any, limit: int = _MAX_DATA_VALUE_LENGTH) -> Any:
-    """限制入库字段长度，防止媒体URL或异常payload撑大历史表。"""
+    """限制入库字段长度，防止异常payload撑大历史表。"""
     if not isinstance(value, str):
         return value
     if len(value) <= limit:
@@ -126,7 +143,7 @@ def _safe_segment_data(
     if seg_type == "emoji":
         return {
             key: _truncate(data.get(key))
-            for key in ("id", "name", "url")
+            for key in ("id", "name")
             if data.get(key) is not None
         }
     if seg_type in _MEDIA_SEGMENTS:
@@ -146,7 +163,8 @@ def _safe_segment_data(
         **{
             key: _truncate(value)
             for key, value in data.items()
-            if (isinstance(value, str | int | float | bool) or value is None)
+            if key != "url"
+            and (isinstance(value, str | int | float | bool) or value is None)
             and not (isinstance(value, str) and value.startswith("base64://"))
         },
     }
@@ -517,6 +535,60 @@ class ChatHistoryQuery:
         return await query
 
     @classmethod
+    async def text_recent(
+        cls,
+        *,
+        group_id: str | None = None,
+        user_id: str | None = None,
+        bot_id: str | None = None,
+        platform: str | None = None,
+        message_type: str | None = None,
+        direction: QueryDirection = "in",
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """倒序读取面向总结和导出的最近轻量文本字段。"""
+        return await (
+            cls._base_query(
+                group_id=group_id,
+                user_id=user_id,
+                bot_id=bot_id,
+                platform=platform,
+                message_type=message_type,
+                direction=direction,
+            )
+            .order_by("-create_time", "-id")
+            .limit(cls._normalize_limit(limit, default=1000))
+            .values(*_TEXT_PROJECTION_FIELDS)
+        )
+
+    @classmethod
+    async def structured_recent(
+        cls,
+        *,
+        group_id: str | None = None,
+        user_id: str | None = None,
+        bot_id: str | None = None,
+        platform: str | None = None,
+        message_type: str | None = None,
+        direction: QueryDirection = "in",
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """倒序读取包含消息段详情的最近结构化字段。"""
+        return await (
+            cls._base_query(
+                group_id=group_id,
+                user_id=user_id,
+                bot_id=bot_id,
+                platform=platform,
+                message_type=message_type,
+                direction=direction,
+            )
+            .order_by("-create_time", "-id")
+            .limit(cls._normalize_limit(limit, default=1000))
+            .values(*_STRUCTURED_PROJECTION_FIELDS)
+        )
+
+    @classmethod
     async def text_range(
         cls,
         *,
@@ -546,14 +618,7 @@ class ChatHistoryQuery:
         return await (
             query.order_by("create_time", "id")
             .limit(cls._normalize_limit(limit, default=1000))
-            .values(
-                "id",
-                "user_id",
-                "create_time",
-                "text",
-                "message_id",
-                "reply_to_message_id",
-            )
+            .values(*_TEXT_PROJECTION_FIELDS)
         )
 
     @classmethod
@@ -568,6 +633,7 @@ class ChatHistoryQuery:
         platform: str | None = None,
         message_type: str | None = None,
         direction: QueryDirection = "in",
+        descending: bool = False,
         limit: int = 1000,
     ) -> list[dict[str, Any]]:
         """读取需要媒体、艾特和引用详情的结构化消息字段。"""
@@ -583,20 +649,13 @@ class ChatHistoryQuery:
             start=start,
             end=end,
         )
+        order_fields = (
+            ("-create_time", "-id") if descending else ("create_time", "id")
+        )
         return await (
-            query.order_by("create_time", "id")
+            query.order_by(*order_fields)
             .limit(cls._normalize_limit(limit, default=1000))
-            .values(
-                "id",
-                "user_id",
-                "create_time",
-                "text",
-                "plain_text",
-                "message_id",
-                "reply_to_message_id",
-                "segments",
-                "segment_types",
-            )
+            .values(*_STRUCTURED_PROJECTION_FIELDS)
         )
 
     @classmethod

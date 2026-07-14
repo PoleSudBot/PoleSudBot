@@ -198,7 +198,7 @@ class ApiDataSource:
         """
         now = datetime.now()
         filter_date = now - timedelta(days=30, hours=now.hour, minutes=now.minute)
-        chat_query = ChatHistory
+        chat_query = ChatHistory.filter(direction="in")
         call_query = Statistics
         if bot_id:
             chat_query = chat_query.filter(bot_id=bot_id)
