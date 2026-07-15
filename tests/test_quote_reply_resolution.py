@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from importlib import util as importlib_util
+import os
 from pathlib import Path
 import sys
 import types
@@ -1329,6 +1330,44 @@ def test_group_quote_paths_isolate_same_filename_between_groups(
     assert first != second
     assert first.parent == tmp_path / "10001"
     assert second.parent == tmp_path / "10002"
+
+
+def test_resolve_quote_image_path_supports_legacy_flat_default_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    data_path = tmp_path / "data"
+    quote_path = data_path / "quote" / "images"
+    legacy_image = quote_path / "legacy.png"
+    legacy_image.parent.mkdir(parents=True)
+    legacy_image.write_bytes(b"legacy")
+    monkeypatch.setattr(config_module, "DATA_PATH", data_path)
+    monkeypatch.setattr(config_module, "get_quote_path", lambda: quote_path)
+
+    stored_path = "quote/images/legacy.png"
+
+    assert config_module.resolve_quote_image_path(stored_path) == legacy_image
+    assert config_module.safe_file_exists(stored_path) is True
+
+
+def test_resolve_quote_image_path_supports_legacy_external_relative_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    data_path = tmp_path / "data"
+    quote_path = tmp_path / "external" / "quote" / "images"
+    legacy_image = quote_path / "legacy.png"
+    data_path.mkdir()
+    legacy_image.parent.mkdir(parents=True)
+    legacy_image.write_bytes(b"legacy")
+    monkeypatch.setattr(config_module, "DATA_PATH", data_path)
+    monkeypatch.setattr(config_module, "get_quote_path", lambda: quote_path)
+
+    stored_path = Path(os.path.relpath(legacy_image, data_path)).as_posix()
+
+    assert stored_path.startswith("../")
+    assert config_module.resolve_quote_image_path(stored_path) == legacy_image
+    assert config_module.safe_file_exists(stored_path) is True
 
 
 def test_resolve_quote_image_path_rejects_paths_outside_managed_roots(
