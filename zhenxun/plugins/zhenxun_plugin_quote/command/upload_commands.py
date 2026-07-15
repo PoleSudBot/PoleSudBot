@@ -2,6 +2,7 @@ import base64
 import hashlib
 import os
 import html
+from pathlib import Path
 import re
 import uuid
 from typing import Any, cast
@@ -30,7 +31,7 @@ from zhenxun.services.log import logger
 from zhenxun.utils.message import MessageUtils
 from zhenxun.utils.http_utils import AsyncHttpx
 
-from ..config import ensure_quote_path
+from ..config import ensure_quote_path, get_quote_group_path
 from ..command.manage_commands import get_available_themes
 from ..model import Quote, QuoteCardData, QuoteSequenceData, QuotedReplyData
 from ..services.ocr_service import OCRService
@@ -512,6 +513,10 @@ def _build_upload_success_text() -> str:
     return f"保存成功\n{_build_basic_usage_hint_text()}"
 
 
+def _build_upload_success_message(img_data: bytes) -> list[bytes | str]:
+    return [img_data, "\n保存成功\n", _build_basic_usage_hint_text()]
+
+
 def _build_record_success_message(img_data: bytes) -> list[bytes | str]:
     return [img_data, "\n保存成功\n", _build_basic_usage_hint_text()]
 
@@ -551,6 +556,68 @@ def upload_has_image_rule(*, exclude_new_command: bool = False) -> Rule:
         return await _match_upload_with_image(event)
 
     return Rule(_rule)
+
+
+async def _read_local_upload_image(
+    image_path: str | os.PathLike[str], max_bytes: int | None
+) -> bytes:
+    """读取本地上传图片，并在加载进内存前执行字节大小限制。"""
+    path = os.fspath(image_path)
+    file_size = os.path.getsize(path)
+    if max_bytes is not None and file_size > max_bytes:
+        raise ImageProcessError(f"图片大小超过限制（最大 {max_bytes} 字节）")
+    async with aiofiles.open(path, "rb") as file:
+        return await file.read()
+
+
+def _validate_raw_upload_size(
+    img_data: bytes,
+    *,
+    max_bytes: int | None,
+    max_size_mb: int,
+) -> None:
+    """在处理 raw 图片前校验其字节大小。"""
+    if max_bytes is not None and len(img_data) > max_bytes:
+        raise ImageProcessError(f"图片大小超过限制（最大 {max_size_mb} MB）")
+
+
+async def _write_quote_image_if_absent(image_path: Path, img_data: bytes) -> bool:
+    """排他创建语录图片，并返回当前操作是否拥有该文件。"""
+    try:
+        async with aiofiles.open(image_path, "xb") as file:
+            await file.write(img_data)
+        return True
+    except FileExistsError:
+        return False
+
+
+async def _save_quote_image_and_record(
+    image_path: Path,
+    img_data: bytes,
+    **quote_kwargs: Any,
+) -> tuple[Quote | None, bool]:
+    """在同一路径锁内完成文件创建、数据库写入和失败清理。"""
+    async with QuoteService.quote_save_lock(
+        str(quote_kwargs.get("group_id", "")),
+        cast(str | None, quote_kwargs.get("image_hash")),
+        image_path,
+    ):
+        image_created = await _write_quote_image_if_absent(image_path, img_data)
+        try:
+            quote, is_new = await QuoteService.add_quote(
+                image_path=str(image_path),
+                **quote_kwargs,
+            )
+        except Exception:
+            # 仅清理本操作排他创建的文件，已有文件始终留给原引用方。
+            if image_created:
+                await QuoteService.delete_image_if_unreferenced(image_path)
+            raise
+
+        # 返回已有记录时，当前 MD5 路径可能与感知哈希命中的记录不同。
+        if image_created and (quote is None or not is_new):
+            await QuoteService.delete_image_if_unreferenced(image_path)
+        return quote, is_new
 
 
 async def _match_record_reply(event: MessageEvent) -> bool:
@@ -711,34 +778,63 @@ async def save_img_handle(bot: Bot, event: MessageEvent, arp: Arparma, state: T_
             "请直接发送「上传语录+图片」或回复图片消息来上传语录"
         )
 
-    # 3. 统一提取图片二进制数据
+    # 3. 统一提取图片二进制数据，并在进入内存前限制外部资源大小。
+    max_size_mb = int(Config.get_config("quote", "QUOTE_MAX_IMAGE_SIZE_MB", 15) or 0)
+    max_bytes = max_size_mb * 1024 * 1024 if max_size_mb > 0 else None
+    quote_path = ensure_quote_path()
+    temp_image_path = quote_path / f"temp_{uuid.uuid4().hex}.png"
     img_data = b""
     try:
         if target_image.raw:
+            _validate_raw_upload_size(
+                target_image.raw,
+                max_bytes=max_bytes,
+                max_size_mb=max_size_mb,
+            )
             img_data = target_image.raw
         elif target_image.path and os.path.exists(target_image.path):
-            async with aiofiles.open(target_image.path, "rb") as f:
-                img_data = await f.read()
+            img_data = await _read_local_upload_image(target_image.path, max_bytes)
         elif target_image.url:
-            img_data = await AsyncHttpx.get_content(target_image.url)
+            downloaded = await AsyncHttpx.download_file(
+                target_image.url,
+                temp_image_path,
+                stream=True,
+                max_bytes=max_bytes,
+            )
+            if downloaded:
+                img_data = await _read_local_upload_image(temp_image_path, max_bytes)
         elif target_image.id and hasattr(bot, "get_image"):
             # 针对 OneBot V11 本地路径/URL 的回退处理
             resp = await bot.get_image(file=target_image.id)
             if file_path := resp.get("file"):
                 if os.path.exists(file_path):
-                    async with aiofiles.open(file_path, "rb") as f:
-                        img_data = await f.read()
+                    img_data = await _read_local_upload_image(file_path, max_bytes)
             if not img_data and (url := resp.get("url")):
-                img_data = await AsyncHttpx.get_content(url)
+                downloaded = await AsyncHttpx.download_file(
+                    url,
+                    temp_image_path,
+                    stream=True,
+                    max_bytes=max_bytes,
+                )
+                if downloaded:
+                    img_data = await _read_local_upload_image(
+                        temp_image_path,
+                        max_bytes,
+                    )
+    except ImageProcessError as e:
+        temp_image_path.unlink(missing_ok=True)
+        await save_img_cmd.finish(str(e))
     except Exception as e:
         logger.warning(f"获取图片数据失败: {e}", "群聊语录")
 
     if not img_data:
-        await save_img_cmd.finish("未能成功获取图片数据，请检查图片是否有效。")
+        temp_image_path.unlink(missing_ok=True)
+        limit_hint = f"且不超过 {max_size_mb} MB" if max_bytes is not None else ""
+        await save_img_cmd.finish(
+            f"未能成功获取图片数据，请检查图片是否有效{limit_hint}。"
+        )
 
     # 4. 创建临时文件以供后续 OCR 和哈希计算使用
-    quote_path = ensure_quote_path()
-    temp_image_path = quote_path / f"temp_{uuid.uuid4().hex}.png"
     try:
         async with aiofiles.open(temp_image_path, "wb") as f:
             await f.write(img_data)
@@ -774,11 +870,7 @@ async def save_img_handle(bot: Bot, event: MessageEvent, arp: Arparma, state: T_
         ocr_content = await OCRService.recognize_text(str(temp_image_path))
 
         image_name = hashlib.md5(img_data).hexdigest() + ".png"
-        quote_path = ensure_quote_path()
-        final_image_path = quote_path / image_name
-
-        async with aiofiles.open(final_image_path, "wb") as f:
-            await f.write(img_data)
+        final_image_path = get_quote_group_path(group_id) / image_name
 
         if temp_image_path != final_image_path and os.path.exists(temp_image_path):
             try:
@@ -787,9 +879,10 @@ async def save_img_handle(bot: Bot, event: MessageEvent, arp: Arparma, state: T_
             except Exception as e:
                 logger.error(f"删除临时文件失败: {e}", "群聊语录", e=e)
 
-        quote, is_new = await QuoteService.add_quote(
+        quote, is_new = await _save_quote_image_and_record(
+            final_image_path,
+            img_data,
             group_id=group_id,
-            image_path=str(final_image_path),
             ocr_content=ocr_content,
             recorded_text=None,
             uploader_user_id=user_id,
@@ -799,17 +892,13 @@ async def save_img_handle(bot: Bot, event: MessageEvent, arp: Arparma, state: T_
 
         if quote:
             if is_new:
-                await bot.call_api(
-                    "send_group_msg",
-                    **{
-                        "group_id": int(group_id),
-                        "message": MessageSegment.reply(message_id)
-                        + _build_upload_success_text(),
-                    },
+                await MessageUtils.build_message(
+                    _build_upload_success_message(img_data)
+                ).send(
+                    target=event,
+                    bot=bot,
                 )
             else:
-                if os.path.exists(final_image_path):
-                    os.remove(final_image_path)
                 await bot.call_api(
                     "send_group_msg",
                     **{
@@ -1096,15 +1185,13 @@ async def _handle_record_command(
         return
 
     image_name = image_hash + ".png"
-    image_path = ensure_quote_path() / image_name
+    image_path = get_quote_group_path(group_id) / image_name
 
     try:
-        async with aiofiles.open(image_path, "wb") as file:
-            await file.write(img_data)
-
-        quote, is_new = await QuoteService.add_quote(
+        quote, is_new = await _save_quote_image_and_record(
+            image_path,
+            img_data,
             group_id=group_id,
-            image_path=str(image_path),
             ocr_content=None,
             recorded_text=recorded_text,
             uploader_user_id=user_id,
@@ -1118,14 +1205,10 @@ async def _handle_record_command(
                 _build_record_success_message(img_data)
             ).send(target=event, bot=bot)
         else:
-            if os.path.exists(image_path):
-                os.remove(image_path)
             msg = "不要重复记录" if not is_new else "保存语录时发生意外，请稍后再试"
             await MessageUtils.build_message(msg).send(target=event, bot=bot)
     except Exception as e:
         logger.error(f"记录语录过程中发生IO或数据库错误: {e}", "群聊语录", e=e)
-        if os.path.exists(image_path):
-            os.remove(image_path)
         await MessageUtils.build_message("保存语录时发生意外，请稍后再试").send(
             target=event, bot=bot
         )

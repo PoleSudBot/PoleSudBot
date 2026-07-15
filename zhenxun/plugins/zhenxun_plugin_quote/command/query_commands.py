@@ -422,6 +422,10 @@ async def record_pool_handle(bot: Bot, event: Event, arp: Arparma, state: T_Stat
     """语录查询处理函数。"""
     session_id = event.get_session_id()
     if "group" not in session_id:
+        await MessageUtils.build_message("请在群聊中使用语录查询。").send(
+            target=event,
+            bot=bot,
+        )
         return
 
     group_id = session_id.split("_")[1]

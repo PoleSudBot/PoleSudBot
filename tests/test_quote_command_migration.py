@@ -179,6 +179,14 @@ def test_record_success_message_keeps_image_and_usage_hint_in_one_message():
     assert "语录 [关键词/@用户]" in message_parts[2]
 
 
+def test_upload_success_message_keeps_original_image_and_usage_hint():
+    message_parts = upload_commands._build_upload_success_message(b"original-image")
+
+    assert message_parts[0] == b"original-image"
+    assert "保存成功" in message_parts[1]
+    assert "上传语录 [图片] [tag/@用户 ...]" in message_parts[2]
+
+
 def test_plugin_usage_text_is_updated_to_new_commands():
     usage_text = PLUGIN_INIT_PATH.read_text(encoding="utf-8")
 

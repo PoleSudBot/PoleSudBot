@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from importlib import util as importlib_util
 from pathlib import Path
 import sys
 import types
 from types import SimpleNamespace
 
+import httpx
 import nonebot
 import pytest
 
@@ -66,6 +68,7 @@ tag_utils = _load_module(
     f"{PLUGIN_PACKAGE}.utils.tag_utils",
     PLUGIN_ROOT / "utils" / "tag_utils.py",
 )
+config_module = sys.modules[f"{PLUGIN_PACKAGE}.config"]
 
 QuoteService = quote_service_module.QuoteService
 Image = manage_commands.Image
@@ -790,6 +793,7 @@ async def test_set_pending_emoji_like_ignores_api_failure(monkeypatch):
 async def test_save_img_handle_writes_dual_mention_tags(monkeypatch, tmp_path: Path):
     captured: dict[str, object] = {}
     sent_api_calls: list[tuple[str, dict]] = []
+    sent_messages: list[object] = []
 
     async def _fake_extract_tags(bot, group_id, arp, arg_name="parts"):
         assert group_id == "123"
@@ -812,12 +816,25 @@ async def test_save_img_handle_writes_dual_mention_tags(monkeypatch, tmp_path: P
         async def call_api(self, name: str, **kwargs):
             sent_api_calls.append((name, kwargs))
 
+    class _FakeMessage:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def send(self, target=None, bot=None):
+            sent_messages.append(self.payload)
+
     monkeypatch.setattr(
         upload_commands,
         "extract_manual_tags_with_mention_names",
         _fake_extract_tags,
     )
     monkeypatch.setattr(upload_commands, "ensure_quote_path", lambda: tmp_path)
+    monkeypatch.setattr(
+        upload_commands,
+        "get_quote_group_path",
+        lambda group_id: tmp_path / str(group_id),
+    )
+    (tmp_path / "123").mkdir()
     monkeypatch.setattr(upload_commands, "get_img_hash", _fake_get_img_hash)
     monkeypatch.setattr(
         upload_commands.OCRService, "recognize_text", _fake_recognize_text
@@ -830,7 +847,16 @@ async def test_save_img_handle_writes_dual_mention_tags(monkeypatch, tmp_path: P
         "filter",
         lambda **kwargs: _FakeExistsQuery(False),
     )
-    monkeypatch.setattr(upload_commands, "_set_pending_emoji_like", _fake_set_pending_emoji_like)
+    monkeypatch.setattr(
+        upload_commands,
+        "_set_pending_emoji_like",
+        _fake_set_pending_emoji_like,
+    )
+    monkeypatch.setattr(
+        upload_commands.MessageUtils,
+        "build_message",
+        lambda payload: _FakeMessage(payload),
+    )
 
     arp = SimpleNamespace(
         all_matched_args={"parts": [upload_commands.UniImage(raw=b"fake-image-bytes")]},
@@ -847,7 +873,8 @@ async def test_save_img_handle_writes_dual_mention_tags(monkeypatch, tmp_path: P
 
     assert captured["group_id"] == "123"
     assert captured["manual_tags"] == ["user:114514", "群主_张三"]
-    assert any(call[0] == "send_group_msg" for call in sent_api_calls)
+    assert sent_messages
+    assert sent_messages[0][0] == b"fake-image-bytes"
 
 
 @pytest.mark.asyncio
@@ -1194,8 +1221,9 @@ async def test_delete_quote_standalone_prefers_reply_quote(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_delete_quote_standalone_falls_back_to_last_quote(monkeypatch):
+async def test_delete_quote_standalone_without_reply_only_sends_guidance(monkeypatch):
     calls = {"reply": 0, "last": 0}
+    sent_messages: list[object] = []
 
     async def _fake_get_quote_from_reply(bot, event, session):
         return None
@@ -1206,12 +1234,22 @@ async def test_delete_quote_standalone_falls_back_to_last_quote(monkeypatch):
     async def _fake_handle_delete_last_quote(bot, event, session):
         calls["last"] += 1
 
+    class _FakeMessage:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def send(self, target=None, bot=None):
+            sent_messages.append(self.payload)
+
     monkeypatch.setattr(manage_commands, "_get_quote_from_reply", _fake_get_quote_from_reply)
     monkeypatch.setattr(
         manage_commands, "_handle_delete_reply_quote", _fake_handle_delete_reply_quote
     )
     monkeypatch.setattr(
         manage_commands, "_handle_delete_last_quote", _fake_handle_delete_last_quote
+    )
+    monkeypatch.setattr(
+        manage_commands.MessageUtils, "build_message", lambda payload: _FakeMessage(payload)
     )
 
     session = SimpleNamespace(group=SimpleNamespace(id="123"))
@@ -1220,7 +1258,8 @@ async def test_delete_quote_standalone_falls_back_to_last_quote(monkeypatch):
         SimpleNamespace(), SimpleNamespace(), session
     )
 
-    assert calls == {"reply": 0, "last": 1}
+    assert calls == {"reply": 0, "last": 0}
+    assert sent_messages == ["请回复需要删除的语录图片后再使用此命令。"]
 
 
 @pytest.mark.asyncio
@@ -1277,3 +1316,466 @@ async def test_handle_delete_reply_quote_reuses_cached_state_quote(
     assert lookup_calls == 0
     assert deleted_quotes == [cached_quote]
     assert sent_messages
+
+
+def test_group_quote_paths_isolate_same_filename_between_groups(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    monkeypatch.setattr(config_module, "get_quote_path", lambda: tmp_path)
+
+    first = config_module.get_quote_group_path("10001") / "same.png"
+    second = config_module.get_quote_group_path("10002") / "same.png"
+
+    assert first != second
+    assert first.parent == tmp_path / "10001"
+    assert second.parent == tmp_path / "10002"
+
+
+def test_resolve_quote_image_path_rejects_paths_outside_managed_roots(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    data_path = tmp_path / "data"
+    quote_path = tmp_path / "quotes"
+    data_path.mkdir()
+    quote_path.mkdir()
+    monkeypatch.setattr(config_module, "DATA_PATH", data_path)
+    monkeypatch.setattr(config_module, "get_quote_path", lambda: quote_path)
+
+    with pytest.raises(ValueError, match="语录图片路径越界"):
+        config_module.resolve_quote_image_path("../../etc/passwd")
+
+
+@pytest.mark.asyncio
+async def test_delete_quote_restores_file_when_database_delete_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    image_path = tmp_path / "quote.png"
+    image_path.write_bytes(b"image")
+    quote = SimpleNamespace(id=7, group_id="123", image_path="quote.png")
+
+    class _FailingDeleteQuery:
+        async def delete(self):
+            raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(
+        quote_service_module, "resolve_quote_image_path", lambda path: image_path
+    )
+    monkeypatch.setattr(
+        quote_service_module.Quote, "filter", lambda **kwargs: _FailingDeleteQuery()
+    )
+
+    result = await QuoteService.delete_quote_instance(quote)
+
+    assert result is False
+    assert image_path.read_bytes() == b"image"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_delete_does_not_restore_orphan_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    image_path = tmp_path / "quote.png"
+    image_path.write_bytes(b"image")
+    quote = SimpleNamespace(id=17, group_id="123", image_path="quote.png")
+    first_delete_started = asyncio.Event()
+    allow_first_delete = asyncio.Event()
+    delete_call_count = 0
+
+    class _DeleteQuery:
+        def __init__(self, call_index: int):
+            self.call_index = call_index
+
+        async def delete(self):
+            if self.call_index == 0:
+                first_delete_started.set()
+                await allow_first_delete.wait()
+                return 0
+            return 1
+
+    def _filter(**kwargs):
+        nonlocal delete_call_count
+        query = _DeleteQuery(delete_call_count)
+        delete_call_count += 1
+        return query
+
+    monkeypatch.setattr(
+        quote_service_module, "resolve_quote_image_path", lambda path: image_path
+    )
+    monkeypatch.setattr(quote_service_module.Quote, "filter", _filter)
+
+    first_task = asyncio.create_task(QuoteService.delete_quote_instance(quote))
+    await first_delete_started.wait()
+    second_task = asyncio.create_task(QuoteService.delete_quote_instance(quote))
+    await asyncio.sleep(0)
+    allow_first_delete.set()
+
+    first_result, second_result = await asyncio.gather(first_task, second_task)
+
+    assert first_result is False
+    assert second_result is True
+    assert not image_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_add_manual_tags_uses_locked_latest_value(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    stale_quote = SimpleNamespace(id=8, manual_tags=["stale"])
+    locked_quote = SimpleNamespace(id=8, manual_tags=["latest"])
+    saved_values: list[list[str]] = []
+
+    async def _save(*, using_db=None, update_fields=None):
+        saved_values.append(list(locked_quote.manual_tags))
+
+    locked_quote.save = _save
+
+    class _LockedQuery:
+        def select_for_update(self):
+            return self
+
+        def using_db(self, connection):
+            return self
+
+        async def get(self):
+            return locked_quote
+
+    class _Transaction:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr(
+        quote_service_module.Quote, "filter", lambda **kwargs: _LockedQuery()
+    )
+    monkeypatch.setattr(
+        quote_service_module, "in_transaction", lambda: _Transaction()
+    )
+
+    result = await QuoteService.add_manual_tags(stale_quote, ["new"])
+
+    assert result.success is True
+    assert result.tags == ["latest", "new"]
+    assert result.changed_tags == ["new"]
+    assert stale_quote.manual_tags == ["latest", "new"]
+    assert saved_values == [["latest", "new"]]
+
+
+@pytest.mark.asyncio
+async def test_delete_manual_tags_failure_keeps_original_entity(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    quote = SimpleNamespace(id=9, manual_tags=["keep", "remove"])
+
+    class _FailingTransaction:
+        async def __aenter__(self):
+            raise RuntimeError("database unavailable")
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr(
+        quote_service_module, "in_transaction", lambda: _FailingTransaction()
+    )
+
+    result = await QuoteService.delete_manual_tags(quote, ["remove"])
+
+    assert result.success is False
+    assert result.tags == ["keep", "remove"]
+    assert result.changed_tags == []
+    assert quote.manual_tags == ["keep", "remove"]
+
+
+def test_deletion_keyword_matching_includes_manual_and_auto_tags():
+    quote = SimpleNamespace(
+        ocr_text="",
+        recorded_text="",
+        tags=["自动标签"],
+        manual_tags=["手动标签"],
+    )
+
+    assert QuoteService.matches_deletion_keywords(quote, ["自动标签"])
+    assert QuoteService.matches_deletion_keywords(quote, ["手动标签"])
+    assert not QuoteService.matches_deletion_keywords(quote, ["不存在"])
+
+
+@pytest.mark.asyncio
+async def test_private_quote_query_sends_group_only_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    sent_messages: list[object] = []
+
+    class _FakeMessage:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def send(self, target=None, bot=None):
+            sent_messages.append(self.payload)
+
+    monkeypatch.setattr(
+        query_commands.MessageUtils,
+        "build_message",
+        lambda payload: _FakeMessage(payload),
+    )
+    event = SimpleNamespace(get_session_id=lambda: "private_10001")
+
+    await query_commands.record_pool_handle(
+        SimpleNamespace(), event, SimpleNamespace(), {}
+    )
+
+    assert sent_messages == ["请在群聊中使用语录查询。"]
+
+
+@pytest.mark.asyncio
+async def test_referenced_image_cleanup_keeps_existing_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    image_path = tmp_path / "quote.png"
+    image_path.write_bytes(b"image")
+
+    class _ReferencedQuery:
+        async def exists(self):
+            return True
+
+    monkeypatch.setattr(
+        quote_service_module.Quote, "filter", lambda **kwargs: _ReferencedQuery()
+    )
+
+    removed = await QuoteService.delete_image_if_unreferenced(image_path)
+
+    assert removed is False
+    assert image_path.read_bytes() == b"image"
+
+
+@pytest.mark.asyncio
+async def test_read_local_upload_rejects_file_over_size_limit(tmp_path: Path):
+    image_path = tmp_path / "large.png"
+    image_path.write_bytes(b"123456")
+
+    with pytest.raises(upload_commands.ImageProcessError, match="5 字节"):
+        await upload_commands._read_local_upload_image(image_path, max_bytes=5)
+
+
+def test_validate_raw_upload_accepts_content_at_size_limit():
+    upload_commands._validate_raw_upload_size(b"12345", max_bytes=5, max_size_mb=1)
+
+
+def test_validate_raw_upload_rejects_content_over_size_limit():
+    with pytest.raises(upload_commands.ImageProcessError, match="最大 1 MB"):
+        upload_commands._validate_raw_upload_size(
+            b"123456",
+            max_bytes=5,
+            max_size_mb=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_write_quote_image_tracks_file_creation_ownership(tmp_path: Path):
+    image_path = tmp_path / "quote.png"
+
+    first_created = await upload_commands._write_quote_image_if_absent(
+        image_path,
+        b"first",
+    )
+    second_created = await upload_commands._write_quote_image_if_absent(
+        image_path,
+        b"second",
+    )
+
+    assert first_created is True
+    assert second_created is False
+    assert image_path.read_bytes() == b"first"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_save_failure_does_not_delete_successful_image(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    image_path = tmp_path / "quote.png"
+    first_save_started = asyncio.Event()
+    allow_first_save = asyncio.Event()
+    add_call_count = 0
+
+    async def _fake_add_quote(**kwargs):
+        nonlocal add_call_count
+        call_index = add_call_count
+        add_call_count += 1
+        if call_index == 0:
+            first_save_started.set()
+            await allow_first_save.wait()
+            return None, True
+        return SimpleNamespace(id=18), True
+
+    async def _fake_delete_if_unreferenced(path):
+        Path(path).unlink(missing_ok=True)
+        return True
+
+    monkeypatch.setattr(
+        upload_commands.QuoteService,
+        "add_quote",
+        _fake_add_quote,
+    )
+    monkeypatch.setattr(
+        upload_commands.QuoteService,
+        "delete_image_if_unreferenced",
+        _fake_delete_if_unreferenced,
+    )
+
+    first_task = asyncio.create_task(
+        upload_commands._save_quote_image_and_record(
+            image_path,
+            b"image",
+            group_id="123",
+        )
+    )
+    await first_save_started.wait()
+    second_task = asyncio.create_task(
+        upload_commands._save_quote_image_and_record(
+            image_path,
+            b"image",
+            group_id="123",
+        )
+    )
+    await asyncio.sleep(0)
+    allow_first_save.set()
+
+    first_result, second_result = await asyncio.gather(first_task, second_task)
+
+    assert first_result == (None, True)
+    assert second_result[0].id == 18
+    assert image_path.read_bytes() == b"image"
+
+
+@pytest.mark.asyncio
+async def test_same_perceptual_hash_serializes_different_file_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    first_path = tmp_path / "first.png"
+    second_path = tmp_path / "second.png"
+    active_saves = 0
+    max_active_saves = 0
+    add_call_count = 0
+    existing_quote = SimpleNamespace(id=19)
+
+    async def _fake_add_quote(**kwargs):
+        nonlocal active_saves, max_active_saves, add_call_count
+        call_index = add_call_count
+        add_call_count += 1
+        active_saves += 1
+        max_active_saves = max(max_active_saves, active_saves)
+        await asyncio.sleep(0.01)
+        active_saves -= 1
+        return existing_quote, call_index == 0
+
+    async def _fake_delete_if_unreferenced(path):
+        Path(path).unlink(missing_ok=True)
+        return True
+
+    monkeypatch.setattr(upload_commands.QuoteService, "add_quote", _fake_add_quote)
+    monkeypatch.setattr(
+        upload_commands.QuoteService,
+        "delete_image_if_unreferenced",
+        _fake_delete_if_unreferenced,
+    )
+
+    await asyncio.gather(
+        upload_commands._save_quote_image_and_record(
+            first_path,
+            b"first",
+            group_id="123",
+            image_hash="same-hash",
+        ),
+        upload_commands._save_quote_image_and_record(
+            second_path,
+            b"second",
+            group_id="123",
+            image_hash="same-hash",
+        ),
+    )
+
+    assert max_active_saves == 1
+    assert sum(path.exists() for path in (first_path, second_path)) == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_download_accepts_content_at_size_limit(tmp_path: Path):
+    payload = b"12345"
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=payload, request=request)
+        )
+    )
+    target = tmp_path / "image.bin"
+
+    try:
+        success = await upload_commands.AsyncHttpx.download_file(
+            "https://example.com/image.bin",
+            target,
+            stream=True,
+            max_bytes=len(payload),
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert success is True
+    assert target.read_bytes() == payload
+
+
+@pytest.mark.asyncio
+async def test_stream_download_rejects_content_over_size_limit(tmp_path: Path):
+    payload = b"123456"
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=payload, request=request)
+        )
+    )
+    target = tmp_path / "image.bin"
+
+    try:
+        success = await upload_commands.AsyncHttpx.download_file(
+            "https://example.com/image.bin",
+            target,
+            stream=True,
+            max_bytes=len(payload) - 1,
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert success is False
+    assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_stream_download_rejects_chunked_content_without_length(
+    tmp_path: Path,
+):
+    class _ChunkedStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"123"
+            yield b"456"
+
+    def _handle_request(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=_ChunkedStream(), request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_handle_request))
+    target = tmp_path / "image.bin"
+
+    try:
+        success = await upload_commands.AsyncHttpx.download_file(
+            "https://example.com/image.bin",
+            target,
+            stream=True,
+            max_bytes=5,
+            client=client,
+        )
+    finally:
+        await client.aclose()
+
+    assert success is False
+    assert not target.exists()

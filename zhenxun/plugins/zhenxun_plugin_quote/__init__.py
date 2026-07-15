@@ -88,7 +88,7 @@ __plugin_meta__ = PluginMetadata(
         "示例：`语录统计 热门`、`语录统计 高产上传 5`、`quote stats 热门 10`\n\n"
         "### 管理功能\n"
         "`删除` - 仅在回复 Bot 发出的语录图片时删除该语录，需为上传者或满足删除权限\n"
-        "`删除语录` / `del` - 回复语录时优先删除被回复语录，否则删除本群上一条语录，需满足删除权限\n\n"
+        "`删除语录` / `del` - 回复语录图片后删除对应语录，需满足删除权限\n\n"
         "`tag` - 回复语录图片后查看手动 tag\n"
         "`tag all` / `alltag` - 回复语录图片后查看全部 tag\n"
         "`tag add` / `tag del` - 回复语录图片后添加或删除手动 tag\n"
@@ -112,7 +112,7 @@ __plugin_meta__ = PluginMetadata(
     supported_adapters={"~onebot.v11"},
     extra=PluginExtraData(
         author="webjoin111",
-        version="v1.1.6",
+        version="v1.1.7",
         admin_level=0,
         configs=[
             RegisterConfig(
@@ -149,6 +149,13 @@ __plugin_meta__ = PluginMetadata(
                 value="",
                 help="语录图片保存路径（留空则使用默认路径：DATA_PATH/quote/images）",
                 default_value="",
+            ),
+            RegisterConfig(
+                module="quote",
+                key="QUOTE_MAX_IMAGE_SIZE_MB",
+                value=15,
+                help="上传语录允许的最大图片大小（MB），小于等于 0 时关闭限制。",
+                default_value=15,
             ),
             RegisterConfig(
                 module="quote",

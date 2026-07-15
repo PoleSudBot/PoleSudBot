@@ -590,7 +590,13 @@ class AsyncHttpx:
     @classmethod
     @Retry.api(log_name="文件下载(流式)")
     async def _stream_download(
-        cls, url: str, path: Path, *, client: AsyncClient | None = None, **kwargs
+        cls,
+        url: str,
+        path: Path,
+        *,
+        client: AsyncClient | None = None,
+        max_bytes: int | None = None,
+        **kwargs,
     ) -> None:
         """
         执行单个流式下载的私有方法，被重试装饰器包裹。
@@ -604,6 +610,22 @@ class AsyncHttpx:
             async with active_client.stream("GET", url, **request_kwargs) as response:
                 response.raise_for_status()
                 total = int(response.headers.get("Content-Length", 0))
+                if max_bytes is not None and total > max_bytes:
+                    raise ValueError(f"下载内容超过大小限制: {total} > {max_bytes}")
+
+                downloaded_bytes = 0
+
+                async def _write_chunks(file) -> None:
+                    nonlocal downloaded_bytes
+                    async for chunk in response.aiter_bytes():
+                        downloaded_bytes += len(chunk)
+                        # Content-Length 可能缺失或不可信，仍需按实际字节中止下载。
+                        if max_bytes is not None and downloaded_bytes > max_bytes:
+                            raise ValueError(
+                                "下载内容超过大小限制: "
+                                f"{downloaded_bytes} > {max_bytes}"
+                            )
+                        await file.write(chunk)
 
                 if show_progress:
                     with Progress(
@@ -616,12 +638,20 @@ class AsyncHttpx:
                         task_id = progress.add_task("Download", total=total)
                         async with aiofiles.open(path, "wb") as f:
                             async for chunk in response.aiter_bytes():
+                                downloaded_bytes += len(chunk)
+                                if (
+                                    max_bytes is not None
+                                    and downloaded_bytes > max_bytes
+                                ):
+                                    raise ValueError(
+                                        "下载内容超过大小限制: "
+                                        f"{downloaded_bytes} > {max_bytes}"
+                                    )
                                 await f.write(chunk)
                                 progress.update(task_id, advance=len(chunk))
                 else:
                     async with aiofiles.open(path, "wb") as f:
-                        async for chunk in response.aiter_bytes():
-                            await f.write(chunk)
+                        await _write_chunks(f)
 
     @classmethod
     async def download_file(
@@ -631,6 +661,7 @@ class AsyncHttpx:
         *,
         stream: bool = False,
         show_progress: bool = False,
+        max_bytes: int | None = None,
         client: AsyncClient | None = None,
         **kwargs,
     ) -> bool:
@@ -644,6 +675,7 @@ class AsyncHttpx:
             path: 文件保存的本地路径。
             stream: (可选) 是否使用流式下载，适用于大文件，默认为 False。
             show_progress: (可选) 当 stream=True 时，是否显示下载进度条。默认为 False。
+            max_bytes: (可选) 允许写入的最大字节数，超限时删除未完成文件并返回 False。
             client: (可选) 指定的HTTP客户端。
             **kwargs: 其他所有传递给 get() 方法或 httpx.stream() 的参数。
 
@@ -652,15 +684,28 @@ class AsyncHttpx:
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        normalized_max_bytes = max_bytes if max_bytes and max_bytes > 0 else None
 
         async def worker(current_url: str, **worker_kwargs) -> bool:
             if not stream:
                 content = await cls.get_content(current_url, **worker_kwargs)
+                if (
+                    normalized_max_bytes is not None
+                    and len(content) > normalized_max_bytes
+                ):
+                    raise ValueError(
+                        "下载内容超过大小限制: "
+                        f"{len(content)} > {normalized_max_bytes}"
+                    )
                 async with aiofiles.open(path, "wb") as f:
                     await f.write(content)
             else:
                 await cls._stream_download(
-                    current_url, path, show_progress=show_progress, **worker_kwargs
+                    current_url,
+                    path,
+                    show_progress=show_progress,
+                    max_bytes=normalized_max_bytes,
+                    **worker_kwargs,
                 )
 
             logger.info(
@@ -674,6 +719,8 @@ class AsyncHttpx:
                 url, worker, client=client, **kwargs
             )
         except AllURIsFailedError:
+            # 下载失败时移除半成品，避免调用方误把截断文件当成有效资源。
+            path.unlink(missing_ok=True)
             logger.error(
                 f"所有URL下载均失败 -> {path.absolute()}", "AsyncHttpx:download"
             )

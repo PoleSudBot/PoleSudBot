@@ -1,9 +1,14 @@
 import json
+import asyncio
 import os
 from pathlib import Path
 import random
 import base64
+import uuid
 from collections.abc import Iterable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from threading import Lock
 from typing import Any, ClassVar
 
 from cachetools import TTLCache
@@ -11,6 +16,7 @@ from nonebot.adapters.onebot.v11 import Bot
 from nonebot_plugin_alconna import At, Text
 from tortoise.expressions import F, Q
 from tortoise.functions import Count
+from tortoise.transactions import in_transaction
 
 from zhenxun import ui
 from zhenxun.models.group_member_info import GroupInfoUser
@@ -40,12 +46,95 @@ except ImportError:
     seg = DummySeg()
 
 
+@dataclass(frozen=True)
+class TagMutationResult:
+    """手动 tag 修改结果。"""
+
+    success: bool
+    tags: list[str]
+    changed_tags: list[str]
+
+
+@dataclass
+class _LockEntry:
+    lock: asyncio.Lock
+    users: int = 0
+
+
+class _KeyedAsyncLockPool:
+    """仅串行化同一 key 的异步操作，并在无人使用时释放锁条目。"""
+
+    def __init__(self) -> None:
+        self._entries: dict[str, _LockEntry] = {}
+        self._guard = Lock()
+
+    @asynccontextmanager
+    async def hold(self, key: str):
+        with self._guard:
+            entry = self._entries.setdefault(key, _LockEntry(asyncio.Lock()))
+            entry.users += 1
+
+        acquired = False
+        try:
+            await entry.lock.acquire()
+            acquired = True
+            yield
+        finally:
+            if acquired:
+                entry.lock.release()
+            with self._guard:
+                entry.users -= 1
+                if entry.users == 0:
+                    self._entries.pop(key, None)
+
+
 class QuoteService:
     """语录服务类"""
 
     _recent_quotes: ClassVar[TTLCache] = TTLCache(maxsize=1000, ttl=600)
     _max_history_per_key: ClassVar[int] = 30
     _user_tag_prefix: ClassVar[str] = "user:"
+    _operation_locks: ClassVar[_KeyedAsyncLockPool] = _KeyedAsyncLockPool()
+
+    @classmethod
+    @asynccontextmanager
+    async def image_write_lock(cls, image_path: str | Path):
+        """串行化同一路径的文件创建、数据库写入与失败清理。"""
+        lock_key = f"image:{Path(image_path).resolve()}"
+        async with cls._operation_locks.hold(lock_key):
+            yield
+
+    @classmethod
+    @asynccontextmanager
+    async def quote_save_lock(
+        cls,
+        group_id: str,
+        image_hash: str | None,
+        image_path: str | Path,
+    ):
+        """按数据库去重键串行保存，并同步保护最终图片路径。"""
+        dedup_key = f"save:{group_id}:{image_hash or Path(image_path).resolve()}"
+        async with cls._operation_locks.hold(dedup_key):
+            async with cls.image_write_lock(image_path):
+                yield
+
+    @staticmethod
+    def serialize_image_path(image_path: str | Path) -> str:
+        """将实际图片路径转换为数据库使用的 DATA_PATH 相对路径。"""
+        return Path(os.path.relpath(image_path, DATA_PATH)).as_posix()
+
+    @classmethod
+    async def delete_image_if_unreferenced(cls, image_path: str | Path) -> bool:
+        """仅删除未被任何语录记录引用的图片文件。"""
+        stored_path = cls.serialize_image_path(image_path)
+        if await Quote.filter(image_path=stored_path).exists():
+            return False
+
+        absolute_path = resolve_quote_image_path(image_path)
+        if not absolute_path.exists():
+            return False
+        absolute_path.unlink()
+        return True
 
     @classmethod
     def serialize_user_tag(cls, user_id: str) -> str:
@@ -192,8 +281,7 @@ class QuoteService:
             tags = QuoteService.cut_sentence(tags_source) if tags_source else []
             normalized_manual_tags = QuoteService.normalize_tags(manual_tags or [])
 
-            relative_image_path = os.path.relpath(image_path, DATA_PATH)
-            relative_image_path = Path(relative_image_path).as_posix()
+            relative_image_path = QuoteService.serialize_image_path(image_path)
 
             quote = await Quote.create(
                 group_id=group_id,
@@ -237,31 +325,79 @@ class QuoteService:
 
     @staticmethod
     async def delete_quote_instance(quote: Quote) -> bool:
-        """按语录实体删除数据，避免定位成功后再次走文件名查找。"""
+        """隔离图片后删除语录，数据库失败时恢复原文件。"""
+        async with QuoteService._operation_locks.hold(f"delete:{quote.id}"):
+            try:
+                absolute_image_path = resolve_quote_image_path(quote.image_path)
+            except ValueError as path_error:
+                logger.warning(
+                    f"拒绝删除越界语录图片 - ID: {quote.id}, 路径: {quote.image_path}",
+                    "群聊语录",
+                    e=path_error,
+                )
+                return False
+
+            # 删除与同路径保存共用一把锁，避免文件隔离期间被重新创建或清理。
+            async with QuoteService.image_write_lock(absolute_image_path):
+                return await QuoteService._delete_quote_instance_unlocked(
+                    quote,
+                    absolute_image_path,
+                )
+
+    @staticmethod
+    async def _delete_quote_instance_unlocked(
+        quote: Quote,
+        absolute_image_path: Path,
+    ) -> bool:
+        """在同一语录删除锁内执行文件隔离和数据库删除补偿。"""
+        isolated_image_path: Path | None = None
         try:
-            absolute_image_path = resolve_quote_image_path(quote.image_path)
-            if os.path.exists(absolute_image_path):
-                try:
-                    os.remove(absolute_image_path)
-                    logger.info(f"图片文件删除成功: {absolute_image_path}", "群聊语录")
-                except Exception as file_error:
-                    logger.warning(
-                        f"删除图片文件失败: {absolute_image_path}, 错误: {file_error}",
-                        "群聊语录",
-                        e=file_error,
-                    )
+            if absolute_image_path.exists():
+                isolated_image_path = absolute_image_path.with_name(
+                    f".{absolute_image_path.name}.{uuid.uuid4().hex}.deleting"
+                )
+                # 同盘 rename 是原子的，先隔离可避免数据库失败后留下缺图记录。
+                os.replace(absolute_image_path, isolated_image_path)
             else:
                 logger.warning(f"图片文件不存在: {absolute_image_path}", "群聊语录")
 
-            await Quote.filter(id=quote.id).delete()
+            deleted_count = await Quote.filter(id=quote.id).delete()
+            if not deleted_count:
+                raise RuntimeError("语录记录不存在或已被删除")
+
+            if isolated_image_path:
+                try:
+                    isolated_image_path.unlink(missing_ok=True)
+                except OSError as cleanup_error:
+                    logger.warning(
+                        "清理已隔离图片失败: "
+                        f"{isolated_image_path}, 错误: {cleanup_error}",
+                        "群聊语录",
+                        e=cleanup_error,
+                    )
             logger.info(
                 f"语录删除成功 - ID: {quote.id}, 群组: {quote.group_id}",
                 "群聊语录",
             )
             return True
         except Exception as e:
+            if (
+                isolated_image_path
+                and isolated_image_path.exists()
+                and not absolute_image_path.exists()
+            ):
+                try:
+                    os.replace(isolated_image_path, absolute_image_path)
+                except OSError as restore_error:
+                    logger.error(
+                        "恢复隔离图片失败: "
+                        f"{isolated_image_path} -> {absolute_image_path}",
+                        "群聊语录",
+                        e=restore_error,
+                    )
             logger.error(
-                f"按语录实体删除失败 - ID: {quote.id}, 群组: {quote.group_id}, 错误: {e}",
+                f"按语录实体删除失败 - ID: {quote.id}, "
+                f"群组: {quote.group_id}, 错误: {e}",
                 "群聊语录",
                 e=e,
             )
@@ -714,69 +850,111 @@ class QuoteService:
     @staticmethod
     async def add_tags(quote: Quote, tags: list[str]) -> bool:
         """为语录添加标签"""
-        before_tags = QuoteService.get_manual_tags(quote)
-        updated_tags = await QuoteService.add_manual_tags(quote, tags)
-        return updated_tags != before_tags or not QuoteService.normalize_tags(tags)
+        result = await QuoteService.add_manual_tags(quote, tags)
+        return result.success and (
+            bool(result.changed_tags) or not QuoteService.normalize_tags(tags)
+        )
 
     @classmethod
-    async def add_manual_tags(cls, quote: Quote, tags: list[str]) -> list[str]:
+    async def add_manual_tags(cls, quote: Quote, tags: list[str]) -> TagMutationResult:
         """为语录添加手动标签"""
+        original_tags = cls.get_manual_tags(quote)
         try:
             normalized_tags = cls.normalize_tags(tags)
             logger.info(
                 f"为语录 ID: {quote.id} 添加手动标签: {normalized_tags}", "群聊语录"
             )
 
-            current_tags = cls.get_manual_tags(quote)
-            updated_tags = cls.normalize_tags(current_tags + normalized_tags)
+            async with in_transaction() as connection:
+                # 锁内重新读取，避免并发请求都基于同一个旧列表整体覆盖。
+                locked_quote = (
+                    await Quote.filter(id=quote.id)
+                    .select_for_update()
+                    .using_db(connection)
+                    .get()
+                )
+                current_tags = cls.get_manual_tags(locked_quote)
+                updated_tags = cls.normalize_tags(current_tags + normalized_tags)
+                changed_tags = [tag for tag in updated_tags if tag not in current_tags]
+                locked_quote.manual_tags = updated_tags
+                await locked_quote.save(
+                    using_db=connection,
+                    update_fields=["manual_tags"],
+                )
+
             quote.manual_tags = updated_tags
-            await quote.save(update_fields=["manual_tags"])
 
             logger.info(
                 f"语录 ID: {quote.id} 手动标签更新成功，现有标签: {updated_tags}",
                 "群聊语录",
             )
-            return updated_tags
+            return TagMutationResult(True, updated_tags, changed_tags)
         except Exception as e:
             logger.error(
                 f"为语录添加手动标签失败 - 语录 ID: {quote.id}, 错误: {e}",
                 "群聊语录",
                 e=e,
             )
-            return cls.get_manual_tags(quote)
+            return TagMutationResult(False, original_tags, [])
 
     @staticmethod
     async def delete_tags(quote: Quote, tags: list[str]) -> bool:
         """删除语录的标签"""
-        before_tags = QuoteService.get_manual_tags(quote)
-        updated_tags = await QuoteService.delete_manual_tags(quote, tags)
-        return updated_tags != before_tags or not QuoteService.normalize_tags(tags)
+        result = await QuoteService.delete_manual_tags(quote, tags)
+        return result.success and (
+            bool(result.changed_tags) or not QuoteService.normalize_tags(tags)
+        )
 
     @classmethod
-    async def delete_manual_tags(cls, quote: Quote, tags: list[str]) -> list[str]:
+    async def delete_manual_tags(
+        cls, quote: Quote, tags: list[str]
+    ) -> TagMutationResult:
         """删除语录的手动标签"""
+        original_tags = cls.get_manual_tags(quote)
         try:
             remove_tags = set(cls.normalize_tags(tags))
             logger.info(
                 f"从语录 ID: {quote.id} 删除手动标签: {list(remove_tags)}", "群聊语录"
             )
-            current_tags = cls.get_manual_tags(quote)
-            updated_tags = [tag for tag in current_tags if tag not in remove_tags]
+            async with in_transaction() as connection:
+                # 删除也必须基于锁内最新值，否则会把同时新增的 tag 一并覆盖掉。
+                locked_quote = (
+                    await Quote.filter(id=quote.id)
+                    .select_for_update()
+                    .using_db(connection)
+                    .get()
+                )
+                current_tags = cls.get_manual_tags(locked_quote)
+                updated_tags = [tag for tag in current_tags if tag not in remove_tags]
+                changed_tags = [tag for tag in current_tags if tag in remove_tags]
+                locked_quote.manual_tags = updated_tags
+                await locked_quote.save(
+                    using_db=connection,
+                    update_fields=["manual_tags"],
+                )
+
             quote.manual_tags = updated_tags
-            await quote.save(update_fields=["manual_tags"])
 
             logger.info(
                 f"语录 ID: {quote.id} 手动标签删除成功，现有标签: {updated_tags}",
                 "群聊语录",
             )
-            return updated_tags
+            return TagMutationResult(True, updated_tags, changed_tags)
         except Exception as e:
             logger.error(
                 f"删除语录手动标签失败 - 语录 ID: {quote.id}, 错误: {e}",
                 "群聊语录",
                 e=e,
             )
-            return cls.get_manual_tags(quote)
+            return TagMutationResult(False, original_tags, [])
+
+    @classmethod
+    def matches_deletion_keywords(cls, quote: Quote, keywords: list[str]) -> bool:
+        """按普通查询相同的文本和 tag 范围匹配任一删除关键词。"""
+        return any(
+            keyword.strip() and cls._check_single_keyword_in_quote(keyword, quote)
+            for keyword in keywords
+        )
 
     @classmethod
     def _select_ids_without_record(
@@ -881,19 +1059,21 @@ class QuoteService:
         try:
             query = Q(group_id=group_id)
 
-            if keywords:
-                keyword_query = Q()
-                for kw in keywords:
-                    keyword_query |= Q(ocr_text__icontains=kw)
-                    keyword_query |= Q(recorded_text__icontains=kw)
-                query &= keyword_query
-
             if filters:
                 for key, value in filters.items():
                     if value is not None:
                         query &= Q(**{key: value})
 
-            final_matched_quotes = await Quote.filter(query)
+            candidates = await Quote.filter(query)
+            final_matched_quotes = (
+                [
+                    quote
+                    for quote in candidates
+                    if cls.matches_deletion_keywords(quote, keywords)
+                ]
+                if keywords
+                else list(candidates)
+            )
 
             logger.info(
                 f"找到 {len(final_matched_quotes)} 条与条件匹配的语录",
@@ -1084,9 +1264,17 @@ class QuoteService:
 
             image_path = ""
             if is_image_quote:
-                absolute_path = resolve_quote_image_path(quote.image_path)
-                if os.path.exists(absolute_path):
-                    image_path = f"file://{absolute_path}"
+                try:
+                    absolute_path = resolve_quote_image_path(quote.image_path)
+                    if os.path.exists(absolute_path):
+                        image_path = f"file://{absolute_path}"
+                except ValueError as path_error:
+                    logger.warning(
+                        f"热门语录图片路径越界 - ID: {quote.id}, "
+                        f"路径: {quote.image_path}",
+                        "群聊语录",
+                        e=path_error,
+                    )
 
             card_data = HotQuoteItemData(
                 rank=i + 1,

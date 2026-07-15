@@ -28,6 +28,18 @@ def ensure_quote_path() -> Path:
     return quote_path
 
 
+def get_quote_group_path(group_id: str) -> Path:
+    """为群组创建独立的语录图片目录。"""
+    normalized_group_id = str(group_id).strip()
+    if not normalized_group_id or any(
+        marker in normalized_group_id for marker in ("/", "\\", "..")
+    ):
+        raise ValueError(f"非法群组 ID: {group_id}")
+    group_path = ensure_quote_path() / normalized_group_id
+    group_path.mkdir(parents=True, exist_ok=True)
+    return group_path
+
+
 def get_quote_image_path(filename: str) -> Path:
     """获取语录图片的完整路径"""
     quote_path = ensure_quote_path()
@@ -46,8 +58,18 @@ def resolve_quote_image_path(path_str: str | Path) -> Path:
     解析语录图片路径，无论是相对还是绝对，都返回一个可用的绝对路径。
     这是处理新旧两种路径格式的核心。
     """
-    clean_path = str(path_str).replace("\\", "/").lstrip("/").lstrip("\\")
-    return DATA_PATH / clean_path
+    raw_path = Path(str(path_str).replace("\\", "/"))
+    candidate = (
+        raw_path.resolve()
+        if raw_path.is_absolute()
+        else (DATA_PATH / raw_path).resolve()
+    )
+    managed_roots = {DATA_PATH.resolve(), get_quote_path().resolve()}
+
+    # 历史外置路径可能以相对 DATA_PATH 的 ../ 保存，但解析后必须仍落在当前受管目录内。
+    if not any(candidate.is_relative_to(root) for root in managed_roots):
+        raise ValueError(f"语录图片路径越界: {path_str}")
+    return candidate
 
 
 def safe_file_exists(file_path: str | Path) -> bool:
@@ -55,7 +77,7 @@ def safe_file_exists(file_path: str | Path) -> bool:
     try:
         absolute_path = resolve_quote_image_path(file_path)
         return absolute_path.exists() and absolute_path.is_file()
-    except (OSError, PermissionError) as e:
+    except (OSError, PermissionError, ValueError) as e:
         logger.warning(f"检查文件存在性时出错: {file_path}, 错误: {e}", "群聊语录")
         return False
 

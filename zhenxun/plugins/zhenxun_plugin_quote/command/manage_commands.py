@@ -26,7 +26,6 @@ from zhenxun.utils.message import MessageUtils
 from zhenxun.utils.platform import PlatformUtils
 from zhenxun.utils.rules import admin_check
 
-from ..config import resolve_quote_image_path
 from ..model import Quote
 from ..services.quote_service import QuoteService
 from ..config import QUOTE_ASSETS_PATH
@@ -287,18 +286,25 @@ async def _update_quote_manual_tags(
         ).send(target=event, bot=bot)
         return
 
-    before_tags = QuoteService.get_manual_tags(quote)
-
     if action == "add":
-        after_tags = await QuoteService.add_manual_tags(quote, normalized_tags)
-        changed_tags = [tag for tag in after_tags if tag not in before_tags]
-        prefix = "已添加手动 tag：" if changed_tags else "这些手动 tag 已经都在了："
-        display_tags = changed_tags or normalized_tags
+        result = await QuoteService.add_manual_tags(quote, normalized_tags)
     else:
-        after_tags = await QuoteService.delete_manual_tags(quote, normalized_tags)
-        changed_tags = [tag for tag in before_tags if tag not in after_tags]
+        result = await QuoteService.delete_manual_tags(quote, normalized_tags)
+
+    if not result.success:
+        await MessageUtils.build_message("修改手动 tag 失败，请稍后再试。").send(
+            target=event,
+            bot=bot,
+        )
+        return
+
+    after_tags = result.tags
+    changed_tags = result.changed_tags
+    if action == "add":
+        prefix = "已添加手动 tag：" if changed_tags else "这些手动 tag 已经都在了："
+    else:
         prefix = "已删除手动 tag：" if changed_tags else "这些手动 tag 当前都不存在："
-        display_tags = changed_tags or normalized_tags
+    display_tags = changed_tags or normalized_tags
 
     await MessageUtils.build_message(
         [
@@ -441,7 +447,10 @@ async def handle_delete_quote_standalone(
         )
         return
 
-    await _handle_delete_last_quote(bot, event, session)
+    await MessageUtils.build_message("请回复需要删除的语录图片后再使用此命令。").send(
+        target=event,
+        bot=bot,
+    )
 
 
 @quote_tag_cmd.handle()
@@ -756,14 +765,14 @@ async def handle_adv_delete(
 
         for quote in matched_quotes:
             try:
-                absolute_image_path = resolve_quote_image_path(quote.image_path)
-                if os.path.exists(absolute_image_path):
-                    os.remove(absolute_image_path)
-                await quote.delete()
-                deleted_count += 1
+                if await QuoteService.delete_quote_instance(quote):
+                    deleted_count += 1
+                else:
+                    failed_count += 1
             except Exception as e:
                 logger.error(
-                    f"删除语录失败 - ID: {quote.id}, 路径: {quote.image_path}, 错误: {e}",
+                    f"删除语录失败 - ID: {quote.id}, "
+                    f"路径: {quote.image_path}, 错误: {e}",
                     "群聊语录",
                     e=e,
                 )
