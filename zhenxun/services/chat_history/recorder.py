@@ -70,15 +70,15 @@ _STRUCTURED_PROJECTION_FIELDS = (
 )
 _PLACEHOLDER_MAP = {
     "mention": "@{target}",
-    "emoji": "[表情:{id}]",
-    "image": "[图片]",
-    "sticker": "[表情包]",
-    "audio": "[语音]",
-    "video": "[视频]",
-    "file": "[文件]",
-    "card": "[卡片]",
-    "reference": "[合并转发]",
-    "reply": "[引用消息]",
+    "emoji": "[emoji:{id}]",
+    "image": "[image]",
+    "sticker": "[sticker]",
+    "audio": "[audio]",
+    "video": "[video]",
+    "file": "[file]",
+    "card": "[card]",
+    "reference": "[reference]",
+    "reply": "[reply]",
 }
 _CARD_FIELD_ALIASES = {
     "source": ("source", "app_name", "app", "tag"),

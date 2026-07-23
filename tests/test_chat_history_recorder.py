@@ -200,7 +200,7 @@ def test_normalize_message_segments_keeps_lightweight_media_metadata():
     segments, segment_types, readable_text = normalize_message_segments(message)
 
     assert segment_types == ["text", "mention", "image", "audio"]
-    assert readable_text == "看看@123[图片][语音]"
+    assert readable_text == "看看@123[image][audio]"
     assert segments[2] == {
         "type": "image",
         "data": {},
@@ -263,7 +263,7 @@ def test_normalize_unimsg_uses_cross_platform_contract():
         "data": {"format": "json"},
     }
     assert readable_text == (
-        "看看@123[图片][语音][视频][文件][表情:88][引用消息][合并转发][卡片]"
+        "看看@123[image][audio][video][file][emoji:88][reply][reference][card]"
     )
     assert segments[2]["data"] == {"name": "pic.png"}
     assert segments[5]["data"] == {"name": "file.zip"}
@@ -311,7 +311,7 @@ def test_normalize_segments_uses_raw_message_to_restore_reply_voice_and_sticker(
             },
         },
     ]
-    assert readable_text == "[引用消息][语音]回复语音[表情包]"
+    assert readable_text == "[reply][audio]回复语音[sticker]"
 
 
 def test_sticker_identifiers_keep_length_and_url_safety_limits():
@@ -561,7 +561,7 @@ def test_segments_to_readable_text_outputs_stable_placeholders():
         {"type": "reference", "data": {"id": "forward-id"}},
     ]
 
-    assert segments_to_readable_text(segments) == "看看[图片][合并转发]"
+    assert segments_to_readable_text(segments) == "看看[image][reference]"
 
 
 def test_segments_to_readable_text_supports_legacy_segment_names():
@@ -571,7 +571,7 @@ def test_segments_to_readable_text_supports_legacy_segment_names():
         {"type": "reply", "data": {"id": "999"}},
     ]
 
-    assert segments_to_readable_text(segments) == "@123[语音][引用消息]"
+    assert segments_to_readable_text(segments) == "@123[audio][reply]"
 
 
 def test_build_incoming_record_records_create_time_and_reply_id(monkeypatch):
@@ -602,7 +602,7 @@ def test_build_incoming_record_records_create_time_and_reply_id(monkeypatch):
     assert int(record.create_time.timestamp()) == 1_700_000_000
     assert record.reply_to_message_id == "1234"
     assert record.segment_types == ["reply", "reference", "text"]
-    assert record.text == "[引用消息][合并转发]总结一下"
+    assert record.text == "[reply][reference]总结一下"
     assert "[CQ:" not in record.text
     assert not hasattr(record, "reply_preview")
     assert not hasattr(record, "forward_meta")
@@ -662,8 +662,8 @@ def test_build_incoming_record_keeps_plain_text_text_only(monkeypatch):
 
     assert record.plain_text == "看看"
     assert record.segment_types == ["text", "image"]
-    assert record.text == "看看[图片]"
-    assert segments_to_readable_text(record.segments) == "看看[图片]"
+    assert record.text == "看看[image]"
+    assert segments_to_readable_text(record.segments) == "看看[image]"
 
 
 def test_build_incoming_record_allows_empty_plain_text_for_image(monkeypatch):
@@ -682,7 +682,7 @@ def test_build_incoming_record_allows_empty_plain_text_for_image(monkeypatch):
 
     assert record.plain_text == ""
     assert record.segment_types == ["image"]
-    assert segments_to_readable_text(record.segments) == "[图片]"
+    assert segments_to_readable_text(record.segments) == "[image]"
 
 
 def test_build_incoming_record_falls_back_when_event_time_invalid(monkeypatch):
@@ -872,7 +872,7 @@ async def test_chat_history_query_text_range_selects_only_lightweight_fields(
             "id": 1,
             "user_id": "1000",
             "create_time": datetime(2026, 6, 17, 0, 0, 0),
-            "text": "看看[图片]",
+            "text": "看看[image]",
             "message_id": "10",
             "reply_to_message_id": None,
         }
@@ -1583,7 +1583,7 @@ def test_build_outgoing_record_marks_bot_direction_message_id_and_reply(monkeypa
     assert record.segment_types == ["reply", "text", "image"]
     assert record.reply_to_message_id == "1234"
     assert record.plain_text == "收到"
-    assert record.text == "[引用消息]收到[图片]"
+    assert record.text == "[reply]收到[image]"
     assert "[CQ:" not in record.text
     assert not hasattr(record, "record_version")
 
