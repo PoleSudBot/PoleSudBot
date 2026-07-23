@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable, Sequence
 from datetime import datetime
+import json
 from typing import Any, Literal
 
 from nonebot.adapters import Bot, Message
@@ -21,7 +23,11 @@ DEFAULT_QUERY_LIMIT = 100
 MAX_QUERY_LIMIT = 10000
 SEGMENT_SCAN_PAGE_SIZE = 500
 SEGMENT_SCAN_MAX_ROWS = 50000
+_MESSAGE_ID_QUERY_CHUNK_SIZE = 500
 _MAX_DATA_VALUE_LENGTH = 512
+_MAX_FORWARD_NODES = 5
+_MAX_FORWARD_NODE_SEGMENTS = 10
+_MAX_FORWARD_NODE_TEXT_LENGTH = 512
 _MEDIA_KEYS = {
     "file",
     "summary",
@@ -33,6 +39,7 @@ _MEDIA_KEYS = {
 _SEGMENT_TYPE_ALIASES = {
     "at": "mention",
     "record": "audio",
+    "voice": "audio",
     "face": "emoji",
     "forward": "reference",
     "node": "reference",
@@ -41,7 +48,7 @@ _SEGMENT_TYPE_ALIASES = {
     "share": "card",
     "hyper": "card",
 }
-_MEDIA_SEGMENTS = {"image", "audio", "video", "file"}
+_MEDIA_SEGMENTS = {"image", "sticker", "audio", "video", "file"}
 _TEXT_PROJECTION_FIELDS = (
     "id",
     "user_id",
@@ -64,6 +71,7 @@ _PLACEHOLDER_MAP = {
     "mention": "@{target}",
     "emoji": "[表情:{id}]",
     "image": "[图片]",
+    "sticker": "[表情包]",
     "audio": "[语音]",
     "video": "[视频]",
     "file": "[文件]",
@@ -71,6 +79,24 @@ _PLACEHOLDER_MAP = {
     "reference": "[合并转发]",
     "reply": "[引用消息]",
 }
+_CARD_FIELD_ALIASES = {
+    "source": ("source", "app_name", "app", "tag"),
+    "title": ("title",),
+    "prompt": ("prompt",),
+    "description": ("description", "desc", "summary"),
+    "id": ("bvid", "aid", "id"),
+}
+_OUTGOING_RECORD_LOCK = asyncio.Lock()
+_OUTGOING_UPDATE_FIELDS = (
+    "group_id",
+    "text",
+    "plain_text",
+    "create_time",
+    "message_type",
+    "segments",
+    "segment_types",
+    "reply_to_message_id",
+)
 
 
 def _to_str(value: Any) -> str | None:
@@ -88,6 +114,151 @@ def _truncate(value: Any, limit: int = _MAX_DATA_VALUE_LENGTH) -> Any:
         return value
     suffix = "...[truncated]"
     return f"{value[: max(0, limit - len(suffix))]}{suffix}"
+
+
+def _is_url_or_base64(value: Any) -> bool:
+    """识别不应持久化的临时链接与内嵌媒体正文。"""
+    if not isinstance(value, str):
+        return False
+    lowered = value.strip().lower()
+    return bool(
+        "://" in lowered
+        or lowered.startswith(("www.", "//", "base64://"))
+        or (lowered.startswith("data:") and ";base64," in lowered)
+    )
+
+
+def _clean_summary(value: Any) -> str | None:
+    """规范化媒体描述，避免嵌入占位符时产生双重方括号。"""
+    summary = str(value or "").strip()
+    if len(summary) >= 2 and summary.startswith("[") and summary.endswith("]"):
+        summary = summary[1:-1].strip()
+    return _truncate(summary) if summary else None
+
+
+def _safe_card_text(value: Any) -> str | None:
+    """过滤卡片中的临时链接与大型正文，只保留短标量语义。"""
+    if not isinstance(value, str | int | float | bool):
+        return None
+    text = str(value).strip()
+    if not text or _is_url_or_base64(text):
+        return None
+    return _truncate(text)
+
+
+def _find_nested_card_text(payload: Any, aliases: tuple[str, ...]) -> str | None:
+    """按层级搜索卡片白名单字段，避免保存整份平台JSON。"""
+    queue = [payload]
+    lowered_aliases = set(aliases)
+    while queue:
+        current = queue.pop(0)
+        if isinstance(current, dict):
+            for key, value in current.items():
+                if str(key).lower() in lowered_aliases:
+                    if safe_value := _safe_card_text(value):
+                        return safe_value
+            queue.extend(
+                value for value in current.values() if isinstance(value, dict | list)
+            )
+        elif isinstance(current, list):
+            queue.extend(value for value in current if isinstance(value, dict | list))
+    return None
+
+
+def _safe_card_data(data: dict[str, Any], raw_type: str) -> dict[str, Any]:
+    """从卡片payload提取跨平台短文本摘要。"""
+    result = {"format": _to_str(data.get("format") or raw_type)}
+    payload = data.get("content")
+    if payload is None:
+        payload = data.get("raw") or data.get("data")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            payload = None
+    if not isinstance(payload, dict | list):
+        return result
+    for field, aliases in _CARD_FIELD_ALIASES.items():
+        if value := _find_nested_card_text(payload, aliases):
+            result[field] = value
+    return result
+
+
+def _node_value(node: Any, key: str, default: Any = None) -> Any:
+    """兼容平台节点字典与UniSeg CustomNode对象。"""
+    if isinstance(node, dict):
+        return node.get(key, default)
+    return getattr(node, key, default)
+
+
+def _truncate_forward_node_segments(
+    segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """同时限制节点段数和累计文本，防止单个转发节点放大历史表。"""
+    bounded: list[dict[str, Any]] = []
+    text_length = 0
+    for segment in segments[:_MAX_FORWARD_NODE_SEGMENTS]:
+        if segment.get("type") != "text":
+            bounded.append(segment)
+            continue
+        remaining = _MAX_FORWARD_NODE_TEXT_LENGTH - text_length
+        if remaining <= 0:
+            continue
+        data = segment.get("data") or {}
+        text = str(data.get("text") or "")
+        if len(text) <= remaining:
+            clipped = text
+        else:
+            suffix = "...[truncated]"
+            clipped = (
+                text[:remaining]
+                if remaining <= len(suffix)
+                else f"{text[: remaining - len(suffix)]}{suffix}"
+            )
+        text_length += len(clipped)
+        bounded.append({"type": "text", "data": {"text": clipped}})
+    return bounded
+
+
+def _safe_forward_nodes(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """保存前五个安全节点；嵌套转发禁止递归展开。"""
+    raw_nodes = data.get("nodes") or data.get("content")
+    if not isinstance(raw_nodes, list):
+        return []
+    nodes: list[dict[str, Any]] = []
+    for raw_node in raw_nodes[:_MAX_FORWARD_NODES]:
+        sender = _node_value(raw_node, "sender", {})
+        sender = sender if isinstance(sender, dict) else {}
+        content = _node_value(raw_node, "message")
+        if content is None:
+            content = _node_value(raw_node, "content", "")
+        node_segments, _, _ = _normalize_message_segments(
+            content,
+            include_reference_nodes=False,
+        )
+        node: dict[str, Any] = {
+            "segments": _truncate_forward_node_segments(node_segments)
+        }
+        user_id = (
+            _node_value(raw_node, "user_id")
+            or _node_value(raw_node, "uid")
+            or sender.get("user_id")
+        )
+        name = (
+            _node_value(raw_node, "nickname")
+            or _node_value(raw_node, "name")
+            or sender.get("card")
+            or sender.get("nickname")
+        )
+        node_time = _node_value(raw_node, "time")
+        if user_id is not None:
+            node["user_id"] = _truncate(str(user_id))
+        if name is not None:
+            node["name"] = _truncate(str(name))
+        if isinstance(node_time, int | float):
+            node["time"] = int(node_time)
+        nodes.append(node)
+    return nodes
 
 
 def _segment_type(segment: Any) -> str | None:
@@ -120,6 +291,7 @@ def _safe_segment_data(
     data: dict[str, Any],
     *,
     raw_type: str,
+    include_reference_nodes: bool = True,
 ) -> dict[str, Any]:
     """按段类型保留可查询元数据，媒体正文和未知大字段不入库。"""
     if seg_type == "text":
@@ -132,7 +304,7 @@ def _safe_segment_data(
     if seg_type == "reply":
         return {"message_id": _to_str(data.get("message_id") or data.get("id"))}
     if seg_type == "reference":
-        return {
+        reference_data = {
             key: value
             for key, value in {
                 "id": _to_str(data.get("id")),
@@ -140,6 +312,10 @@ def _safe_segment_data(
             }.items()
             if value is not None
         }
+        if include_reference_nodes:
+            if nodes := _safe_forward_nodes(data):
+                reference_data["nodes"] = nodes
+        return reference_data
     if seg_type == "emoji":
         return {
             key: _truncate(data.get(key))
@@ -151,12 +327,16 @@ def _safe_segment_data(
         for key, value in data.items():
             if key not in _MEDIA_KEYS or value is None:
                 continue
-            if isinstance(value, str) and value.startswith("base64://"):
+            if _is_url_or_base64(value):
+                continue
+            if key == "summary":
+                if summary := _clean_summary(value):
+                    media_data[key] = summary
                 continue
             media_data[key] = _truncate(value)
         return media_data
     if seg_type == "card":
-        return {"format": _to_str(data.get("format") or raw_type)}
+        return _safe_card_data(data, raw_type)
     # 未知段只保留类型与简单小字段，避免平台扩展段导致整条消息丢失。
     return {
         "raw_type": raw_type,
@@ -165,7 +345,7 @@ def _safe_segment_data(
             for key, value in data.items()
             if key != "url"
             and (isinstance(value, str | int | float | bool) or value is None)
-            and not (isinstance(value, str) and value.startswith("base64://"))
+            and not _is_url_or_base64(value)
         },
     }
 
@@ -198,10 +378,70 @@ def _iter_message_segments(message: Any) -> Iterable[Any]:
         return []
 
 
-def normalize_message_segments(
+def _forward_nodes_from_response(response: Any) -> list[Any]:
+    """兼容NapCat及不同OneBot实现的合并转发响应外壳。"""
+    if isinstance(response, list):
+        return response
+    if not isinstance(response, dict):
+        return []
+    if isinstance(response.get("messages"), list):
+        return response["messages"]
+    data = response.get("data")
+    if not isinstance(data, dict):
+        return []
+    for key in ("messages", "message"):
+        if isinstance(data.get(key), list):
+            return data[key]
+    return []
+
+
+async def enrich_forward_segments(bot: Bot, message: Any) -> list[dict[str, Any]]:
+    """通过OneBot合并转发ID补取节点，API不可用时保留原始ID段。"""
+    enriched: list[dict[str, Any]] = []
+    for segment in _iter_message_segments(message):
+        raw_type = _segment_type(segment)
+        if not raw_type:
+            continue
+        data = _segment_data(segment)
+        forward_id = data.get("id")
+        if raw_type == "forward" and forward_id and not (
+            data.get("nodes") or data.get("content")
+        ):
+            try:
+                response = await bot.call_api("get_forward_msg", id=str(forward_id))
+            except Exception as e:
+                # 合并转发预览是增强信息，平台不支持时不能影响整条消息入库。
+                logger.warning(
+                    f"获取合并转发节点失败，保留ID占位 id={forward_id}",
+                    "chat_history",
+                    e=e,
+                )
+            else:
+                if nodes := _forward_nodes_from_response(response):
+                    data["nodes"] = nodes
+        enriched.append({"type": raw_type, "data": data})
+    return enriched
+
+
+def _is_sticker_segment(seg_type: str, data: dict[str, Any]) -> bool:
+    """识别UniSeg sticker标记和OneBot自定义表情元数据。"""
+    if seg_type == "sticker":
+        return True
+    subtype = data.get("sub_type") if "sub_type" in data else data.get("subType")
+    return bool(
+        data.get("sticker")
+        or str(subtype or "") == "1"
+        or data.get("emoji_id")
+        or data.get("emoji_package_id")
+    )
+
+
+def _normalize_message_segments(
     message: Any,
+    *,
+    include_reference_nodes: bool = True,
 ) -> tuple[list[dict[str, Any]], list[str], str]:
-    """规范化消息段，并返回轻量segments、段类型和可读文本。"""
+    """执行单一消息源的canonical规范化。"""
     normalized: list[dict[str, Any]] = []
     readable_parts: list[str] = []
     for segment in _iter_message_segments(message):
@@ -209,17 +449,94 @@ def normalize_message_segments(
         if not raw_type:
             continue
         seg_type = _canonical_segment_type(raw_type)
+        raw_data = _segment_data(segment)
+        if seg_type == "image" and _is_sticker_segment(seg_type, raw_data):
+            seg_type = "sticker"
         if seg_type not in _PLACEHOLDER_MAP and seg_type != "text":
             seg_type = "unknown"
         data = _safe_segment_data(
             seg_type,
-            _segment_data(segment),
+            raw_data,
             raw_type=raw_type,
+            include_reference_nodes=include_reference_nodes,
         )
         normalized.append({"type": seg_type, "data": data})
         readable_parts.append(_segment_readable_text(seg_type, data))
     segment_types = list(dict.fromkeys(seg["type"] for seg in normalized))
     return normalized, segment_types, "".join(readable_parts)
+
+
+def _segments_compatible(base_type: str, raw_type: str) -> bool:
+    """允许原始自定义表情补全UniMessage中的普通image。"""
+    return base_type == raw_type or {base_type, raw_type} == {"image", "sticker"}
+
+
+def _merge_raw_segments(
+    base_segments: list[dict[str, Any]],
+    raw_segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """按原始消息顺序补回语义，同时复用UniMessage已经归一化的字段。"""
+    if not base_segments:
+        return raw_segments
+    remaining = list(base_segments)
+    merged: list[dict[str, Any]] = []
+    for raw_segment in raw_segments:
+        raw_type = str(raw_segment.get("type") or "")
+        match_index = next(
+            (
+                index
+                for index, base_segment in enumerate(remaining)
+                if _segments_compatible(
+                    str(base_segment.get("type") or ""),
+                    raw_type,
+                )
+            ),
+            None,
+        )
+        if match_index is None:
+            # 原始事件独有的reply等段必须补回；未知扩展段交给UniMessage主体决定。
+            if raw_type != "unknown":
+                merged.append(raw_segment)
+            continue
+        base_segment = remaining.pop(match_index)
+        merged_type = (
+            "sticker"
+            if "sticker" in {str(base_segment.get("type")), raw_type}
+            else raw_type
+        )
+        merged.append(
+            {
+                "type": merged_type,
+                "data": {
+                    **(base_segment.get("data") or {}),
+                    **(raw_segment.get("data") or {}),
+                },
+            }
+        )
+    merged.extend(remaining)
+    return merged
+
+
+def normalize_message_segments(
+    message: Any,
+    *,
+    raw_message: Any | None = None,
+) -> tuple[list[dict[str, Any]], list[str], str]:
+    """规范化消息段，并用原始事件安全补全适配器丢失的语义。"""
+    base_segments, _, _ = _normalize_message_segments(message)
+    normalized = base_segments
+    if raw_message is not None:
+        raw_segments, _, _ = _normalize_message_segments(raw_message)
+        normalized = _merge_raw_segments(base_segments, raw_segments)
+    segment_types = list(dict.fromkeys(seg["type"] for seg in normalized))
+    readable_text = "".join(
+        _segment_readable_text(
+            str(segment.get("type") or "unknown"),
+            segment.get("data") or {},
+        )
+        for segment in normalized
+    )
+    return normalized, segment_types, readable_text
 
 
 def _segments_to_plain_text(segments: list[dict[str, Any]]) -> str:
@@ -341,12 +658,18 @@ def build_incoming_record(
     message: Any,
     session: Any,
     event: Any | None = None,
+    *,
+    raw_message: Any | None = None,
 ) -> ChatHistory:
     """构造入站聊天记录，数据库写入仍交给原队列批量处理。"""
     from zhenxun.utils.utils import get_entity_ids
 
     entity = get_entity_ids(session)
-    segments, segment_types, readable_text = normalize_message_segments(message)
+    raw_message = raw_message or getattr(event, "original_message", None)
+    segments, segment_types, readable_text = normalize_message_segments(
+        message,
+        raw_message=raw_message,
+    )
     plain_text = _extract_plain_text(message, segments)
     reply_to_message_id = _extract_reply_to_message_id(segments, event)
     return ChatHistory(
@@ -374,6 +697,8 @@ def build_outgoing_record(
     message_type: str | None,
     message: Message | str,
     result: Any,
+    create_time: datetime | None = None,
+    raw_message: Any | None = None,
 ) -> ChatHistory:
     """构造Bot出站聊天记录，沿用发送hook解析出的目标信息。"""
     normalized_message: Any = message
@@ -384,7 +709,8 @@ def build_outgoing_record(
             # 适配器转换失败时仍记录原消息，不能让历史功能影响发送链路。
             normalized_message = message
     segments, segment_types, readable_text = normalize_message_segments(
-        normalized_message
+        normalized_message,
+        raw_message=raw_message if raw_message is not None else message,
     )
     plain_text = _extract_plain_text(message, segments)
     reply_to_message_id = _extract_reply_to_message_id(segments, None)
@@ -398,7 +724,7 @@ def build_outgoing_record(
         direction="out",
         message_id=_extract_message_id_from_result(result),
         message_type=message_type,
-        create_time=timezone.now(),
+        create_time=create_time or timezone.now(),
         segments=segments,
         segment_types=segment_types,
         reply_to_message_id=reply_to_message_id,
@@ -413,8 +739,11 @@ async def create_outgoing_record(
     message_type: str | None,
     message: Message | str,
     result: Any,
+    create_time: datetime | None = None,
+    platform_event: bool = False,
+    raw_message: Any | None = None,
 ) -> ChatHistory:
-    """立即写入Bot出站上下文账本；发送审计仍由BotMessageStore负责。"""
+    """幂等写入Bot出站记录，并允许平台事件覆盖本机时间回退。"""
     record = build_outgoing_record(
         bot,
         user_id=user_id,
@@ -422,9 +751,40 @@ async def create_outgoing_record(
         message_type=message_type,
         message=message,
         result=result,
+        create_time=create_time,
+        raw_message=raw_message,
     )
-    await record.save()
-    return record
+    if not record.message_id:
+        await record.save()
+        return record
+
+    # API hook与message_sent可能并发到达，锁内查写可避免同一平台消息产生两行。
+    async with _OUTGOING_RECORD_LOCK:
+        existing = await (
+            ChatHistory.filter(
+                platform=record.platform,
+                bot_id=record.bot_id,
+                message_id=record.message_id,
+                direction="out",
+            )
+            .order_by("-id")
+            .first()
+        )
+        if existing is None:
+            await record.save()
+            return record
+        if not platform_event:
+            # 事件先到时只能知道Bot自身，后到的API上下文负责补齐真实目标用户。
+            if record.user_id and existing.user_id != record.user_id:
+                existing.user_id = record.user_id
+                await existing.save(update_fields=["user_id"])
+            return existing
+
+        # 平台事件包含真实发生时间和适配器回传消息，必须覆盖先到的本机回退记录。
+        for field in _OUTGOING_UPDATE_FIELDS:
+            setattr(existing, field, getattr(record, field))
+        await existing.save(update_fields=list(_OUTGOING_UPDATE_FIELDS))
+        return existing
 
 
 class ChatHistoryQuery:
@@ -587,6 +947,45 @@ class ChatHistoryQuery:
             .limit(cls._normalize_limit(limit, default=1000))
             .values(*_STRUCTURED_PROJECTION_FIELDS)
         )
+
+    @classmethod
+    async def structured_by_message_ids(
+        cls,
+        message_ids: Iterable[str],
+        *,
+        platform: str | None = None,
+        bot_id: str | None = None,
+        group_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """批量读取被引用消息，每个平台消息ID只返回最新结构化记录。"""
+        unique_ids = list(
+            dict.fromkeys(
+                str(message_id)
+                for message_id in message_ids
+                if message_id is not None
+            )
+        )[:MAX_QUERY_LIMIT]
+        found: dict[str, dict[str, Any]] = {}
+        for offset in range(0, len(unique_ids), _MESSAGE_ID_QUERY_CHUNK_SIZE):
+            chunk = unique_ids[offset : offset + _MESSAGE_ID_QUERY_CHUNK_SIZE]
+            rows = await (
+                cls._base_query(
+                    group_id=group_id,
+                    bot_id=bot_id,
+                    platform=platform,
+                    direction="all",
+                )
+                .filter(message_id__in=chunk)
+                .order_by("-create_time", "-id")
+                .limit(MAX_QUERY_LIMIT)
+                .values(*_STRUCTURED_PROJECTION_FIELDS)
+            )
+            # 倒序查询确保首次出现的是最新记录，避免旧重复行覆盖新数据。
+            for row in rows:
+                message_id = str(row.get("message_id") or "")
+                if message_id and message_id not in found:
+                    found[message_id] = row
+        return [found[message_id] for message_id in unique_ids if message_id in found]
 
     @classmethod
     async def text_range(

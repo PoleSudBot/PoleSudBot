@@ -156,13 +156,17 @@ def _extract_message_timestamp(message: dict[str, Any]) -> int:
 
 
 def _sort_raw_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted(
-        messages,
-        key=lambda msg: (
-            _extract_message_timestamp(msg),
-            str(_extract_message_id(msg) or ""),
-        ),
-    )
+    indexed_messages = list(enumerate(messages))
+
+    def sort_key(item: tuple[int, dict[str, Any]]) -> tuple[int, int, int]:
+        index, message = item
+        db_id = message.get("_db_id")
+        if isinstance(db_id, int):
+            return _extract_message_timestamp(message), 0, db_id
+        # API列表本身已有平台顺序，同秒时必须保持输入顺序而不是比较message_id。
+        return _extract_message_timestamp(message), 1, index
+
+    return [message for _, message in sorted(indexed_messages, key=sort_key)]
 
 
 def _raw_message_identity_text(message: dict[str, Any]) -> str:
@@ -288,6 +292,8 @@ def _resolve_sender_name(
 def _segment_to_text(
     segment: dict[str, Any],
     user_info_cache: dict[str, str],
+    *,
+    include_forward_nodes: bool = True,
 ) -> str:
     seg_type = segment.get("type")
     seg_data = segment.get("data", {})
@@ -302,7 +308,63 @@ def _segment_to_text(
             return f"@{user_info_cache.get(target_id, default_at_name)}"
     if seg_type == "image":
         summary = seg_data.get("summary")
-        return f"[img]{_compact_whitespace(str(summary))}" if summary else "[img]"
+        return f"[img: {_compact_whitespace(str(summary))}]" if summary else "[img]"
+    if seg_type == "sticker":
+        summary = seg_data.get("summary")
+        return (
+            f"[sticker: {_compact_whitespace(str(summary))}]"
+            if summary
+            else "[sticker]"
+        )
+    if seg_type == "unknown" and seg_data.get("raw_type") in {"record", "voice"}:
+        return "[voice]"
+    if seg_type in {"record", "audio"}:
+        return "[voice]"
+    if seg_type in {"video", "file"}:
+        default_names = {"video.mp4"} if seg_type == "video" else {"file.bin"}
+        name = str(seg_data.get("name") or "").strip()
+        if not name or name in default_names:
+            name = str(seg_data.get("file") or seg_data.get("id") or "").strip()
+        label = "video" if seg_type == "video" else "file"
+        return f"[{label}: {_compact_whitespace(name)}]" if name else f"[{label}]"
+    if seg_type in {"json", "xml", "card"}:
+        values: list[str] = []
+        for key in ("source", "title", "prompt", "description"):
+            value = _compact_whitespace(str(seg_data.get(key) or ""))
+            if value and value not in values:
+                values.append(value)
+        if not values:
+            fallback_id = _compact_whitespace(str(seg_data.get("id") or ""))
+            if fallback_id:
+                values.append(fallback_id)
+        return f"[card: {' | '.join(values)}]" if values else "[card]"
+    if seg_type in {"forward", "reference"}:
+        if not include_forward_nodes:
+            return "[forward]"
+        values: list[str] = []
+        if name := _compact_whitespace(str(seg_data.get("name") or "")):
+            values.append(name)
+        nodes = seg_data.get("nodes")
+        if isinstance(nodes, list):
+            for node in nodes[:5]:
+                if not isinstance(node, dict):
+                    continue
+                node_user_id = str(node.get("user_id") or "").strip()
+                node_name = _compact_whitespace(str(node.get("name") or ""))
+                node_label = _user_label(node_name, node_user_id)
+                node_text = " ".join(
+                    text
+                    for node_segment in _normalize_segments(node.get("segments", []))
+                    if (
+                        text := _segment_to_text(
+                            node_segment,
+                            user_info_cache,
+                            include_forward_nodes=False,
+                        )
+                    )
+                )
+                values.append(f"{node_label}: {node_text or '[empty]'}")
+        return f"[forward: {' | '.join(values)}]" if values else "[forward]"
     if seg_type in SEGMENT_PLACEHOLDER_MAP:
         return SEGMENT_PLACEHOLDER_MAP[seg_type]
     if seg_type:
@@ -363,10 +425,28 @@ def _format_db_messages(db_messages: list[Any]) -> list[dict[str, Any]]:
         # 新记录优先消费 canonical segments，旧记录缺失时才退回可读文本。
         if not isinstance(segments, list) or not segments:
             segments = [{"type": "text", "data": {"text": readable_text}}]
+        else:
+            segments = [
+                dict(segment) for segment in segments if isinstance(segment, dict)
+            ]
+        reply_to_message_id = _db_row_value(msg, "reply_to_message_id")
+        if reply_to_message_id and not any(
+            segment.get("type") == "reply" for segment in segments
+        ):
+            # 入站UniMessage可能剥离reply段，顶层关系字段是数据库中的可靠兜底。
+            segments.insert(
+                0,
+                {
+                    "type": "reply",
+                    "data": {"message_id": str(reply_to_message_id)},
+                },
+            )
 
         formatted_messages.append(
             {
+                "_db_id": _db_row_value(msg, "id"),
                 "message_id": _db_row_value(msg, "message_id"),
+                "reply_to_message_id": reply_to_message_id,
                 "user_id": normalized_sender_id,
                 "time": int(create_time.timestamp()) if create_time else 0,
                 "message_type": _db_row_value(msg, "message_type", "group")
@@ -374,6 +454,9 @@ def _format_db_messages(db_messages: list[Any]) -> list[dict[str, Any]]:
                 "message": segments,
                 "raw_message": readable_text,
                 "sender": {"user_id": normalized_sender_id},
+                "group_id": _db_row_value(msg, "group_id"),
+                "bot_id": _db_row_value(msg, "bot_id"),
+                "platform": _db_row_value(msg, "platform"),
                 "_summary_source": "db",
             }
         )
@@ -831,6 +914,7 @@ async def _fetch_reply_message(
 async def _prefetch_reply_messages(
     bot: Bot,
     messages: list[dict[str, Any]],
+    group_id: int | None = None,
 ) -> dict[str, dict[str, Any]]:
     reply_ids: set[str] = set()
     for msg in messages:
@@ -843,14 +927,58 @@ async def _prefetch_reply_messages(
     if not reply_ids:
         return {}
 
+    reply_messages: dict[str, dict[str, Any]] = {}
+    platform = next(
+        (str(message["platform"]) for message in messages if message.get("platform")),
+        None,
+    )
+    bot_id = next(
+        (str(message["bot_id"]) for message in messages if message.get("bot_id")),
+        str(bot.self_id),
+    )
+    resolved_group_id = str(group_id) if group_id is not None else next(
+        (str(message["group_id"]) for message in messages if message.get("group_id")),
+        None,
+    )
+    try:
+        db_rows = await ChatHistoryQuery.structured_by_message_ids(
+            reply_ids,
+            platform=platform,
+            bot_id=bot_id,
+            group_id=resolved_group_id,
+        )
+        reply_messages.update(
+            {
+                str(message["message_id"]): message
+                for message in _format_db_messages(db_rows)
+                if message.get("message_id")
+            }
+        )
+    except Exception as e:
+        # 引用正文补全属于增强路径，数据库异常时继续沿用平台API，不能中断总结。
+        logger.warning(
+            "从ChatHistory预取引用消息失败，回退平台API",
+            command="消息处理",
+            e=e,
+        )
+
+    missing_reply_ids = reply_ids - reply_messages.keys()
+    if not missing_reply_ids:
+        return reply_messages
+
     semaphore = asyncio.Semaphore(summary_config.get_concurrent_user_fetch_limit())
 
     async def fetch_one(reply_id: str):
         async with semaphore:
             return reply_id, await _fetch_reply_message(bot, reply_id)
 
-    fetched = await asyncio.gather(*(fetch_one(reply_id) for reply_id in reply_ids))
-    return {reply_id: message for reply_id, message in fetched if message}
+    fetched = await asyncio.gather(
+        *(fetch_one(reply_id) for reply_id in missing_reply_ids)
+    )
+    reply_messages.update(
+        {reply_id: message for reply_id, message in fetched if message}
+    )
+    return reply_messages
 
 
 def _collect_user_ids_from_segments(
@@ -992,7 +1120,7 @@ async def process_message(
 
         exclude_bot = base_config.get("EXCLUDE_BOT_MESSAGES", False)
         bot_self_id = str(bot.self_id)
-        reply_messages = await _prefetch_reply_messages(bot, messages)
+        reply_messages = await _prefetch_reply_messages(bot, messages, group_id)
         user_info_cache = await _build_user_info_cache(
             bot,
             group_id,
@@ -1095,7 +1223,9 @@ def _message_body_for_ai(message: ProcessedMessage) -> str:
 
 
 def _serialize_message_for_export(message: ProcessedMessage, tz) -> str:
-    message_time = datetime.fromtimestamp(message.timestamp, tz).strftime("%m-%d %H:%M")
+    message_time = datetime.fromtimestamp(message.timestamp, tz).strftime(
+        "%m-%d %H:%M:%S"
+    )
     return (
         f"[{message_time}] "
         f"{_user_label(message.name, message.user_id)}: "

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
+import json
 from types import SimpleNamespace
 from typing import ClassVar
 
@@ -38,6 +39,7 @@ from zhenxun.services.chat_history.recorder import (
     SEGMENT_SCAN_PAGE_SIZE,
     build_incoming_record,
     build_outgoing_record,
+    create_outgoing_record,
     normalize_message_segments,
     segments_to_readable_text,
 )
@@ -121,11 +123,13 @@ class _FakeChatHistoryQuery:
 
 class _FakeChatHistory:
     last_query: ClassVar[_FakeChatHistoryQuery | None] = None
+    queries: ClassVar[list[_FakeChatHistoryQuery]] = []
     rows: ClassVar[list[object]] = []
 
     @classmethod
     def all(cls):
         cls.last_query = _FakeChatHistoryQuery(cls.rows)
+        cls.queries.append(cls.last_query)
         return cls.last_query
 
     @classmethod
@@ -262,6 +266,231 @@ def test_normalize_unimsg_uses_cross_platform_contract():
     assert segments[5]["data"] == {"name": "file.zip"}
 
 
+def test_normalize_segments_uses_raw_message_to_restore_reply_voice_and_sticker():
+    message = UniMsg([Text("回复语音"), Image(id="sticker.gif")])
+    raw_message = Message(
+        [
+            MessageSegment.reply(1234),
+            MessageSegment("record", {"file": "voice.amr"}),
+            MessageSegment.text("回复语音"),
+            MessageSegment(
+                "image",
+                {
+                    "file": "sticker.gif",
+                    "summary": "[禁言]",
+                    "emoji_id": "emoji-1",
+                    "url": "https://example.com/sticker",
+                },
+            ),
+        ]
+    )
+
+    segments, segment_types, readable_text = normalize_message_segments(
+        message,
+        raw_message=raw_message,
+    )
+
+    assert segment_types == ["reply", "audio", "text", "sticker"]
+    assert segments == [
+        {"type": "reply", "data": {"message_id": "1234"}},
+        {"type": "audio", "data": {"file": "voice.amr"}},
+        {"type": "text", "data": {"text": "回复语音"}},
+        {
+            "type": "sticker",
+            "data": {
+                "id": "sticker.gif",
+                "name": "image.png",
+                "file": "sticker.gif",
+                "summary": "禁言",
+            },
+        },
+    ]
+    assert readable_text == "[引用消息][语音]回复语音[表情包]"
+
+
+def test_normalize_card_extracts_bounded_text_without_urls():
+    raw = json.dumps(
+        {
+            "prompt": "[QQ小程序]廉价的感情",
+            "meta": {
+                "detail": {
+                    "title": "廉价的感情",
+                    "desc": "视频简介",
+                    "source": "哔哩哔哩",
+                    "bvid": "BV1TEST",
+                    "url": "https://www.bilibili.com/video/BV1TEST",
+                }
+            },
+        },
+        ensure_ascii=False,
+    )
+
+    segments, _, _ = normalize_message_segments(UniMsg([Hyper("json", raw)]))
+
+    assert segments == [
+        {
+            "type": "card",
+            "data": {
+                "format": "json",
+                "source": "哔哩哔哩",
+                "title": "廉价的感情",
+                "prompt": "[QQ小程序]廉价的感情",
+                "description": "视频简介",
+                "id": "BV1TEST",
+            },
+        }
+    ]
+    assert "http" not in json.dumps(segments, ensure_ascii=False)
+
+
+def test_normalize_card_invalid_json_and_url_like_values_are_safe():
+    invalid_segments, _, _ = normalize_message_segments(
+        Message([MessageSegment("json", {"data": "{invalid"})])
+    )
+    filtered_segments, _, _ = normalize_message_segments(
+        Message(
+            [
+                MessageSegment(
+                    "json",
+                    {
+                        "data": json.dumps(
+                            {
+                                "source": "www.example.com/card",
+                                "title": "data:image/png;base64,AAAA",
+                                "prompt": "安全摘要",
+                            },
+                            ensure_ascii=False,
+                        )
+                    },
+                )
+            ]
+        )
+    )
+
+    assert invalid_segments == [{"type": "card", "data": {"format": "json"}}]
+    assert filtered_segments == [
+        {"type": "card", "data": {"format": "json", "prompt": "安全摘要"}}
+    ]
+
+
+def test_normalize_forward_keeps_first_five_bounded_safe_nodes():
+    nodes = []
+    for index in range(6):
+        node_message = [
+            {"type": "text", "data": {"text": f"node-{index}-" + "x" * 600}},
+            {
+                "type": "image",
+                "data": {
+                    "file": f"image-{index}.png",
+                    "url": "https://example.com/image",
+                },
+            },
+            {
+                "type": "forward",
+                "data": {"id": f"nested-{index}", "content": [{"bad": "nested"}]},
+            },
+        ]
+        nodes.append(
+            {
+                "user_id": str(index),
+                "nickname": f"User{index}",
+                "time": 1_700_000_000 + index,
+                "message": node_message * 5,
+            }
+        )
+    raw_message = Message(
+        [MessageSegment("forward", {"id": "forward-id", "content": nodes})]
+    )
+
+    segments, _, _ = normalize_message_segments(
+        UniMsg([Reference("forward-id")]),
+        raw_message=raw_message,
+    )
+
+    reference_data = segments[0]["data"]
+    assert reference_data["id"] == "forward-id"
+    assert len(reference_data["nodes"]) == 5
+    assert all(len(node["segments"]) <= 10 for node in reference_data["nodes"])
+    assert all(
+        sum(
+            len(segment["data"].get("text", ""))
+            for segment in node["segments"]
+            if segment["type"] == "text"
+        )
+        <= 512
+        for node in reference_data["nodes"]
+    )
+    assert "url" not in json.dumps(reference_data)
+    assert all(
+        "nodes" not in segment["data"]
+        for node in reference_data["nodes"]
+        for segment in node["segments"]
+        if segment["type"] == "reference"
+    )
+
+
+@pytest.mark.asyncio
+async def test_enrich_forward_segments_fetches_nodes_by_forward_id():
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def call_api(api: str, **kwargs):
+        calls.append((api, kwargs))
+        return {
+            "messages": [
+                {
+                    "sender": {"user_id": index, "nickname": f"User{index}"},
+                    "time": 1_700_000_000 + index,
+                    "message": [{"type": "text", "data": {"text": f"node-{index}"}}],
+                }
+                for index in range(6)
+            ]
+        }
+
+    bot = SimpleNamespace(call_api=call_api)
+    raw_message = Message(
+        [MessageSegment("forward", {"id": "forward-id"})]
+    )
+
+    enriched = await recorder_mod.enrich_forward_segments(bot, raw_message)
+    segments, _, _ = normalize_message_segments(
+        UniMsg([Reference("forward-id")]),
+        raw_message=enriched,
+    )
+
+    assert calls == [("get_forward_msg", {"id": "forward-id"})]
+    assert len(segments[0]["data"]["nodes"]) == 5
+    assert segments[0]["data"]["nodes"][0] == {
+        "segments": [{"type": "text", "data": {"text": "node-0"}}],
+        "user_id": "0",
+        "name": "User0",
+        "time": 1_700_000_000,
+    }
+
+
+@pytest.mark.asyncio
+async def test_enrich_forward_segments_keeps_id_when_api_fails(monkeypatch):
+    async def call_api(_api: str, **_kwargs):
+        raise RuntimeError("unsupported")
+
+    warnings: list[Exception] = []
+    monkeypatch.setattr(
+        recorder_mod.logger,
+        "warning",
+        lambda *_args, **kwargs: warnings.append(kwargs["e"]),
+    )
+    raw_message = Message(
+        [MessageSegment("forward", {"id": "forward-id"})]
+    )
+
+    enriched = await recorder_mod.enrich_forward_segments(
+        SimpleNamespace(call_api=call_api),
+        raw_message,
+    )
+
+    assert enriched == [{"type": "forward", "data": {"id": "forward-id"}}]
+    assert len(warnings) == 1
+
+
 def test_normalize_unknown_segment_keeps_safe_metadata():
     message = [
         {
@@ -269,6 +498,8 @@ def test_normalize_unknown_segment_keeps_safe_metadata():
             "data": {
                 "value": "ok",
                 "url": "https://example.com/temporary",
+                "download": "https://example.com/also-temporary",
+                "blob": "data:image/png;base64,AAAA",
                 "raw": "base64://large-payload",
                 "nested": {},
             },
@@ -539,6 +770,33 @@ async def test_chat_history_query_time_range_uses_create_time(
     assert query.q_filters == []
     assert query.order_fields == ("create_time", "id")
     assert query.limit_value == 10000
+
+
+@pytest.mark.asyncio
+async def test_structured_by_message_ids_deduplicates_and_chunks(monkeypatch):
+    monkeypatch.setattr(recorder_mod, "ChatHistory", _FakeChatHistory)
+    _FakeChatHistory.rows = []
+    _FakeChatHistory.queries = []
+    message_ids = [str(index) for index in range(501)] + ["0"]
+
+    await ChatHistoryQuery.structured_by_message_ids(
+        message_ids,
+        platform="qq",
+        bot_id="9000",
+        group_id="2000",
+    )
+
+    assert len(_FakeChatHistory.queries) == 2
+    first_query, second_query = _FakeChatHistory.queries
+    assert first_query.filters == [
+        {"group_id": "2000"},
+        {"bot_id": "9000"},
+        {"platform": "qq"},
+        {"message_id__in": [str(index) for index in range(500)]},
+    ]
+    assert second_query.filters[-1] == {"message_id__in": ["500"]}
+    assert first_query.order_fields == ("-create_time", "-id")
+    assert first_query.value_fields == recorder_mod._STRUCTURED_PROJECTION_FIELDS
 
 
 @pytest.mark.asyncio
@@ -1016,6 +1274,46 @@ async def test_call_hook_bot_store_failure_does_not_block_chat_history(monkeypat
     assert len(history_calls) == 1
 
 
+@pytest.mark.asyncio
+async def test_message_sent_handler_records_platform_event_time(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    async def _create_outgoing(_bot, **kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr(
+        chat_message_mod,
+        "create_outgoing_record",
+        _create_outgoing,
+    )
+    monkeypatch.setattr(
+        chat_message_mod.Config,
+        "get_config",
+        lambda *_args, **_kwargs: True,
+    )
+    bot = SimpleNamespace(self_id="9000")
+    message = Message([MessageSegment.text("platform event")])
+    event = SimpleNamespace(
+        time=1_700_000_000,
+        message_id=4567,
+        message_type="group",
+        group_id=2000,
+        target_id=2000,
+        user_id=9000,
+        message=message,
+        original_message=message,
+    )
+
+    await chat_message_mod.handle_message_sent(bot, event)
+
+    assert len(calls) == 1
+    assert calls[0]["result"] == {"message_id": 4567}
+    assert calls[0]["platform_event"] is True
+    assert calls[0]["raw_message"] is message
+    assert calls[0]["user_id"] == "9000"
+    assert int(calls[0]["create_time"].timestamp()) == 1_700_000_000
+
+
 def test_build_outgoing_record_marks_bot_direction_message_id_and_reply(monkeypatch):
     monkeypatch.setattr(
         "zhenxun.services.chat_history.recorder.PlatformUtils.get_platform",
@@ -1087,3 +1385,65 @@ def test_build_outgoing_record_prefers_alconna_conversion(monkeypatch):
         {"type": "mention", "data": {"target": "123", "kind": "user"}},
         {"type": "text", "data": {"text": "hello"}},
     ]
+
+
+@pytest.mark.asyncio
+async def test_create_outgoing_record_platform_event_updates_without_duplicate(
+    monkeypatch,
+):
+    await Tortoise.init(
+        config={
+            "connections": {"default": "sqlite://:memory:"},
+            "apps": {
+                "models": {
+                    "models": ["zhenxun.models.chat_history"],
+                    "default_connection": "default",
+                }
+            },
+            "timezone": "Asia/Shanghai",
+        }
+    )
+    await Tortoise.generate_schemas()
+    monkeypatch.setattr(
+        "zhenxun.services.chat_history.recorder.PlatformUtils.get_platform",
+        lambda _bot: "qq",
+    )
+    bot = SimpleNamespace(self_id="9000")
+    event_time = datetime.fromtimestamp(1_700_000_000).astimezone()
+
+    try:
+        await create_outgoing_record(
+            bot,
+            user_id="1000",
+            group_id="2000",
+            message_type="group",
+            message="fallback",
+            result={"message_id": 4567},
+        )
+        await create_outgoing_record(
+            bot,
+            user_id="9000",
+            group_id="2000",
+            message_type="group",
+            message="platform event",
+            result={"message_id": 4567},
+            create_time=event_time,
+            platform_event=True,
+        )
+        await create_outgoing_record(
+            bot,
+            user_id="1000",
+            group_id="2000",
+            message_type="group",
+            message="late fallback",
+            result={"message_id": 4567},
+        )
+
+        rows = await ChatHistory.all()
+
+        assert len(rows) == 1
+        assert int(rows[0].create_time.timestamp()) == 1_700_000_000
+        assert rows[0].text == "platform event"
+        assert rows[0].user_id == "1000"
+    finally:
+        await Tortoise.close_connections()

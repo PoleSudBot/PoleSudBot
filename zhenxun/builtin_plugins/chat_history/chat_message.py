@@ -1,18 +1,24 @@
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime
 import time
 
-from nonebot import on_message
-from nonebot.adapters import Event
+from nonebot import on, on_message
+from nonebot.adapters import Bot, Event
 from nonebot.plugin import PluginMetadata
 from nonebot_plugin_alconna import UniMsg
 from nonebot_plugin_apscheduler import scheduler
 from nonebot_plugin_uninfo import Uninfo
+from tortoise import timezone
 
 from zhenxun.configs.config import Config
 from zhenxun.configs.utils import PluginExtraData, RegisterConfig
 from zhenxun.models.chat_history import ChatHistory
-from zhenxun.services.chat_history import build_incoming_record
+from zhenxun.services.chat_history import (
+    build_incoming_record,
+    create_outgoing_record,
+    enrich_forward_segments,
+)
 from zhenxun.services.log import logger
 from zhenxun.services.message_load import is_overloaded, should_pause_tasks
 from zhenxun.utils.enum import PluginType
@@ -89,6 +95,7 @@ def rule(message: UniMsg) -> bool:
 
 
 chat_history = on_message(rule=rule, priority=1, block=False)
+message_sent = on("message_sent", priority=1, block=False)
 
 _QUEUE_MAX_SIZE = _positive_int_config("QUEUE_MAX_SIZE", 5000)
 _FLUSH_INTERVAL_SECONDS = _positive_int_config("FLUSH_INTERVAL_SECONDS", 60)
@@ -161,14 +168,23 @@ async def _flush_history_queue() -> int:
 
 
 @chat_history.handle()
-async def _(message: UniMsg, session: Uninfo, event: Event):
+async def _(bot: Bot, message: UniMsg, session: Uninfo, event: Event):
     now = time.time()
     if is_overloaded():
         return
     try:
+        raw_message = await enrich_forward_segments(
+            bot,
+            getattr(event, "original_message", None) or message,
+        )
         # 构造轻量结构化历史，具体写库仍由队列批量完成。
         _HISTORY_QUEUE.put_nowait(
-            build_incoming_record(message, session, event)
+            build_incoming_record(
+                message,
+                session,
+                event,
+                raw_message=raw_message,
+            )
         )
     except asyncio.QueueFull:
         global _DROP_COUNT, _LAST_DROP_LOG
@@ -179,6 +195,49 @@ async def _(message: UniMsg, session: Uninfo, event: Event):
                 f"chat_history queue full, dropped {_DROP_COUNT} items",
                 "chat_history",
             )
+
+
+@message_sent.handle()
+async def handle_message_sent(bot: Bot, event: Event) -> None:
+    """使用NapCat message_sent补全Bot出站消息的真实平台时间。"""
+    if not Config.get_config("chat_history", "FLAG"):
+        return
+    message_id = getattr(event, "message_id", None)
+    message = getattr(event, "message", None)
+    if message_id is None or message is None:
+        return
+    try:
+        create_time = datetime.fromtimestamp(
+            int(getattr(event, "time")),
+            timezone.get_default_timezone(),
+        )
+    except (TypeError, ValueError, OSError):
+        logger.warning("message_sent缺少有效平台时间，保留API hook回退", "chat_history")
+        return
+
+    message_type = str(getattr(event, "message_type", "") or "") or None
+    group_id = getattr(event, "group_id", None)
+    user_id = (
+        getattr(event, "target_id", None) or getattr(event, "user_id", None)
+        if message_type == "private"
+        else bot.self_id
+    )
+    raw_message = getattr(event, "original_message", None) or message
+    try:
+        # 事件与API hook共享幂等入口，事件先后顺序不会制造重复记录。
+        await create_outgoing_record(
+            bot,
+            user_id=str(user_id) if user_id is not None else None,
+            group_id=str(group_id) if group_id is not None else None,
+            message_type=message_type,
+            message=message,
+            result={"message_id": message_id},
+            create_time=create_time,
+            platform_event=True,
+            raw_message=raw_message,
+        )
+    except Exception as e:
+        logger.warning("记录message_sent平台事件失败", "chat_history", e=e)
 
 
 @scheduler.scheduled_job(

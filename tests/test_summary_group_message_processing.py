@@ -162,6 +162,8 @@ class _FailingChatHistory:
 
 
 class _FakeChatHistoryQueryService:
+    message_id_batch_calls: ClassVar[list[dict]] = []
+
     @staticmethod
     def _row_value(row, key: str, default=None):
         if isinstance(row, dict):
@@ -221,6 +223,26 @@ class _FakeChatHistoryQueryService:
             reverse=kwargs.get("descending", False),
         )
         return [cls._to_dict(row) for row in rows[: kwargs["limit"]]]
+
+    @classmethod
+    async def structured_by_message_ids(cls, message_ids, **kwargs) -> list[dict]:
+        cls.message_id_batch_calls.append(
+            {"message_ids": list(message_ids), **kwargs}
+        )
+        wanted = {str(message_id) for message_id in message_ids}
+        rows = [
+            row
+            for row in cls._filter_rows(direction="all", **kwargs)
+            if str(cls._row_value(row, "message_id")) in wanted
+        ]
+        rows.sort(
+            key=lambda row: (
+                cls._row_value(row, "create_time"),
+                cls._row_value(row, "id"),
+            ),
+            reverse=True,
+        )
+        return [cls._to_dict(row) for row in rows]
 
 
 class _FailingChatHistoryQueryService:
@@ -370,6 +392,7 @@ def summary_modules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     )
     message_processing._message_cache.clear()
     message_processing._reply_message_cache.clear()
+    _FakeChatHistoryQueryService.message_id_batch_calls = []
 
     async def fake_process_message(messages, _bot, _group_id):
         processed = [
@@ -422,6 +445,7 @@ def _db_row(
     bot_id: str = "999",
     segments: list[dict] | None = None,
     plain_text: str | None = None,
+    reply_to_message_id: str | None = None,
 ) -> SimpleNamespace:
     content = text or f"db-{timestamp}"
     return SimpleNamespace(
@@ -432,7 +456,7 @@ def _db_row(
         plain_text=content if plain_text is None else plain_text,
         create_time=_dt(timestamp),
         message_id=message_id,
-        reply_to_message_id=None,
+        reply_to_message_id=reply_to_message_id,
         direction=direction,
         bot_id=bot_id,
         platform="qq",
@@ -476,13 +500,18 @@ def test_format_db_messages_uses_platform_identity_and_structured_segments(
 
     assert formatted == [
         {
+            "_db_id": 100,
             "message_id": "platform-100",
+            "reply_to_message_id": None,
             "user_id": 999,
             "time": 100,
             "message_type": "group",
             "message": segments,
             "raw_message": "db-100",
             "sender": {"user_id": 999},
+            "group_id": "123",
+            "bot_id": "999",
+            "platform": "qq",
             "_summary_source": "db",
         }
     ]
@@ -530,6 +559,181 @@ def test_summary_segment_rendering_supports_canonical_chat_history_types(
         == "[forward]"
     )
     assert m._segment_to_text({"type": "card", "data": {}}, user_cache) == "[card]"
+
+
+def test_format_db_messages_synthesizes_reply_from_top_level_relation(summary_modules):
+    m = summary_modules.message_processing
+    row = vars(
+        _db_row(
+            100,
+            message_id="current",
+            reply_to_message_id="target",
+            segments=[{"type": "text", "data": {"text": "继续"}}],
+        )
+    )
+
+    formatted = m._format_db_messages([row])
+
+    assert formatted[0]["message"][0] == {
+        "type": "reply",
+        "data": {"message_id": "target"},
+    }
+    assert formatted[0]["message"][1]["data"]["text"] == "继续"
+
+
+def test_summary_renders_enriched_media_card_and_forward(summary_modules):
+    m = summary_modules.message_processing
+    user_cache = {"1": "Alice", "2": "Bob"}
+
+    assert (
+        m._segment_to_text(
+            {"type": "sticker", "data": {"summary": "禁言"}}, user_cache
+        )
+        == "[sticker: 禁言]"
+    )
+    assert (
+        m._segment_to_text(
+            {
+                "type": "video",
+                "data": {"name": "video.mp4", "id": "BV1TEST_P1.mp4"},
+            },
+            user_cache,
+        )
+        == "[video: BV1TEST_P1.mp4]"
+    )
+    assert (
+        m._segment_to_text(
+            {"type": "file", "data": {"name": "report.zip"}}, user_cache
+        )
+        == "[file: report.zip]"
+    )
+    assert (
+        m._segment_to_text(
+            {
+                "type": "card",
+                "data": {
+                    "source": "哔哩哔哩",
+                    "title": "廉价的感情",
+                    "prompt": "廉价的感情",
+                    "description": "视频简介",
+                },
+            },
+            user_cache,
+        )
+        == "[card: 哔哩哔哩 | 廉价的感情 | 视频简介]"
+    )
+    assert (
+        m._segment_to_text(
+            {
+                "type": "reference",
+                "data": {
+                    "name": "测试聊天记录",
+                    "nodes": [
+                        {
+                            "user_id": "1",
+                            "name": "Alice",
+                            "segments": [
+                                {"type": "text", "data": {"text": "第一条"}}
+                            ],
+                        },
+                        {
+                            "user_id": "2",
+                            "name": "Bob",
+                            "segments": [{"type": "image", "data": {}}],
+                        },
+                    ],
+                },
+            },
+            user_cache,
+        )
+        == "[forward: 测试聊天记录 | Alice(1): 第一条 | Bob(2): [img]]"
+    )
+    assert (
+        m._segment_to_text(
+            {"type": "unknown", "data": {"raw_type": "voice"}}, user_cache
+        )
+        == "[voice]"
+    )
+
+
+def test_sort_raw_messages_uses_db_id_and_keeps_api_order(summary_modules):
+    m = summary_modules.message_processing
+    db_messages = [
+        {"time": 100, "message_id": "a", "_db_id": 2},
+        {"time": 100, "message_id": "z", "_db_id": 1},
+    ]
+    api_messages = [
+        {"time": 100, "message_id": "z"},
+        {"time": 100, "message_id": "a"},
+    ]
+
+    assert [message["_db_id"] for message in m._sort_raw_messages(db_messages)] == [
+        1,
+        2,
+    ]
+    assert [
+        message["message_id"] for message in m._sort_raw_messages(api_messages)
+    ] == ["z", "a"]
+
+
+def test_export_text_includes_seconds(summary_modules):
+    m = summary_modules.message_processing
+    timestamp = int(
+        datetime(2026, 7, 17, 18, 48, 52, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+    )
+    message = m.ProcessedMessage(
+        user_id="1",
+        name="Alice",
+        timestamp=timestamp,
+        plain_content="hello",
+    )
+
+    exported = m.build_export_text(
+        [message],
+        123,
+        _scope(summary_modules.scope),
+        "db",
+    )
+
+    assert "[07-17 18:48:52] Alice(1): hello" in exported
+
+
+@pytest.mark.asyncio
+async def test_prefetch_reply_messages_reads_db_before_api(summary_modules):
+    m = summary_modules.message_processing
+    _FakeChatHistory.rows = [
+        _db_row(
+            90,
+            user_id="2",
+            message_id="target",
+            segments=[{"type": "text", "data": {"text": "数据库引用"}}],
+        )
+    ]
+    api_calls: list[str] = []
+
+    async def _get_msg(**kwargs):
+        api_calls.append(str(kwargs["message_id"]))
+        return None
+
+    bot = SimpleNamespace(self_id="999", get_msg=_get_msg)
+    messages = [
+        {
+            "message": [
+                {"type": "reply", "data": {"message_id": "target"}},
+                {"type": "text", "data": {"text": "继续"}},
+            ],
+            "platform": "qq",
+            "bot_id": "999",
+            "group_id": "123",
+        }
+    ]
+
+    replies = await m._prefetch_reply_messages(bot, messages)
+
+    assert replies["target"]["message"] == [
+        {"type": "text", "data": {"text": "数据库引用"}}
+    ]
+    assert api_calls == []
 
 
 def test_summary_reply_accepts_canonical_message_id(summary_modules):

@@ -3,6 +3,7 @@ from .recorder import (
     build_incoming_record,
     build_outgoing_record,
     create_outgoing_record,
+    enrich_forward_segments,
     normalize_message_segments,
     segments_to_readable_text,
 )
@@ -12,6 +13,7 @@ __all__ = [
     "build_incoming_record",
     "build_outgoing_record",
     "create_outgoing_record",
+    "enrich_forward_segments",
     "normalize_message_segments",
     "segments_to_readable_text",
 ]
