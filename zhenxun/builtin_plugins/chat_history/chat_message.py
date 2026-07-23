@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import time
 
-from nonebot import on, on_message
+from nonebot import get_driver, on, on_message
 from nonebot.adapters import Bot, Event
 from nonebot.plugin import PluginMetadata
 from nonebot_plugin_alconna import UniMsg
@@ -18,6 +18,7 @@ from zhenxun.services.chat_history import (
     build_incoming_record,
     create_outgoing_record,
     enrich_forward_segments,
+    register_pending_history_flusher,
 )
 from zhenxun.services.log import logger
 from zhenxun.services.message_load import is_overloaded, should_pause_tasks
@@ -51,9 +52,9 @@ __plugin_meta__ = PluginMetadata(
             RegisterConfig(
                 module="chat_history",
                 key="FLUSH_INTERVAL_SECONDS",
-                value=60,
+                value=5,
                 help="消息记录批量写入间隔，单位秒",
-                default_value=60,
+                default_value=5,
                 type=int,
             ),
             RegisterConfig(
@@ -86,6 +87,7 @@ class ChatHistoryQueueState:
     queue_size: int
     queue_max_size: int
     enqueue_dropped: int
+    overload_dropped: int
     flush_failures: int
     requeue_dropped: int
 
@@ -98,10 +100,12 @@ chat_history = on_message(rule=rule, priority=1, block=False)
 message_sent = on("message_sent", priority=1, block=False)
 
 _QUEUE_MAX_SIZE = _positive_int_config("QUEUE_MAX_SIZE", 5000)
-_FLUSH_INTERVAL_SECONDS = _positive_int_config("FLUSH_INTERVAL_SECONDS", 60)
+_FLUSH_INTERVAL_SECONDS = _positive_int_config("FLUSH_INTERVAL_SECONDS", 5)
 _DROP_LOG_INTERVAL = float(_positive_int_config("DROP_LOG_INTERVAL_SECONDS", 10))
 _HISTORY_QUEUE: asyncio.Queue[ChatHistory] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
+_FLUSH_LOCK = asyncio.Lock()
 _DROP_COUNT = 0
+_OVERLOAD_DROP_COUNT = 0
 _FLUSH_FAILURE_COUNT = 0
 _REQUEUE_DROP_COUNT = 0
 _LAST_DROP_LOG = 0.0
@@ -113,6 +117,7 @@ def get_history_queue_state() -> ChatHistoryQueueState:
         queue_size=_HISTORY_QUEUE.qsize(),
         queue_max_size=_HISTORY_QUEUE.maxsize,
         enqueue_dropped=_DROP_COUNT,
+        overload_dropped=_OVERLOAD_DROP_COUNT,
         flush_failures=_FLUSH_FAILURE_COUNT,
         requeue_dropped=_REQUEUE_DROP_COUNT,
     )
@@ -144,34 +149,50 @@ def _requeue_history_batch(message_list: list[ChatHistory]) -> int:
 async def _flush_history_queue() -> int:
     """批量写入聊天记录；失败时回填队列，避免短暂数据库故障造成整批丢失。"""
     global _FLUSH_FAILURE_COUNT, _REQUEUE_DROP_COUNT
-    message_list = _drain_history_queue()
-    if not message_list:
-        return 0
-    try:
-        await ChatHistory.bulk_create(message_list)
-    except Exception as e:
-        _FLUSH_FAILURE_COUNT += 1
-        requeued = _requeue_history_batch(message_list)
-        dropped = len(message_list) - requeued
-        _REQUEUE_DROP_COUNT += dropped
-        logger.warning(
-            (
-                "存储聊天记录失败，已尝试回填队列 "
-                f"batch={len(message_list)} requeued={requeued} dropped={dropped}"
-            ),
-            "chat_history",
-            e=e,
-        )
-        return 0
-    logger.debug(f"批量添加聊天记录 {len(message_list)} 条", "定时任务")
-    return len(message_list)
+    async with _FLUSH_LOCK:
+        message_list = _drain_history_queue()
+        if not message_list:
+            return 0
+        try:
+            await ChatHistory.bulk_create(message_list)
+        except Exception as e:
+            _FLUSH_FAILURE_COUNT += 1
+            requeued = _requeue_history_batch(message_list)
+            dropped = len(message_list) - requeued
+            _REQUEUE_DROP_COUNT += dropped
+            logger.warning(
+                (
+                    "存储聊天记录失败，已尝试回填队列 "
+                    f"batch={len(message_list)} requeued={requeued} "
+                    f"dropped={dropped}"
+                ),
+                "chat_history",
+                e=e,
+            )
+            for _ in message_list:
+                _HISTORY_QUEUE.task_done()
+            return 0
+        for _ in message_list:
+            _HISTORY_QUEUE.task_done()
+        logger.debug(f"批量添加聊天记录 {len(message_list)} 条", "定时任务")
+        return len(message_list)
+
+
+register_pending_history_flusher(_flush_history_queue)
 
 
 @chat_history.handle()
-async def _(bot: Bot, message: UniMsg, session: Uninfo, event: Event):
-    now = time.time()
+async def handle_chat_history(
+    bot: Bot,
+    message: UniMsg,
+    session: Uninfo,
+    event: Event,
+) -> None:
+    global _DROP_COUNT, _LAST_DROP_LOG, _OVERLOAD_DROP_COUNT
     if is_overloaded():
+        _OVERLOAD_DROP_COUNT += 1
         return
+    now = time.time()
     try:
         raw_message = await enrich_forward_segments(
             bot,
@@ -187,7 +208,6 @@ async def _(bot: Bot, message: UniMsg, session: Uninfo, event: Event):
             )
         )
     except asyncio.QueueFull:
-        global _DROP_COUNT, _LAST_DROP_LOG
         _DROP_COUNT += 1
         if now - _LAST_DROP_LOG > _DROP_LOG_INTERVAL:
             _LAST_DROP_LOG = now
@@ -247,4 +267,12 @@ async def handle_message_sent(bot: Bot, event: Event) -> None:
 async def _():
     if should_pause_tasks():
         return
+    await _flush_history_queue()
+
+
+driver = get_driver()
+
+
+@driver.on_shutdown
+async def _flush_chat_history_on_shutdown() -> None:
     await _flush_history_queue()

@@ -105,9 +105,13 @@ SEGMENT_PLACEHOLDER_MAP = {
 
 
 try:
-    from zhenxun.services.chat_history import ChatHistoryQuery
+    from zhenxun.services.chat_history import ChatHistoryQuery, flush_pending_history
 except ImportError:
     ChatHistoryQuery = None
+
+    async def flush_pending_history() -> int:
+        return 0
+
     logger.warning("无法导入 ChatHistoryQuery 服务，数据库历史记录功能不可用。")
 
 
@@ -508,6 +512,18 @@ async def _fetch_raw_messages_from_db(
         ) from e
 
 
+async def _flush_pending_db_history() -> None:
+    """在数据库读取前尽力落盘当前进程队列，不让刷新故障阻断总结。"""
+    try:
+        await flush_pending_history()
+    except Exception as e:
+        logger.warning(
+            "刷新待写聊天记录失败，将继续读取已有数据库记录。",
+            command="DB历史",
+            e=e,
+        )
+
+
 async def _fetch_raw_messages_from_db_time_range(
     group_id: int,
     start_ts: int,
@@ -660,6 +676,7 @@ async def _supplement_time_scope_with_db(
         return raw_messages, coverage_complete, warning_message, source
 
     try:
+        await _flush_pending_db_history()
         supplement_result = await _fetch_raw_messages_from_db_time_range(
             group_id,
             start_ts,
@@ -706,8 +723,14 @@ async def get_group_messages(
     fetch_count = scope.fetch_count(max_len)
     source_key = "db" if use_db and ChatHistoryQuery else "api"
     cache_key = f"{group_id}:{fetch_count}:{source_key}"
+    cache_enabled = bool(
+        source_key == "api"
+        and cache_ttl > 0
+        and not target_user_ids
+        and not scope.is_time_based
+    )
 
-    if cache_ttl > 0 and not target_user_ids and not scope.is_time_based:
+    if cache_enabled:
         current_time = time.time()
         if cache_key in _message_cache:
             cached_data, timestamp = _message_cache[cache_key]
@@ -723,6 +746,7 @@ async def get_group_messages(
     coverage_complete = True
 
     if use_db and ChatHistoryQuery:
+        await _flush_pending_db_history()
         if scope.is_time_based:
             # DB 主路径直接按时间查询，避免“最近 N 条”先截断后再过滤导致范围缺失。
             db_result = await _fetch_raw_messages_from_db_time_range(
@@ -789,7 +813,7 @@ async def get_group_messages(
             warning_message=warning_message,
             source=source,
         )
-        if cache_ttl > 0 and not target_user_ids and not scope.is_time_based:
+        if cache_enabled:
             _message_cache[cache_key] = (copy.deepcopy(result), time.time())
             logger.debug(f"消息已存入缓存 (群: {group_id}, 数量: {fetch_count})")
         return result

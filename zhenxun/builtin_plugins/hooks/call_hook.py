@@ -351,34 +351,36 @@ async def handle_api_result(
         logger.warning(
             f"收集消息id发生错误...data: {data}, result: {result}", LOG_COMMAND, e=e
         )
-    if not Config.get_config("hook", "RECORD_BOT_SENT_MESSAGES"):
-        return
     record = _normalize_bot_message_record(api, data, source_context)
     if record is None:
         return
     store_user_id, store_group_id, message_type, message = record
-    try:
-        await BotMessageStore.create(
-            bot_id=bot.self_id,
-            user_id=store_user_id,
-            group_id=store_group_id,
-            sent_type=BotSentType.GROUP
-            if message_type == "group"
-            else BotSentType.PRIVATE,
-            text=replace_message(message),
-            plain_text=message.extract_plain_text()
-            if isinstance(message, Message)
-            else replace_message(message),
-            platform=PlatformUtils.get_platform(bot),
-        )
-        sanitized_message = sanitize_for_logging(message, context="nonebot_message")
-        logger.debug(f"消息发送记录，message: {sanitized_message}")
-    except Exception as e:
-        logger.warning(
-            f"消息发送记录发生错误...data: {data}, result: {result}",
-            LOG_COMMAND,
-            e=e,
-        )
+    if Config.get_config("hook", "RECORD_BOT_SENT_MESSAGES"):
+        try:
+            await BotMessageStore.create(
+                bot_id=bot.self_id,
+                user_id=store_user_id,
+                group_id=store_group_id,
+                sent_type=BotSentType.GROUP
+                if message_type == "group"
+                else BotSentType.PRIVATE,
+                text=replace_message(message),
+                plain_text=message.extract_plain_text()
+                if isinstance(message, Message)
+                else replace_message(message),
+                platform=PlatformUtils.get_platform(bot),
+            )
+            sanitized_message = sanitize_for_logging(
+                message,
+                context="nonebot_message",
+            )
+            logger.debug(f"消息发送记录，message: {sanitized_message}")
+        except Exception as e:
+            logger.warning(
+                f"消息发送记录发生错误...data: {data}, result: {result}",
+                LOG_COMMAND,
+                e=e,
+            )
     # 两个账本顺序执行但故障隔离，旧审计失败仍会尝试写入ChatHistory。
     await _record_outgoing_chat_history(
         bot,

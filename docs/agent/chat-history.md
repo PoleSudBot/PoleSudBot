@@ -17,6 +17,8 @@
 | `message_type` | `private`、`group` 或 `channel` | 会话场景筛选 |
 | `reply_to_message_id` | 被引用的平台消息 ID | 引用关系查询 |
 | `create_time` | 消息实际发生时间 | 时间范围查询和排序 |
+| `media_count` | 查询时统计的媒体段数量 | 媒体消息统计和筛选 |
+| `is_media_only` | 查询时判断是否基本只有媒体 | 区分“只发图片”和“图片加文字” |
 
 默认查询方向是 `in`。只有确实需要 Bot 回复时才传入 `direction="out"` 或 `direction="all"`。
 
@@ -27,7 +29,7 @@
 - `text`: `{"text": "消息文本"}`
 - `mention`: `{"target": "用户ID", "kind": "user"}`
 - `image`、`audio`、`video`、`file`: 仅保存文件名、媒体 ID、大小、摘要等有限元数据
-- `sticker`: 自定义表情包，保存与图片相同的轻量元数据及可选 `summary`
+- `sticker`: 自定义表情包，保存与图片相同的轻量元数据及可选 `summary`、`emoji_id`、`emoji_package_id`
 - `emoji`: `{"id": "表情ID", "name": "可选名称"}`
 - `reply`: `{"message_id": "被引用消息ID"}`
 - `reference`: 合并转发或引用容器的轻量 ID/名称，以及最多前 5 个安全预览节点
@@ -104,6 +106,13 @@ structured_rows = await ChatHistoryQuery.structured_recent(
 
 两者同样按 `create_time`、`id` 倒序排列，默认返回 1000 条且最多 10000 条。`text_recent()` 适合直接读取近期总结文本；`structured_recent()` 适合同时处理用户与 Bot 的完整消息段。
 
+结构化投影会额外附带两个查询时计算的字段：
+
+- `media_count` 是图片、表情包、普通表情、语音、视频和文件段的数量；旧记录中 `unknown.raw_type` 为 `record` 或 `voice` 时按语音计算。
+- `is_media_only` 表示消息是否只有媒体。引用关系 `reply` 不算正文，但艾特、卡片、合并转发和非空文本都会使它变为 `false`。
+
+例如，`图片 + 文字` 返回 `media_count=1, is_media_only=false`；`引用 + 两张图片` 返回 `media_count=2, is_media_only=true`；没有 `segments` 的旧记录返回 `0, false`。
+
 ### 时间范围完整记录
 
 ```python
@@ -167,7 +176,7 @@ reply_rows = await ChatHistoryQuery.structured_by_message_ids(
 
 ## `summary_group` 全数据库模式
 
-`summary_group` 设置 `USE_DB_HISTORY=True` 后，最近消息使用 `structured_recent()`，时间范围使用 `structured_range()`。这只替换历史消息列表的来源；后续仍会进行消息段渲染、用户名称解析和引用正文补取。引用正文优先通过 `structured_by_message_ids()` 从 ChatHistory 批量读取，数据库缺失时才调用平台 `get_msg()`。
+`summary_group` 设置 `USE_DB_HISTORY=True` 后，最近消息使用 `structured_recent()`，时间范围使用 `structured_range()`。每次数据库查询前会先尽力刷新当前进程中尚未落盘的消息；数据库模式不使用消息结果缓存，API 模式仍保留原有缓存。刷新失败时继续读取已有数据库内容，不会让总结命令直接失败。后续仍会进行消息段渲染、用户名称解析和引用正文补取。引用正文优先通过 `structured_by_message_ids()` 从 ChatHistory 批量读取，数据库缺失时才调用平台 `get_msg()`。
 
 默认 `EXCLUDE_BOT_MESSAGES=False`，查询方向为 `direction="all"`，因此用户入站消息和 Bot 出站消息都会进入上下文。设置为 `True` 后，查询阶段即改为 `direction="in"`，并保留处理阶段的 Bot 排除检查作为防御。
 
@@ -193,13 +202,17 @@ reply_rows = await ChatHistoryQuery.structured_by_message_ids(
     {"type": "text", "data": {"text": "看看这个"}},
     {"type": "image", "data": {"id": "ABC.jpg", "name": "image.png"}}
   ],
-  "segment_types": ["mention", "text", "image"]
+  "segment_types": ["mention", "text", "image"],
+  "media_count": 1,
+  "is_media_only": false
 }
 ```
 
 图片没有 URL，也不会被下载或识别。若适配器提供了轻量 `summary`，图片段可以额外保存该字段；否则总结时只生成图片占位符。
 
 NapCat 的 Bot 出站消息先由发送 API hook 以本机时间写入回退记录，随后 `message_sent` 事件按 `platform + bot_id + message_id` 幂等更新为平台时间和平台回传消息段。事件先到、API hook 先到或重复事件都只保留一行；不提供 `message_sent` 的平台继续使用本机时间回退。
+
+入站记录默认每 5 秒批量写入一次，不设置按 100 条立即刷库的阈值。进程关闭时会再尽力刷新一次。当前实现的幂等锁只覆盖单进程；部署多个实例时仍应避免让同一个 Bot/平台消息同时由多个实例处理。
 
 ### `summary_group` 内部消息示例
 

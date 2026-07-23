@@ -323,6 +323,13 @@ def summary_modules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
     chat_history_service_module = types.ModuleType("zhenxun.services.chat_history")
     chat_history_service_module.ChatHistoryQuery = _FakeChatHistoryQueryService
+    flush_calls: list[str] = []
+
+    async def fake_flush_pending_history() -> int:
+        flush_calls.append("flush")
+        return 0
+
+    chat_history_service_module.flush_pending_history = fake_flush_pending_history
     monkeypatch.setitem(
         sys.modules,
         "zhenxun.services.chat_history",
@@ -414,6 +421,7 @@ def summary_modules(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         message_processing=message_processing,
         package_name=package_name,
         scope=scope,
+        flush_calls=flush_calls,
     )
 
 
@@ -991,6 +999,65 @@ async def test_time_scope_supplements_missing_api_prefix_from_db(summary_modules
     assert result.coverage_complete is True
     assert "已从数据库补充 3 条" in (result.warning_message or "")
     assert "纯文本" in (result.warning_message or "")
+    assert summary_modules.flush_calls == ["flush"]
+
+
+@pytest.mark.asyncio
+async def test_db_mode_flushes_pending_and_bypasses_message_cache(summary_modules):
+    m = summary_modules.message_processing
+    summary_modules.base_config.values["MESSAGE_CACHE_TTL_SECONDS"] = 300
+    scope = summary_modules.scope.build_count_scope(2)
+    bot = _FakeBot([])
+    _FakeChatHistory.rows = [_db_row(100, text="first")]
+
+    first = await m.get_group_messages(bot, 123, scope, use_db=True)
+    _FakeChatHistory.rows = [_db_row(120, text="second")]
+    second = await m.get_group_messages(bot, 123, scope, use_db=True)
+
+    assert [message.plain_content for message in first.messages] == ["first"]
+    assert [message.plain_content for message in second.messages] == ["second"]
+    assert summary_modules.flush_calls == ["flush", "flush"]
+    assert m._message_cache == {}
+
+
+@pytest.mark.asyncio
+async def test_api_mode_retains_message_cache(summary_modules):
+    m = summary_modules.message_processing
+    summary_modules.base_config.values["MESSAGE_CACHE_TTL_SECONDS"] = 300
+    scope = summary_modules.scope.build_count_scope(2)
+    bot = _FakeBot([_raw_message(100, text="first")])
+
+    first = await m.get_group_messages(bot, 123, scope)
+    bot.messages = [_raw_message(120, text="second")]
+    second = await m.get_group_messages(bot, 123, scope)
+
+    assert [message.plain_content for message in first.messages] == ["first"]
+    assert [message.plain_content for message in second.messages] == ["first"]
+    assert bot.calls == [(123, 2)]
+    assert summary_modules.flush_calls == []
+
+
+@pytest.mark.asyncio
+async def test_db_mode_continues_when_pending_flush_fails(
+    summary_modules,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    m = summary_modules.message_processing
+    _FakeChatHistory.rows = [_db_row(100, text="persisted")]
+
+    async def _fail_flush() -> int:
+        raise RuntimeError("flush failed")
+
+    monkeypatch.setattr(m, "flush_pending_history", _fail_flush)
+
+    result = await m.get_group_messages(
+        _FakeBot([]),
+        123,
+        summary_modules.scope.build_count_scope(2),
+        use_db=True,
+    )
+
+    assert [message.plain_content for message in result.messages] == ["persisted"]
 
 
 @pytest.mark.asyncio

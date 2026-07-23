@@ -49,6 +49,7 @@ _SEGMENT_TYPE_ALIASES = {
     "hyper": "card",
 }
 _MEDIA_SEGMENTS = {"image", "sticker", "audio", "video", "file"}
+_MEDIA_COUNT_SEGMENTS = _MEDIA_SEGMENTS | {"emoji"}
 _TEXT_PROJECTION_FIELDS = (
     "id",
     "user_id",
@@ -87,16 +88,51 @@ _CARD_FIELD_ALIASES = {
     "id": ("bvid", "aid", "id"),
 }
 _OUTGOING_RECORD_LOCK = asyncio.Lock()
-_OUTGOING_UPDATE_FIELDS = (
-    "group_id",
+_OUTGOING_CONTENT_FIELDS = (
     "text",
     "plain_text",
-    "create_time",
-    "message_type",
     "segments",
     "segment_types",
-    "reply_to_message_id",
 )
+
+
+def _structured_media_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    """从结构化段详情派生媒体数量和纯媒体标记，不增加数据库字段。"""
+    segments = row.get("segments")
+    if not isinstance(segments, list):
+        return {**row, "media_count": 0, "is_media_only": False}
+
+    media_count = 0
+    has_non_media_content = False
+    for segment in segments:
+        if not isinstance(segment, dict):
+            has_non_media_content = True
+            continue
+        segment_type = str(segment.get("type") or "")
+        data = segment.get("data")
+        data = data if isinstance(data, dict) else {}
+        if segment_type in _MEDIA_COUNT_SEGMENTS:
+            media_count += 1
+            continue
+        if segment_type == "unknown" and str(data.get("raw_type") or "") in {
+            "record",
+            "voice",
+        }:
+            media_count += 1
+            continue
+        if segment_type == "reply":
+            continue
+        if segment_type == "text":
+            if str(data.get("text") or "").strip():
+                has_non_media_content = True
+            continue
+        has_non_media_content = True
+
+    return {
+        **row,
+        "media_count": media_count,
+        "is_media_only": media_count > 0 and not has_non_media_content,
+    }
 
 
 def _to_str(value: Any) -> str | None:
@@ -324,8 +360,11 @@ def _safe_segment_data(
         }
     if seg_type in _MEDIA_SEGMENTS:
         media_data: dict[str, Any] = {}
+        allowed_keys = _MEDIA_KEYS
+        if seg_type == "sticker":
+            allowed_keys = _MEDIA_KEYS | {"emoji_id", "emoji_package_id"}
         for key, value in data.items():
-            if key not in _MEDIA_KEYS or value is None:
+            if key not in allowed_keys or value is None:
                 continue
             if _is_url_or_base64(value):
                 continue
@@ -780,10 +819,23 @@ async def create_outgoing_record(
                 await existing.save(update_fields=["user_id"])
             return existing
 
-        # 平台事件包含真实发生时间和适配器回传消息，必须覆盖先到的本机回退记录。
-        for field in _OUTGOING_UPDATE_FIELDS:
-            setattr(existing, field, getattr(record, field))
-        await existing.save(update_fields=list(_OUTGOING_UPDATE_FIELDS))
+        # 平台时间始终更可信；其余字段只用有效值补全，避免清空API已解析的目标。
+        existing.create_time = record.create_time
+        update_fields = ["create_time"]
+        if record.group_id is not None:
+            existing.group_id = record.group_id
+            update_fields.append("group_id")
+        if record.message_type is not None:
+            existing.message_type = record.message_type
+            update_fields.append("message_type")
+        if record.segments:
+            for field in _OUTGOING_CONTENT_FIELDS:
+                setattr(existing, field, getattr(record, field))
+            update_fields.extend(_OUTGOING_CONTENT_FIELDS)
+        if record.reply_to_message_id is not None:
+            existing.reply_to_message_id = record.reply_to_message_id
+            update_fields.append("reply_to_message_id")
+        await existing.save(update_fields=update_fields)
         return existing
 
 
@@ -934,7 +986,7 @@ class ChatHistoryQuery:
         limit: int = 1000,
     ) -> list[dict[str, Any]]:
         """倒序读取包含消息段详情的最近结构化字段。"""
-        return await (
+        rows = await (
             cls._base_query(
                 group_id=group_id,
                 user_id=user_id,
@@ -947,6 +999,7 @@ class ChatHistoryQuery:
             .limit(cls._normalize_limit(limit, default=1000))
             .values(*_STRUCTURED_PROJECTION_FIELDS)
         )
+        return [_structured_media_metadata(row) for row in rows]
 
     @classmethod
     async def structured_by_message_ids(
@@ -980,6 +1033,7 @@ class ChatHistoryQuery:
                 .limit(MAX_QUERY_LIMIT)
                 .values(*_STRUCTURED_PROJECTION_FIELDS)
             )
+            rows = [_structured_media_metadata(row) for row in rows]
             # 倒序查询确保首次出现的是最新记录，避免旧重复行覆盖新数据。
             for row in rows:
                 message_id = str(row.get("message_id") or "")
@@ -1051,11 +1105,12 @@ class ChatHistoryQuery:
         order_fields = (
             ("-create_time", "-id") if descending else ("create_time", "id")
         )
-        return await (
+        rows = await (
             query.order_by(*order_fields)
             .limit(cls._normalize_limit(limit, default=1000))
             .values(*_STRUCTURED_PROJECTION_FIELDS)
         )
+        return [_structured_media_metadata(row) for row in rows]
 
     @classmethod
     async def count(

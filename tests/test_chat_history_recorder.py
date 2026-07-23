@@ -33,6 +33,7 @@ from tortoise import Tortoise
 from zhenxun.builtin_plugins.chat_history import chat_message as chat_message_mod
 from zhenxun.models.chat_history import ChatHistory
 from zhenxun.services.chat_history import recorder as recorder_mod
+from zhenxun.services import chat_history as chat_history_service
 from zhenxun.services.chat_history.recorder import (
     ChatHistoryQuery,
     MAX_QUERY_LIMIT,
@@ -51,11 +52,13 @@ def _clear_history_queue():
             chat_message_mod._HISTORY_QUEUE.get_nowait()
         except asyncio.QueueEmpty:
             break
+        chat_message_mod._HISTORY_QUEUE.task_done()
 
 
 def _reset_history_queue_stats():
     _clear_history_queue()
     chat_message_mod._DROP_COUNT = 0
+    chat_message_mod._OVERLOAD_DROP_COUNT = 0
     chat_message_mod._FLUSH_FAILURE_COUNT = 0
     chat_message_mod._REQUEUE_DROP_COUNT = 0
 
@@ -279,6 +282,7 @@ def test_normalize_segments_uses_raw_message_to_restore_reply_voice_and_sticker(
                     "file": "sticker.gif",
                     "summary": "[禁言]",
                     "emoji_id": "emoji-1",
+                    "emoji_package_id": "package-1",
                     "url": "https://example.com/sticker",
                 },
             ),
@@ -302,10 +306,33 @@ def test_normalize_segments_uses_raw_message_to_restore_reply_voice_and_sticker(
                 "name": "image.png",
                 "file": "sticker.gif",
                 "summary": "禁言",
+                "emoji_id": "emoji-1",
+                "emoji_package_id": "package-1",
             },
         },
     ]
     assert readable_text == "[引用消息][语音]回复语音[表情包]"
+
+
+def test_sticker_identifiers_keep_length_and_url_safety_limits():
+    message = Message(
+        [
+            MessageSegment(
+                "image",
+                {
+                    "file": "sticker.gif",
+                    "emoji_id": "https://example.com/temporary-id",
+                    "emoji_package_id": "p" * 600,
+                },
+            )
+        ]
+    )
+
+    segments, _, _ = normalize_message_segments(message)
+
+    assert "emoji_id" not in segments[0]["data"]
+    assert len(segments[0]["data"]["emoji_package_id"]) == 512
+    assert segments[0]["data"]["emoji_package_id"].endswith("...[truncated]")
 
 
 def test_normalize_card_extracts_bounded_text_without_urls():
@@ -800,6 +827,29 @@ async def test_structured_by_message_ids_deduplicates_and_chunks(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_structured_by_message_ids_adds_media_metadata(monkeypatch):
+    monkeypatch.setattr(recorder_mod, "ChatHistory", _FakeChatHistory)
+    _FakeChatHistory.rows = [
+        {
+            "message_id": "10",
+            "segments": [{"type": "image", "data": {}}],
+        }
+    ]
+    _FakeChatHistory.queries = []
+
+    rows = await ChatHistoryQuery.structured_by_message_ids(["10"])
+
+    assert rows == [
+        {
+            "message_id": "10",
+            "segments": [{"type": "image", "data": {}}],
+            "media_count": 1,
+            "is_media_only": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_chat_history_query_time_range_defaults_to_max_limit(monkeypatch):
     monkeypatch.setattr(recorder_mod, "ChatHistory", _FakeChatHistory)
     start = datetime(2026, 6, 17, 0, 0, 0)
@@ -872,7 +922,14 @@ async def test_chat_history_query_structured_range_includes_segments(monkeypatch
     )
 
     query = _FakeChatHistory.last_query
-    assert rows == _FakeChatHistory.rows
+    assert rows == [
+        {
+            "id": 1,
+            "segments": [],
+            "media_count": 0,
+            "is_media_only": False,
+        }
+    ]
     assert query is not None
     assert "segments" in query.value_fields
     assert "segment_types" in query.value_fields
@@ -936,13 +993,61 @@ async def test_chat_history_query_structured_recent_includes_segments(monkeypatc
     )
 
     query = _FakeChatHistory.last_query
-    assert rows == _FakeChatHistory.rows
+    assert rows == [
+        {
+            "id": 1,
+            "segments": [],
+            "media_count": 0,
+            "is_media_only": False,
+        }
+    ]
     assert query is not None
     assert query.filters == [{"group_id": "2000"}, {"direction": "in"}]
     assert query.order_fields == ("-create_time", "-id")
     assert query.limit_value == 250
     assert "segments" in query.value_fields
     assert "segment_types" in query.value_fields
+
+
+@pytest.mark.asyncio
+async def test_structured_projection_derives_media_metadata(monkeypatch):
+    monkeypatch.setattr(recorder_mod, "ChatHistory", _FakeChatHistory)
+    _FakeChatHistory.rows = [
+        {
+            "id": 1,
+            "segments": [
+                {"type": "reply", "data": {"message_id": "10"}},
+                {"type": "image", "data": {}},
+                {"type": "unknown", "data": {"raw_type": "voice"}},
+            ],
+        },
+        {
+            "id": 2,
+            "segments": [
+                {"type": "image", "data": {}},
+                {"type": "text", "data": {"text": "说明"}},
+            ],
+        },
+        {
+            "id": 3,
+            "segments": [
+                {"type": "mention", "data": {"target": "1000"}},
+                {"type": "sticker", "data": {}},
+            ],
+        },
+        {"id": 4, "segments": None},
+        {"id": 5, "segments": [{"type": "card", "data": {}}]},
+    ]
+
+    rows = await ChatHistoryQuery.structured_recent(direction="all")
+
+    assert [(row["media_count"], row["is_media_only"]) for row in rows] == [
+        (2, True),
+        (1, False),
+        (1, False),
+        (0, False),
+        (0, False),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1028,6 +1133,7 @@ async def test_flush_history_queue_bulk_creates_and_clears_queue(monkeypatch):
     assert flushed == 2
     assert created == records
     assert chat_message_mod._HISTORY_QUEUE.empty()
+    await asyncio.wait_for(chat_message_mod._HISTORY_QUEUE.join(), timeout=1)
 
 
 @pytest.mark.asyncio
@@ -1044,6 +1150,8 @@ async def test_flush_history_queue_requeues_batch_when_bulk_create_fails(monkeyp
 
     flushed = await chat_message_mod._flush_history_queue()
     requeued = chat_message_mod._drain_history_queue()
+    for _ in requeued:
+        chat_message_mod._HISTORY_QUEUE.task_done()
 
     assert flushed == 0
     assert requeued == records
@@ -1082,7 +1190,10 @@ async def test_flush_history_queue_reports_dropped_items_when_requeue_is_full(
     assert state.queue_size == 1
     assert state.flush_failures == 1
     assert state.requeue_dropped == 1
-    assert chat_message_mod._drain_history_queue() == [records[0]]
+    requeued = chat_message_mod._drain_history_queue()
+    assert requeued == [records[0]]
+    for _ in requeued:
+        chat_message_mod._HISTORY_QUEUE.task_done()
 
 
 def test_history_queue_state_tracks_enqueue_drops(monkeypatch):
@@ -1104,6 +1215,84 @@ def test_history_queue_state_tracks_enqueue_drops(monkeypatch):
     assert state.queue_size == 1
     assert state.queue_max_size == 1
     assert state.enqueue_dropped == 1
+
+
+@pytest.mark.asyncio
+async def test_history_queue_tracks_overload_drops(monkeypatch):
+    _reset_history_queue_stats()
+    monkeypatch.setattr(chat_message_mod, "is_overloaded", lambda: True)
+
+    await chat_message_mod.handle_chat_history(None, None, None, None)
+
+    assert chat_message_mod.get_history_queue_state().overload_dropped == 1
+
+
+@pytest.mark.asyncio
+async def test_flush_history_queue_serializes_concurrent_flushes(monkeypatch):
+    _reset_history_queue_stats()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    active = 0
+    max_active = 0
+
+    async def _bulk_create(_items):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        started.set()
+        await release.wait()
+        active -= 1
+
+    monkeypatch.setattr(chat_message_mod.ChatHistory, "bulk_create", _bulk_create)
+    chat_message_mod._HISTORY_QUEUE.put_nowait(SimpleNamespace(id=1))
+    first_flush = asyncio.create_task(chat_message_mod._flush_history_queue())
+    await started.wait()
+    chat_message_mod._HISTORY_QUEUE.put_nowait(SimpleNamespace(id=2))
+    second_flush = asyncio.create_task(chat_message_mod._flush_history_queue())
+
+    release.set()
+    assert await asyncio.gather(first_flush, second_flush) == [1, 1]
+    assert max_active == 1
+    await asyncio.wait_for(chat_message_mod._HISTORY_QUEUE.join(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_flushes_pending_history(monkeypatch):
+    calls = 0
+
+    async def _flush():
+        nonlocal calls
+        calls += 1
+        return 0
+
+    monkeypatch.setattr(chat_message_mod, "_flush_history_queue", _flush)
+
+    await chat_message_mod._flush_chat_history_on_shutdown()
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_history_service_flushes_registered_queue(monkeypatch):
+    calls = 0
+
+    async def _flush():
+        nonlocal calls
+        calls += 1
+        return 3
+
+    chat_history_service.register_pending_history_flusher(_flush)
+    try:
+        assert await chat_history_service.flush_pending_history() == 3
+        assert calls == 1
+    finally:
+        chat_history_service.register_pending_history_flusher(
+            chat_message_mod._flush_history_queue
+        )
+
+
+def test_chat_history_flush_interval_defaults_to_five_seconds():
+    assert chat_message_mod._FLUSH_INTERVAL_SECONDS == 5
 
 
 @pytest.mark.asyncio
@@ -1275,6 +1464,49 @@ async def test_call_hook_bot_store_failure_does_not_block_chat_history(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_call_hook_records_history_when_legacy_audit_is_disabled(monkeypatch):
+    from zhenxun.builtin_plugins.hooks import call_hook
+
+    bot = SimpleNamespace(self_id="9000")
+    history_calls: list[dict[str, object]] = []
+    store_calls: list[dict[str, object]] = []
+
+    async def _record_history(_bot, **kwargs):
+        history_calls.append(kwargs)
+
+    async def _create_store(**kwargs):
+        store_calls.append(kwargs)
+
+    callback_globals = call_hook.handle_api_result.__globals__
+    monkeypatch.setitem(
+        callback_globals,
+        "_record_outgoing_chat_history",
+        _record_history,
+    )
+    monkeypatch.setattr(callback_globals["BotMessageStore"], "create", _create_store)
+
+    def _get_config(module, key, default=None, **_kwargs):
+        if module == "hook" and key == "RECORD_BOT_SENT_MESSAGES":
+            return False
+        if module == "chat_history" and key == "FLAG":
+            return True
+        return default
+
+    monkeypatch.setattr(callback_globals["Config"], "get_config", _get_config)
+
+    await call_hook.handle_api_result(
+        bot,
+        None,
+        "send_private_msg",
+        {"user_id": 1000, "message": "private hello"},
+        {"message_id": 2},
+    )
+
+    assert len(history_calls) == 1
+    assert store_calls == []
+
+
+@pytest.mark.asyncio
 async def test_message_sent_handler_records_platform_event_time(monkeypatch):
     calls: list[dict[str, object]] = []
 
@@ -1420,11 +1652,14 @@ async def test_create_outgoing_record_platform_event_updates_without_duplicate(
             message="fallback",
             result={"message_id": 4567},
         )
+        fallback = await ChatHistory.get(message_id="4567")
+        fallback.reply_to_message_id = "1234"
+        await fallback.save(update_fields=["reply_to_message_id"])
         await create_outgoing_record(
             bot,
             user_id="9000",
-            group_id="2000",
-            message_type="group",
+            group_id=None,
+            message_type=None,
             message="platform event",
             result={"message_id": 4567},
             create_time=event_time,
@@ -1445,5 +1680,8 @@ async def test_create_outgoing_record_platform_event_updates_without_duplicate(
         assert int(rows[0].create_time.timestamp()) == 1_700_000_000
         assert rows[0].text == "platform event"
         assert rows[0].user_id == "1000"
+        assert rows[0].group_id == "2000"
+        assert rows[0].message_type == "group"
+        assert rows[0].reply_to_message_id == "1234"
     finally:
         await Tortoise.close_connections()
