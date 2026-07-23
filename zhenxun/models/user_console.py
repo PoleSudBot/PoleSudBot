@@ -47,21 +47,26 @@ class UserConsole(Model):
     async def get_or_create_user(
         cls, user_id: str, platform: str | None = None
     ) -> tuple["UserConsole", bool]:
-        for attempt in range(2):
+        if user := await cls.get_or_none(user_id=user_id):
+            return user, False
+
+        for attempt in range(3):
             try:
-                return await cls.get_or_create(
+                user = await cls.create(
                     user_id=user_id,
-                    defaults={"platform": platform, "uid": await cls.get_new_uid()},
+                    platform=platform,
+                    uid=await cls.get_new_uid(),
                 )
             except IntegrityError:
+                if user := await cls.get_or_none(user_id=user_id):
+                    return user, False
                 async with cls._uid_lock:
                     cls._uid_counter = None
-                if attempt >= 1:
+                if attempt >= 2:
                     raise
-        return await cls.get_or_create(
-            user_id=user_id,
-            defaults={"platform": platform, "uid": await cls.get_new_uid()},
-        )
+            else:
+                return user, True
+        raise RuntimeError("unreachable")
 
     @classmethod
     async def get_user(cls, user_id: str, platform: str | None = None) -> "UserConsole":
