@@ -96,6 +96,11 @@ _OUTGOING_CONTENT_FIELDS = (
 )
 
 
+def _strip_nul(value: str) -> str:
+    """移除 PostgreSQL 文本类型无法存储的零字节。"""
+    return value.replace("\x00", "")
+
+
 def _structured_media_metadata(row: dict[str, Any]) -> dict[str, Any]:
     """从结构化段详情派生媒体数量和纯媒体标记，不增加数据库字段。"""
     segments = row.get("segments")
@@ -139,13 +144,14 @@ def _to_str(value: Any) -> str | None:
     """把平台字段统一为字符串，避免不同适配器返回数字造成查询条件不稳定。"""
     if value is None:
         return None
-    return str(value)
+    return _strip_nul(str(value))
 
 
 def _truncate(value: Any, limit: int = _MAX_DATA_VALUE_LENGTH) -> Any:
     """限制入库字段长度，防止异常payload撑大历史表。"""
     if not isinstance(value, str):
         return value
+    value = _strip_nul(value)
     if len(value) <= limit:
         return value
     suffix = "...[truncated]"
@@ -590,8 +596,8 @@ def _segments_to_plain_text(segments: list[dict[str, Any]]) -> str:
 def _extract_plain_text(message: Any, segments: list[dict[str, Any]]) -> str:
     """优先使用适配器纯文本提取；无该能力时只从文本段兜底。"""
     if hasattr(message, "extract_plain_text"):
-        return str(message.extract_plain_text() or "")
-    return _segments_to_plain_text(segments)
+        return _strip_nul(str(message.extract_plain_text() or ""))
+    return _strip_nul(_segments_to_plain_text(segments))
 
 
 def segments_to_readable_text(segments: list[dict[str, Any]] | None) -> str:
@@ -712,12 +718,12 @@ def build_incoming_record(
     plain_text = _extract_plain_text(message, segments)
     reply_to_message_id = _extract_reply_to_message_id(segments, event)
     return ChatHistory(
-        user_id=entity.user_id,
-        group_id=entity.group_id,
+        user_id=_to_str(entity.user_id) or "",
+        group_id=_to_str(entity.group_id),
         text=readable_text,
         plain_text=plain_text,
-        bot_id=session.self_id,
-        platform=PlatformUtils.get_platform(session),
+        bot_id=_to_str(session.self_id),
+        platform=_to_str(PlatformUtils.get_platform(session)),
         direction="in",
         message_id=_extract_incoming_message_id(event),
         message_type=_normalize_message_type(event, session),
@@ -753,16 +759,17 @@ def build_outgoing_record(
     )
     plain_text = _extract_plain_text(message, segments)
     reply_to_message_id = _extract_reply_to_message_id(segments, None)
+    bot_id = _to_str(bot.self_id)
     return ChatHistory(
-        user_id=user_id or str(bot.self_id),
-        group_id=group_id,
+        user_id=_to_str(user_id) or bot_id or "",
+        group_id=_to_str(group_id),
         text=readable_text,
         plain_text=plain_text,
-        bot_id=str(bot.self_id),
-        platform=PlatformUtils.get_platform(bot),
+        bot_id=bot_id,
+        platform=_to_str(PlatformUtils.get_platform(bot)),
         direction="out",
         message_id=_extract_message_id_from_result(result),
-        message_type=message_type,
+        message_type=_to_str(message_type),
         create_time=create_time or timezone.now(),
         segments=segments,
         segment_types=segment_types,

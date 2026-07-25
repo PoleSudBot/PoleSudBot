@@ -666,6 +666,49 @@ def test_build_incoming_record_keeps_plain_text_text_only(monkeypatch):
     assert segments_to_readable_text(record.segments) == "看看[image]"
 
 
+def test_build_incoming_record_strips_nul_from_persisted_strings(monkeypatch):
+    monkeypatch.setattr(
+        "zhenxun.services.chat_history.recorder.PlatformUtils.get_platform",
+        lambda _session: "q\x00q",
+    )
+    session = SimpleNamespace(
+        user=SimpleNamespace(id="10\x000"),
+        group=SimpleNamespace(id="20\x0000", parent=None),
+        self_id="90\x0000",
+    )
+    message = Message([MessageSegment.text("前\x00后")])
+
+    record = build_incoming_record(message, session, SimpleNamespace())
+
+    assert record.user_id == "100"
+    assert record.group_id == "2000"
+    assert record.bot_id == "9000"
+    assert record.platform == "qq"
+    assert record.text == "前后"
+    assert record.plain_text == "前后"
+    assert record.segments == [{"type": "text", "data": {"text": "前后"}}]
+
+
+def test_build_incoming_record_strips_nul_from_adapter_plain_text(monkeypatch):
+    monkeypatch.setattr(
+        "zhenxun.services.chat_history.recorder.PlatformUtils.get_platform",
+        lambda _session: "qq",
+    )
+    session = SimpleNamespace(
+        user=SimpleNamespace(id="1000"),
+        group=SimpleNamespace(id="2000", parent=None),
+        self_id="9000",
+    )
+    message = SimpleNamespace(
+        extract_plain_text=lambda: "适配\x00器",
+        __iter__=lambda self: iter(["适配器"]),
+    )
+
+    record = build_incoming_record(message, session, SimpleNamespace())
+
+    assert record.plain_text == "适配器"
+
+
 def test_build_incoming_record_allows_empty_plain_text_for_image(monkeypatch):
     monkeypatch.setattr(
         "zhenxun.services.chat_history.recorder.PlatformUtils.get_platform",
@@ -1586,6 +1629,35 @@ def test_build_outgoing_record_marks_bot_direction_message_id_and_reply(monkeypa
     assert record.text == "[reply]收到[image]"
     assert "[CQ:" not in record.text
     assert not hasattr(record, "record_version")
+
+
+def test_build_outgoing_record_strips_nul_from_persisted_strings(monkeypatch):
+    monkeypatch.setattr(
+        "zhenxun.services.chat_history.recorder.PlatformUtils.get_platform",
+        lambda _bot: "q\x00q",
+    )
+    bot = SimpleNamespace(self_id="90\x0000")
+
+    record = build_outgoing_record(
+        bot,
+        user_id="10\x000",
+        group_id="20\x0000",
+        message_type="gr\x00oup",
+        message="回\x00复\n保留",
+        result={"message_id": "45\x0067"},
+    )
+
+    assert record.user_id == "100"
+    assert record.group_id == "2000"
+    assert record.bot_id == "9000"
+    assert record.platform == "qq"
+    assert record.message_type == "group"
+    assert record.message_id == "4567"
+    assert record.text == "回复\n保留"
+    assert record.plain_text == "回复\n保留"
+    assert record.segments == [
+        {"type": "text", "data": {"text": "回复\n保留"}}
+    ]
 
 
 def test_build_outgoing_record_prefers_alconna_conversion(monkeypatch):
