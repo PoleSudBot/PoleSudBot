@@ -1,4 +1,3 @@
-from nonebot import get_driver
 from nonebot.plugin import PluginMetadata
 
 from zhenxun.utils.manager.priority_manager import PriorityLifecycle
@@ -19,7 +18,6 @@ from .config import ensure_quote_path
 from zhenxun.services import renderer_service
 
 ensure_quote_path()
-driver = get_driver()
 
 QUOTE_ASSETS_PATH = Path(__file__).parent / "templates"
 
@@ -35,27 +33,6 @@ async def _init_quote_services():
         logger.info("语录插件模板命名空间 '@quote' 注册成功。", "群聊语录")
     except Exception as e:
         logger.error(f"注册语录插件模板命名空间失败: {e}", "群聊语录", e=e)
-
-    try:
-        from .services.ocr_service import OCRService
-
-        await OCRService.initialize_engine()
-        logger.info("OCR服务初始化完成", "群聊语录")
-    except Exception as e:
-        logger.error(f"OCR服务初始化失败: {e}", "群聊语录", e=e)
-
-
-@driver.on_shutdown
-async def shutdown_services():
-    """关闭"""
-    try:
-        from .services.ocr_service import OCRService
-
-        OCRService.shutdown()
-        logger.info("OCR服务已关闭", "群聊语录")
-    except Exception as e:
-        logger.error(f"OCR服务关闭失败: {e}", "群聊语录", e=e)
-
 
 __plugin_meta__ = PluginMetadata(
     name="群聊语录",
@@ -116,32 +93,53 @@ __plugin_meta__ = PluginMetadata(
     supported_adapters={"~onebot.v11"},
     extra=PluginExtraData(
         author="webjoin111",
-        version="v1.1.9",
+        version="v1.2.1",
         admin_level=0,
         configs=[
             RegisterConfig(
                 module="quote",
-                key="OCR_ENGINE",
-                value="easyocr",
-                help="OCR引擎选择，可选值: easyocr, paddleocr",
-                default_value="easyocr",
+                key="TEXT_RECOGNITION_PRIORITY",
+                value="llm",
+                help="普通上传文字识别优先级，可选值: llm, paddleocr_api",
+                default_value="llm",
             ),
             RegisterConfig(
                 module="quote",
-                key="OCR_USE_GPU",
-                value=True,
-                help="是否使用GPU加速OCR识别",
-                default_value=True,
-            ),
-            RegisterConfig(
-                module="quote",
-                key="BATCH_UPLOAD_OCR_MODE",
-                value="paddleocr",
+                key="BATCH_TEXT_RECOGNITION_PRIORITY",
+                value="paddleocr_api",
                 help=(
-                    "合并转发批量上传时的文字识别模式，可选值: "
-                    "paddleocr, easyocr, ai, inherit, disabled"
+                    "合并转发批量上传文字识别优先级，可选值: "
+                    "llm, paddleocr_api"
                 ),
-                default_value="paddleocr",
+                default_value="paddleocr_api",
+            ),
+            RegisterConfig(
+                module="quote",
+                key="PADDLEOCR_API_TOKEN",
+                value="",
+                help="PaddleOCR 官方 API Token；留空时跳过 API。",
+                default_value="",
+            ),
+            RegisterConfig(
+                module="quote",
+                key="PADDLEOCR_API_JOB_URL",
+                value="https://paddleocr.aistudio-app.com/api/v2/ocr/jobs",
+                help="PaddleOCR 官方异步任务 API 地址。",
+                default_value="https://paddleocr.aistudio-app.com/api/v2/ocr/jobs",
+            ),
+            RegisterConfig(
+                module="quote",
+                key="PADDLEOCR_API_MODEL",
+                value="PaddleOCR-VL-1.6",
+                help="PaddleOCR API 使用的模型名称。",
+                default_value="PaddleOCR-VL-1.6",
+            ),
+            RegisterConfig(
+                module="quote",
+                key="PADDLEOCR_API_TIMEOUT_SECONDS",
+                value=180,
+                help="单张图片等待 PaddleOCR API 完成的最长时间（秒）。",
+                default_value=180,
             ),
             RegisterConfig(
                 module="quote",

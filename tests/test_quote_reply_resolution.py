@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from importlib import util as importlib_util
+import json
 import os
 from pathlib import Path
 import sys
@@ -70,7 +71,10 @@ tag_utils = _load_module(
     PLUGIN_ROOT / "utils" / "tag_utils.py",
 )
 config_module = sys.modules[f"{PLUGIN_PACKAGE}.config"]
-ocr_service_module = sys.modules[f"{PLUGIN_PACKAGE}.services.ocr_service"]
+text_recognition_module = sys.modules[
+    f"{PLUGIN_PACKAGE}.services.text_recognition"
+]
+paddleocr_api_module = sys.modules[f"{PLUGIN_PACKAGE}.services.paddleocr_api"]
 
 QuoteService = quote_service_module.QuoteService
 Image = manage_commands.Image
@@ -181,6 +185,21 @@ def _build_filter(
         return _FakeQuery(results, update_calls=update_calls)
 
     return _filter
+
+
+def _patch_upload_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """将上传与记录测试的所有图片路径统一隔离到 pytest 临时目录。"""
+    monkeypatch.setattr(upload_commands, "ensure_quote_path", lambda: tmp_path)
+
+    def _get_group_path(group_id: str) -> Path:
+        group_path = tmp_path / str(group_id)
+        group_path.mkdir(parents=True, exist_ok=True)
+        return group_path
+
+    monkeypatch.setattr(upload_commands, "get_quote_group_path", _get_group_path)
 
 
 def test_extract_reply_image_identifiers_prefers_id_over_url_query_hex():
@@ -454,6 +473,243 @@ def test_extract_quote_query_params_history_index_cases(
 
     assert params.keyword == expected_keyword
     assert params.history_index == expected_index
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "image_path",
+    [
+        "quote/images/missing.png",
+        "../../outside.png",
+        "quote/images/io-error.png",
+    ],
+)
+async def test_collect_valid_quotes_skips_missing_without_deleting_records(
+    monkeypatch: pytest.MonkeyPatch,
+    image_path: str,
+):
+    quote = SimpleNamespace(id=31, group_id="123", image_path=image_path)
+
+    monkeypatch.setattr(
+        query_commands.QuoteService,
+        "select_quotes_without_record",
+        lambda memory_key, candidates, count: list(candidates)[:count],
+    )
+    monkeypatch.setattr(query_commands, "safe_file_exists", lambda path: False)
+
+    class _DeleteGuard:
+        async def delete(self):
+            raise AssertionError("查询链路禁止删除数据库记录")
+
+    monkeypatch.setattr(
+        query_commands.Quote,
+        "filter",
+        lambda **kwargs: _DeleteGuard(),
+    )
+
+    quotes = await query_commands._collect_valid_quotes_from_candidates(
+        "123_all",
+        [quote],
+        1,
+    )
+
+    assert quotes == []
+
+
+@pytest.mark.asyncio
+async def test_history_quote_missing_file_does_not_delete_record(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    quote = SimpleNamespace(
+        id=32,
+        group_id="123",
+        image_path="quote/images/missing.png",
+    )
+    sent_messages: list[object] = []
+
+    async def _fake_get_history(*args, **kwargs):
+        return quote
+
+    class _FakeMessage:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def send(self, target=None, bot=None):
+            sent_messages.append(self.payload)
+
+    class _DeleteGuard:
+        async def delete(self):
+            raise AssertionError("倒序查询禁止删除数据库记录")
+
+    monkeypatch.setattr(
+        query_commands.QuoteService,
+        "get_quote_by_history_index",
+        _fake_get_history,
+    )
+    monkeypatch.setattr(query_commands, "safe_file_exists", lambda path: False)
+    monkeypatch.setattr(
+        query_commands.MessageUtils,
+        "build_message",
+        lambda payload: _FakeMessage(payload),
+    )
+    monkeypatch.setattr(
+        query_commands.Quote,
+        "filter",
+        lambda **kwargs: _DeleteGuard(),
+    )
+
+    await query_commands._send_history_quote(
+        SimpleNamespace(),
+        SimpleNamespace(),
+        "123",
+        "",
+        1,
+    )
+
+    assert sent_messages == ["这条语录图片暂时不可用，请联系管理员检查。"]
+
+
+@pytest.mark.asyncio
+async def test_empty_library_message_reports_unavailable_images_when_records_exist(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class _ExistsQuery:
+        async def exists(self):
+            return True
+
+    monkeypatch.setattr(
+        query_commands.Quote,
+        "filter",
+        lambda **kwargs: _ExistsQuery(),
+    )
+
+    message = await query_commands._get_empty_quote_library_message("123")
+
+    assert message == "语录记录存在，但图片暂时不可用，请联系管理员检查。"
+
+
+@pytest.mark.asyncio
+async def test_empty_library_message_reports_empty_database(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class _ExistsQuery:
+        async def exists(self):
+            return False
+
+    monkeypatch.setattr(
+        query_commands.Quote,
+        "filter",
+        lambda **kwargs: _ExistsQuery(),
+    )
+
+    message = await query_commands._get_empty_quote_library_message("123")
+
+    assert message == "当前无语录库"
+
+
+@pytest.mark.asyncio
+async def test_random_quote_lookup_reports_matching_but_unavailable_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    quote = SimpleNamespace(id=33, group_id="123", image_path="missing.png")
+    monkeypatch.setattr(
+        query_commands.Quote,
+        "filter",
+        _build_filter([quote]),
+    )
+    monkeypatch.setattr(
+        query_commands.QuoteService,
+        "_match_user_filter",
+        lambda candidate, user_id: True,
+    )
+    monkeypatch.setattr(
+        query_commands.QuoteService,
+        "select_quotes_without_record",
+        lambda memory_key, candidates, count: list(candidates)[:count],
+    )
+    monkeypatch.setattr(query_commands, "safe_file_exists", lambda path: False)
+
+    quotes, memory_key, has_candidates = (
+        await query_commands._get_valid_random_quotes("123", 1, "42")
+    )
+
+    assert quotes == []
+    assert memory_key == "123_42"
+    assert has_candidates is True
+
+
+@pytest.mark.asyncio
+async def test_send_quote_batch_rechecks_files_before_sending(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    quote = SimpleNamespace(id=34, group_id="123", image_path="missing.png")
+    sent_messages: list[object] = []
+
+    class _FakeMessage:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def send(self, target=None, bot=None):
+            sent_messages.append(self.payload)
+
+    monkeypatch.setattr(query_commands, "safe_file_exists", lambda path: False)
+    monkeypatch.setattr(
+        query_commands.MessageUtils,
+        "build_message",
+        lambda payload: _FakeMessage(payload),
+    )
+
+    sent_quotes = await query_commands._send_quote_batch(
+        SimpleNamespace(),
+        SimpleNamespace(),
+        "123",
+        [quote],
+    )
+
+    assert sent_quotes == []
+    assert sent_messages == ["语录记录存在，但图片暂时不可用，请联系管理员检查。"]
+
+
+@pytest.mark.asyncio
+async def test_send_small_quote_batch_skips_file_lost_after_recheck(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    valid_path = tmp_path / "valid.png"
+    valid_path.write_bytes(b"valid-image")
+    valid_quote = SimpleNamespace(
+        id=35,
+        group_id="123",
+        image_path="valid.png",
+    )
+    missing_quote = SimpleNamespace(
+        id=36,
+        group_id="123",
+        image_path="missing.png",
+    )
+    sent_segments: list[object] = []
+
+    async def _fake_send(message, target=None, bot=None):
+        sent_segments.extend(message)
+
+    monkeypatch.setattr(query_commands, "safe_file_exists", lambda path: True)
+    monkeypatch.setattr(
+        query_commands,
+        "resolve_quote_image_path",
+        lambda path: tmp_path / path,
+    )
+    monkeypatch.setattr(query_commands.UniMessage, "send", _fake_send)
+
+    sent_quotes = await query_commands._send_quote_batch(
+        SimpleNamespace(),
+        SimpleNamespace(),
+        "123",
+        [valid_quote, missing_quote],
+    )
+
+    assert sent_quotes == [valid_quote]
+    assert len(sent_segments) == 1
+    assert sent_segments[0].raw == b"valid-image"
 
 
 def test_make_record_alc_supports_compact_no_space_input():
@@ -813,8 +1069,7 @@ async def test_save_img_handle_writes_dual_mention_tags(monkeypatch, tmp_path: P
     async def _fake_get_img_hash(path):
         return "image-hash"
 
-    async def _fake_recognize_text(path: str, *, mode: str = "inherit"):
-        assert mode == "inherit"
+    async def _fake_recognize_text(path: str):
         return "ocr text"
 
     async def _fake_set_pending_emoji_like(*args, **kwargs):
@@ -840,16 +1095,12 @@ async def test_save_img_handle_writes_dual_mention_tags(monkeypatch, tmp_path: P
         "extract_manual_tags_with_mention_names",
         _fake_extract_tags,
     )
-    monkeypatch.setattr(upload_commands, "ensure_quote_path", lambda: tmp_path)
-    monkeypatch.setattr(
-        upload_commands,
-        "get_quote_group_path",
-        lambda group_id: tmp_path / str(group_id),
-    )
-    (tmp_path / "123").mkdir()
+    _patch_upload_paths(monkeypatch, tmp_path)
     monkeypatch.setattr(upload_commands, "get_img_hash", _fake_get_img_hash)
     monkeypatch.setattr(
-        upload_commands.OCRService, "recognize_text", _fake_recognize_text
+        upload_commands.TextRecognitionService,
+        "recognize_single",
+        _fake_recognize_text,
     )
     monkeypatch.setattr(
         upload_commands.QuoteService, "add_quote", _fake_add_quote
@@ -946,7 +1197,7 @@ async def test_extract_forward_images_supports_onebot_response_shapes(
 
 
 @pytest.mark.asyncio
-async def test_save_img_handle_batch_uses_paddleocr_and_reports_partial_results(
+async def test_save_img_handle_batch_uses_batch_recognition_and_reports_partial_results(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ):
@@ -977,10 +1228,7 @@ async def test_save_img_handle_batch_uses_paddleocr_and_reports_partial_results(
         return None
 
     def _fake_get_config(module, key, default=None):
-        return {
-            "QUOTE_MAX_IMAGE_SIZE_MB": 15,
-            "BATCH_UPLOAD_OCR_MODE": "paddleocr",
-        }.get(key, default)
+        return {"QUOTE_MAX_IMAGE_SIZE_MB": 15}.get(key, default)
 
     class _FakeMessage:
         def __init__(self, payload):
@@ -1027,7 +1275,7 @@ async def test_save_img_handle_batch_uses_paddleocr_and_reports_partial_results(
     await upload_commands.save_img_handle(SimpleNamespace(), event, arp, {})
 
     assert [call["target"] for call in process_calls] == target_images
-    assert all(call["ocr_mode"] == "paddleocr" for call in process_calls)
+    assert all(call["batch"] is True for call in process_calls)
     assert all(call["manual_tags"] == ["batch-tag"] for call in process_calls)
     assert sent_messages == [
         "批量上传完成：成功 1/3 张，重复 1 张，失败 1 张。\n"
@@ -1054,57 +1302,334 @@ async def test_process_upload_image_cleans_temp_file_after_failure(
         manual_tags=[],
         max_bytes=1024,
         max_size_mb=1,
-        ocr_mode="paddleocr",
+        batch=False,
     )
 
     assert result.status == "failed"
     assert list(tmp_path.glob("temp_*.png")) == []
 
 
+def test_invalid_text_recognition_priority_uses_context_default(monkeypatch):
+    service = text_recognition_module.TextRecognitionService
+    monkeypatch.setattr(
+        text_recognition_module.Config,
+        "get_config",
+        lambda *args, **kwargs: "unknown",
+    )
+
+    assert service._get_priority("TEXT_RECOGNITION_PRIORITY", "llm") == "llm"
+    assert (
+        service._get_priority(
+            "BATCH_TEXT_RECOGNITION_PRIORITY",
+            "paddleocr_api",
+        )
+        == "paddleocr_api"
+    )
+
+
 @pytest.mark.asyncio
-async def test_ocr_explicit_local_modes_bypass_ai_and_isolate_cache(
+async def test_paddleocr_api_submits_polls_and_parses_jsonl(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    image_path = tmp_path / "quote.png"
+    image_path.write_bytes(b"image-data")
+    settings = paddleocr_api_module.PaddleOCRAPISettings(
+        token="test-token",
+        job_url="https://example.test/jobs",
+        model="PaddleOCR-VL-1.6",
+        poll_interval_seconds=0.001,
+        timeout_seconds=1,
+    )
+    client = paddleocr_api_module.PaddleOCRAPIClient(settings)
+    get_calls: list[str] = []
+
+    async def _fake_post(url, **kwargs):
+        assert url == settings.job_url
+        assert kwargs["headers"] == {"Authorization": "bearer test-token"}
+        assert kwargs["data"]["model"] == settings.model
+        assert json.loads(kwargs["data"]["optionalPayload"]) == {
+            "useDocOrientationClassify": False,
+            "useDocUnwarping": False,
+            "useChartRecognition": False,
+        }
+        assert kwargs["files"]["file"] == ("quote.png", b"image-data", "image/png")
+        return httpx.Response(200, json={"data": {"jobId": "job-1"}})
+
+    async def _fake_get(url, **kwargs):
+        get_calls.append(url)
+        assert url == "https://example.test/jobs/job-1"
+        if get_calls.count(url) == 1:
+            return httpx.Response(200, json={"data": {"state": "running"}})
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "state": "done",
+                    "resultUrl": {"jsonUrl": "https://result.test/result.jsonl"},
+                }
+            },
+        )
+
+    async def _fake_client_get(self, url, **kwargs):
+        assert url == "https://result.test/result.jsonl"
+        return httpx.Response(
+            200,
+            request=httpx.Request("GET", url),
+            text=(
+                '{"result":{"layoutParsingResults":'
+                '[{"markdown":{"text":"第一页"}}]}}\n'
+                '{"result":{"layoutParsingResults":'
+                '[{"markdown":{"text":"第二页"}}]}}\n'
+            ),
+        )
+
+    monkeypatch.setattr(paddleocr_api_module.AsyncHttpx, "post", _fake_post)
+    monkeypatch.setattr(paddleocr_api_module.AsyncHttpx, "get", _fake_get)
+    monkeypatch.setattr(httpx.AsyncClient, "get", _fake_client_get)
+
+    assert await client.recognize(image_path) == "第一页\n第二页"
+    assert get_calls == [
+        "https://example.test/jobs/job-1",
+        "https://example.test/jobs/job-1",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("markdown_text", "expected"),
+    [
+        (
+            '<div style="text-align: center;"><img src="imgs/image.jpg" '
+            'alt="Image" /></div>\n',
+            "",
+        ),
+        (
+            "花点时间挑战难题\n\n"
+            '<div style="text-align: center;"><img src="imgs/image.jpg" '
+            'alt="Image" /></div>\n',
+            "花点时间挑战难题",
+        ),
+        ("识别正文 ![Image](imgs/image.jpg)", "识别正文"),
+    ],
+)
+def test_paddleocr_api_cleans_image_placeholders(markdown_text, expected):
+    assert (
+        paddleocr_api_module.PaddleOCRAPIClient._clean_markdown_text(markdown_text)
+        == expected
+    )
+
+
+@pytest.mark.asyncio
+async def test_paddleocr_api_missing_token_skips_http(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    settings = paddleocr_api_module.PaddleOCRAPISettings(
+        token="",
+        job_url="https://example.test/jobs",
+        model="PaddleOCR-VL-1.6",
+        poll_interval_seconds=5,
+        timeout_seconds=180,
+    )
+
+    async def _fail_post(*args, **kwargs):
+        raise AssertionError("缺少 Token 时不应发起请求")
+
+    monkeypatch.setattr(paddleocr_api_module.AsyncHttpx, "post", _fail_post)
+
+    client = paddleocr_api_module.PaddleOCRAPIClient(settings)
+
+    assert client.is_configured is False
+    with pytest.raises(
+        paddleocr_api_module.PaddleOCRAPIError,
+        match="PADDLEOCR_API_TOKEN",
+    ):
+        await client.recognize(tmp_path / "missing.png")
+
+
+@pytest.mark.asyncio
+async def test_paddleocr_api_failed_job_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    image_path = tmp_path / "quote.png"
+    image_path.write_bytes(b"image-data")
+    settings = paddleocr_api_module.PaddleOCRAPISettings(
+        token="test-token",
+        job_url="https://example.test/jobs",
+        model="PaddleOCR-VL-1.6",
+        poll_interval_seconds=5,
+        timeout_seconds=180,
+    )
+
+    async def _fake_post(url, **kwargs):
+        return httpx.Response(200, json={"data": {"jobId": "job-1"}})
+
+    async def _fake_get(url, **kwargs):
+        return httpx.Response(
+            200,
+            json={"data": {"state": "failed", "errorMsg": "quota exceeded"}},
+        )
+
+    monkeypatch.setattr(paddleocr_api_module.AsyncHttpx, "post", _fake_post)
+    monkeypatch.setattr(paddleocr_api_module.AsyncHttpx, "get", _fake_get)
+
+    with pytest.raises(
+        paddleocr_api_module.PaddleOCRAPIError,
+        match="quota exceeded",
+    ):
+        await paddleocr_api_module.PaddleOCRAPIClient(settings).recognize(image_path)
+
+
+@pytest.mark.asyncio
+async def test_paddleocr_api_polling_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    service = ocr_service_module.OCRService
+    settings = paddleocr_api_module.PaddleOCRAPISettings(
+        token="test-token",
+        job_url="https://example.test/jobs",
+        model="PaddleOCR-VL-1.6",
+        poll_interval_seconds=5,
+        timeout_seconds=1,
+    )
+    client = paddleocr_api_module.PaddleOCRAPIClient(settings)
+    monotonic_values = iter([0.0, 0.0, 2.0])
+
+    async def _fake_get(url, **kwargs):
+        return httpx.Response(200, json={"data": {"state": "pending"}})
+
+    monkeypatch.setattr(paddleocr_api_module.AsyncHttpx, "get", _fake_get)
+    monkeypatch.setattr(client, "_monotonic", lambda: next(monotonic_values))
+
+    async with httpx.AsyncClient() as http_client:
+        with pytest.raises(TimeoutError, match="1 秒内未完成"):
+            await client._wait_for_result(
+                http_client,
+                "job-1",
+            )
+
+
+@pytest.mark.asyncio
+async def test_text_recognition_uses_separate_single_and_batch_priorities(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = text_recognition_module.TextRecognitionService
+    priorities: list[str] = []
+
+    def _fake_get_config(module, key, default=None):
+        return {
+            "TEXT_RECOGNITION_PRIORITY": "paddleocr_api",
+            "BATCH_TEXT_RECOGNITION_PRIORITY": "llm",
+        }.get(key, default)
+
+    async def _fake_recognize(cls, image_path, priority):
+        priorities.append(priority)
+        return priority
+
+    monkeypatch.setattr(
+        text_recognition_module.Config,
+        "get_config",
+        _fake_get_config,
+    )
+    monkeypatch.setattr(service, "_recognize", classmethod(_fake_recognize))
+
+    assert await service.recognize_single("single.png") == "paddleocr_api"
+    assert await service.recognize_batch("batch.png") == "llm"
+    assert priorities == ["paddleocr_api", "llm"]
+
+
+@pytest.mark.asyncio
+async def test_text_recognition_api_priority_stops_after_text(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = text_recognition_module.TextRecognitionService
+    status = text_recognition_module.RecognitionStatus
+    result = text_recognition_module.RecognitionResult
     executed: list[str] = []
 
-    async def _fail_ai(image_path):
-        raise AssertionError("显式本地OCR模式不应调用AI")
+    async def _successful_api(cls, image_path):
+        executed.append("paddleocr_api")
+        return result(status.TEXT, "api text")
 
-    async def _fake_execute_strategy(cls, strategy, image_path):
-        executed.append(strategy)
-        return strategy
+    async def _fail_llm(cls, image_path):
+        raise AssertionError("API 有文字时不应调用视觉模型")
 
-    monkeypatch.setattr(service, "_initialized", True)
-    monkeypatch.setattr(service, "_cache", {})
-    monkeypatch.setattr(
-        service,
-        "_get_strategy",
-        classmethod(lambda cls, engine_name: engine_name),
-    )
-    monkeypatch.setattr(
-        service,
-        "_execute_strategy",
-        classmethod(_fake_execute_strategy),
-    )
-    monkeypatch.setattr(
-        ocr_service_module.AIService,
-        "recognize_image",
-        _fail_ai,
-    )
+    monkeypatch.setattr(service, "_recognize_with_api", classmethod(_successful_api))
+    monkeypatch.setattr(service, "_recognize_with_llm", classmethod(_fail_llm))
 
-    paddle_result = await service.recognize_text(
-        "same-image.png", mode="paddleocr"
-    )
-    easy_result = await service.recognize_text("same-image.png", mode="easyocr")
-
-    assert paddle_result == "paddleocr"
-    assert easy_result == "easyocr"
-    assert executed == ["paddleocr", "easyocr"]
+    assert await service._recognize("image.png", "paddleocr_api") == "api text"
+    assert executed == ["paddleocr_api"]
 
 
-def test_invalid_batch_ocr_mode_falls_back_to_paddleocr():
-    assert ocr_service_module.OCRService.normalize_mode("unknown") == "paddleocr"
+@pytest.mark.asyncio
+async def test_text_recognition_api_empty_falls_back_to_llm(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = text_recognition_module.TextRecognitionService
+    status = text_recognition_module.RecognitionStatus
+    result = text_recognition_module.RecognitionResult
+    executed: list[str] = []
+
+    async def _empty_api(cls, image_path):
+        executed.append("paddleocr_api")
+        return result(status.NO_TEXT)
+
+    async def _successful_llm(cls, image_path):
+        executed.append("llm")
+        return result(status.TEXT, "llm text")
+
+    monkeypatch.setattr(service, "_recognize_with_api", classmethod(_empty_api))
+    monkeypatch.setattr(service, "_recognize_with_llm", classmethod(_successful_llm))
+
+    assert await service._recognize("image.png", "paddleocr_api") == "llm text"
+    assert executed == ["paddleocr_api", "llm"]
+
+
+@pytest.mark.asyncio
+async def test_text_recognition_llm_empty_is_conclusive(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = text_recognition_module.TextRecognitionService
+    status = text_recognition_module.RecognitionStatus
+    result = text_recognition_module.RecognitionResult
+    executed: list[str] = []
+
+    async def _empty_llm(cls, image_path):
+        executed.append("llm")
+        return result(status.NO_TEXT)
+
+    async def _fail_api(cls, image_path):
+        raise AssertionError("视觉模型成功判定无文字时不应降级")
+
+    monkeypatch.setattr(service, "_recognize_with_llm", classmethod(_empty_llm))
+    monkeypatch.setattr(service, "_recognize_with_api", classmethod(_fail_api))
+
+    assert await service._recognize("image.png", "llm") == ""
+    assert executed == ["llm"]
+
+
+@pytest.mark.asyncio
+async def test_text_recognition_llm_failure_falls_back_to_api(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = text_recognition_module.TextRecognitionService
+    status = text_recognition_module.RecognitionStatus
+    result = text_recognition_module.RecognitionResult
+    executed: list[str] = []
+
+    async def _failed_llm(cls, image_path):
+        executed.append("llm")
+        return result(status.FAILED)
+
+    async def _successful_api(cls, image_path):
+        executed.append("paddleocr_api")
+        return result(status.TEXT, "api text")
+
+    monkeypatch.setattr(service, "_recognize_with_llm", classmethod(_failed_llm))
+    monkeypatch.setattr(service, "_recognize_with_api", classmethod(_successful_api))
+
+    assert await service._recognize("image.png", "llm") == "api text"
+    assert executed == ["llm", "paddleocr_api"]
 
 
 @pytest.mark.asyncio
@@ -1138,7 +1663,7 @@ async def test_make_record_handle_writes_dual_mention_tags(monkeypatch, tmp_path
     monkeypatch.setattr(
         upload_commands, "_handle_quote_generation", _fake_handle_generation
     )
-    monkeypatch.setattr(upload_commands, "ensure_quote_path", lambda: tmp_path)
+    _patch_upload_paths(monkeypatch, tmp_path)
     monkeypatch.setattr(
         upload_commands.Quote,
         "filter",
@@ -1159,6 +1684,7 @@ async def test_make_record_handle_writes_dual_mention_tags(monkeypatch, tmp_path
     )
 
     assert captured["group_id"] == "123"
+    assert Path(captured["image_path"]).is_relative_to(tmp_path)
     assert captured["manual_tags"] == ["user:114514", "群主_张三"]
     assert sent_messages == [
         upload_commands._build_record_success_message(b"generated-image")
@@ -1206,7 +1732,7 @@ async def test_idiom_record_handle_forces_classic_and_reuses_record_flow(
     monkeypatch.setattr(
         upload_commands, "_handle_quote_generation", _fake_handle_generation
     )
-    monkeypatch.setattr(upload_commands, "ensure_quote_path", lambda: tmp_path)
+    _patch_upload_paths(monkeypatch, tmp_path)
     monkeypatch.setattr(
         upload_commands.Quote,
         "filter",
@@ -1227,6 +1753,7 @@ async def test_idiom_record_handle_forces_classic_and_reuses_record_flow(
 
     assert captured["forced_variant"] == "classic"
     assert captured["group_id"] == "123"
+    assert Path(captured["image_path"]).is_relative_to(tmp_path)
     assert captured["manual_tags"] == ["user:114514", "群主_张三"]
     assert sent_messages == [
         upload_commands._build_record_success_message(b"generated-image")
@@ -1416,6 +1943,109 @@ async def test_handle_quote_deltag_uses_dual_mention_tags(monkeypatch):
         "tags": ["user:114514", "群主_张三"],
         "action": "del",
     }
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_group_id"),
+    [
+        ("quote manager check", None),
+        ("quote manager check 456", "456"),
+        ("quote manager 检查 全部", "全部"),
+    ],
+)
+def test_quote_storage_audit_command_parses_scope(
+    command: str,
+    expected_group_id: str | None,
+):
+    arp = manage_commands.quote_manage_cmd.command().parse(command)
+
+    assert arp.matched is True
+    assert arp.find("manager.check") is True
+    assert arp.query("manager.check.group_id") == expected_group_id
+
+
+def test_quote_storage_audit_command_keeps_superuser_permission():
+    assert str(manage_commands.quote_manage_cmd.permission) == str(
+        manage_commands.SUPERUSER
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("requested_group_id", "expected_audit_group_id", "expected_scope"),
+    [
+        (None, "123", "当前群 123"),
+        ("456", "456", "群 456"),
+        ("全部", None, "全部语录"),
+    ],
+)
+async def test_handle_storage_audit_reports_read_only_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    requested_group_id: str | None,
+    expected_audit_group_id: str | None,
+    expected_scope: str,
+):
+    captured_groups: list[str | None] = []
+    sent_messages: list[str] = []
+
+    async def _fake_audit(group_id=None):
+        captured_groups.append(group_id)
+        return quote_service_module.QuoteAuditSummary(
+            total=3,
+            valid=1,
+            missing=1,
+            out_of_bounds=1,
+            orphan_files=2 if group_id is None else 0,
+            issues=[
+                quote_service_module.QuoteAuditIssue(
+                    id=7,
+                    group_id="123",
+                    image_path="quote/images/missing.png",
+                    reason="missing",
+                )
+            ],
+        )
+
+    class _Arp:
+        def query(self, key, default=None):
+            if key == "manager.check.group_id":
+                return requested_group_id
+            return default
+
+    class _FakeMessage:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def send(self, target=None, bot=None):
+            sent_messages.append(self.payload)
+
+    monkeypatch.setattr(
+        manage_commands.QuoteService,
+        "audit_storage",
+        _fake_audit,
+    )
+    monkeypatch.setattr(
+        manage_commands.MessageUtils,
+        "build_message",
+        lambda payload: _FakeMessage(payload),
+    )
+
+    await manage_commands.handle_storage_audit(
+        SimpleNamespace(),
+        SimpleNamespace(get_user_id=lambda: "42"),
+        _Arp(),
+        SimpleNamespace(group=SimpleNamespace(id="123")),
+    )
+
+    assert captured_groups == [expected_audit_group_id]
+    assert expected_scope in sent_messages[0]
+    assert "数据库记录：3" in sent_messages[0]
+    assert "本操作只读，不会删除数据库或图片" in sent_messages[0]
+    assert "ID 7" in sent_messages[0]
+    if expected_audit_group_id is None:
+        assert "孤儿图片：2" in sent_messages[0]
+    else:
+        assert "孤儿图片" not in sent_messages[0]
 
 
 @pytest.mark.asyncio
@@ -1611,6 +2241,122 @@ def test_resolve_quote_image_path_rejects_paths_outside_managed_roots(
 
     with pytest.raises(ValueError, match="语录图片路径越界"):
         config_module.resolve_quote_image_path("../../etc/passwd")
+
+
+@pytest.mark.asyncio
+async def test_audit_storage_classifies_paths_and_preserves_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    data_path = tmp_path / "data"
+    quote_path = data_path / "quote" / "images"
+    valid_path = quote_path / "123" / "valid.png"
+    orphan_path = quote_path / "orphan.png"
+    ignored_temp_path = quote_path / "temp_upload.png"
+    valid_path.parent.mkdir(parents=True)
+    valid_path.write_bytes(b"valid")
+    orphan_path.write_bytes(b"orphan")
+    ignored_temp_path.write_bytes(b"temp")
+    monkeypatch.setattr(config_module, "DATA_PATH", data_path)
+    monkeypatch.setattr(config_module, "get_quote_path", lambda: quote_path)
+    monkeypatch.setattr(quote_service_module, "DATA_PATH", data_path)
+    monkeypatch.setattr(
+        quote_service_module,
+        "get_quote_path",
+        lambda: quote_path,
+        raising=False,
+    )
+
+    quotes = [
+        SimpleNamespace(
+            id=41,
+            group_id="123",
+            image_path="quote/images/123/valid.png",
+        ),
+        SimpleNamespace(
+            id=42,
+            group_id="123",
+            image_path="quote/images/123/missing.png",
+        ),
+        SimpleNamespace(
+            id=43,
+            group_id="123",
+            image_path="../../outside.png",
+        ),
+    ]
+    monkeypatch.setattr(
+        quote_service_module.Quote,
+        "filter",
+        _build_filter(quotes),
+    )
+    before_snapshot = {
+        path.relative_to(quote_path).as_posix(): (
+            path.read_bytes(),
+            path.stat().st_mtime_ns,
+        )
+        for path in quote_path.rglob("*")
+        if path.is_file()
+    }
+
+    result = await QuoteService.audit_storage()
+
+    after_snapshot = {
+        path.relative_to(quote_path).as_posix(): (
+            path.read_bytes(),
+            path.stat().st_mtime_ns,
+        )
+        for path in quote_path.rglob("*")
+        if path.is_file()
+    }
+    assert result.total == 3
+    assert result.valid == 1
+    assert result.missing == 1
+    assert result.out_of_bounds == 1
+    assert result.orphan_files == 1
+    assert [(issue.id, issue.reason) for issue in result.issues] == [
+        (42, "missing"),
+        (43, "out_of_bounds"),
+    ]
+    assert before_snapshot == after_snapshot
+
+
+@pytest.mark.asyncio
+async def test_audit_storage_limits_issue_details_without_truncating_counts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    data_path = tmp_path / "data"
+    quote_path = data_path / "quote" / "images"
+    quote_path.mkdir(parents=True)
+    monkeypatch.setattr(config_module, "DATA_PATH", data_path)
+    monkeypatch.setattr(config_module, "get_quote_path", lambda: quote_path)
+    monkeypatch.setattr(quote_service_module, "DATA_PATH", data_path)
+    monkeypatch.setattr(
+        quote_service_module,
+        "get_quote_path",
+        lambda: quote_path,
+        raising=False,
+    )
+    quotes = [
+        SimpleNamespace(
+            id=index,
+            group_id="123",
+            image_path=f"quote/images/missing-{index}.png",
+        )
+        for index in range(1, 26)
+    ]
+    monkeypatch.setattr(
+        quote_service_module.Quote,
+        "filter",
+        _build_filter(quotes),
+    )
+
+    result = await QuoteService.audit_storage("123")
+
+    assert result.total == 25
+    assert result.missing == 25
+    assert result.orphan_files == 0
+    assert len(result.issues) == 20
 
 
 @pytest.mark.asyncio

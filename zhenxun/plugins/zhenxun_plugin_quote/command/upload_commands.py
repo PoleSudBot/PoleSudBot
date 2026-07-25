@@ -36,7 +36,7 @@ from zhenxun.utils.http_utils import AsyncHttpx
 from ..config import ensure_quote_path, get_quote_group_path
 from ..command.manage_commands import get_available_themes
 from ..model import Quote, QuoteCardData, QuoteSequenceData, QuotedReplyData
-from ..services.ocr_service import OCRService
+from ..services.text_recognition import TextRecognitionService
 from ..services.quote_service import QuoteService
 from ..utils.exceptions import ImageProcessError, NetworkError
 from ..utils.image_utils import get_img_hash
@@ -451,6 +451,7 @@ class _UploadImageResult:
     status: str
     image_data: bytes | None = None
     error: str | None = None
+    missing_auto_tags: bool = False
 
 
 def _extract_target_images_from_parts(parts: list[Any]) -> list[UniImage]:
@@ -659,8 +660,13 @@ def _build_upload_success_text() -> str:
     return f"保存成功\n{_build_basic_usage_hint_text()}"
 
 
-def _build_upload_success_message(img_data: bytes) -> list[bytes | str]:
-    return [img_data, "\n保存成功\n", _build_basic_usage_hint_text()]
+def _build_upload_success_message(
+    img_data: bytes, *, missing_auto_tags: bool = False
+) -> list[bytes | str]:
+    success_text = "\n保存成功\n"
+    if missing_auto_tags:
+        success_text += "未识别到文字标签，图片已直接保存。\n"
+    return [img_data, success_text, _build_basic_usage_hint_text()]
 
 
 def _build_record_success_message(img_data: bytes) -> list[bytes | str]:
@@ -937,7 +943,7 @@ async def _process_upload_image(
     manual_tags: list[str],
     max_bytes: int | None,
     max_size_mb: int,
-    ocr_mode: str,
+    batch: bool,
 ) -> _UploadImageResult:
     temp_image_path = quote_path / f"temp_{uuid.uuid4().hex}.png"
     try:
@@ -958,9 +964,10 @@ async def _process_upload_image(
         ):
             return _UploadImageResult(status="duplicate")
 
-        ocr_content = await OCRService.recognize_text(
-            str(temp_image_path),
-            mode=ocr_mode,
+        ocr_content = await (
+            TextRecognitionService.recognize_batch(str(temp_image_path))
+            if batch
+            else TextRecognitionService.recognize_single(str(temp_image_path))
         )
         image_name = hashlib.md5(img_data).hexdigest() + ".png"
         final_image_path = get_quote_group_path(group_id) / image_name
@@ -975,7 +982,11 @@ async def _process_upload_image(
             manual_tags=manual_tags,
         )
         if quote and is_new:
-            return _UploadImageResult(status="success", image_data=img_data)
+            return _UploadImageResult(
+                status="success",
+                image_data=img_data,
+                missing_auto_tags=not QuoteService.get_auto_tags(quote),
+            )
         if quote and not is_new:
             return _UploadImageResult(status="duplicate")
         return _UploadImageResult(status="failed", error="保存失败，可能是数据库错误")
@@ -991,6 +1002,9 @@ async def _process_upload_image(
 def _build_batch_upload_summary(results: list[_UploadImageResult]) -> str:
     success_count = sum(result.status == "success" for result in results)
     duplicate_count = sum(result.status == "duplicate" for result in results)
+    missing_auto_tags_count = sum(
+        result.status == "success" and result.missing_auto_tags for result in results
+    )
     failed_results = [
         (index, result)
         for index, result in enumerate(results, 1)
@@ -1008,6 +1022,10 @@ def _build_batch_upload_summary(results: list[_UploadImageResult]) -> str:
             for index, result in failed_results
         )
         lines.append(f"失败明细：{details}")
+    if missing_auto_tags_count:
+        lines.append(
+            f"其中 {missing_auto_tags_count} 张未识别到文字标签，已直接保存。"
+        )
     return "\n".join(lines)
 
 
@@ -1067,16 +1085,6 @@ async def save_img_handle(bot: Bot, event: MessageEvent, arp: Arparma, state: T_
     max_size_mb = int(Config.get_config("quote", "QUOTE_MAX_IMAGE_SIZE_MB", 15) or 0)
     max_bytes = max_size_mb * 1024 * 1024 if max_size_mb > 0 else None
     quote_path = ensure_quote_path()
-    ocr_mode = "inherit"
-    if is_forward_batch:
-        ocr_mode = OCRService.normalize_mode(
-            Config.get_config(
-                "quote",
-                "BATCH_UPLOAD_OCR_MODE",
-                "paddleocr",
-            )
-        )
-
     await _set_pending_emoji_like(bot, event)
     results = []
     for target_image in target_images:
@@ -1090,7 +1098,7 @@ async def save_img_handle(bot: Bot, event: MessageEvent, arp: Arparma, state: T_
                 manual_tags=manual_tags,
                 max_bytes=max_bytes,
                 max_size_mb=max_size_mb,
-                ocr_mode=ocr_mode,
+                batch=is_forward_batch,
             )
         )
 
@@ -1098,7 +1106,10 @@ async def save_img_handle(bot: Bot, event: MessageEvent, arp: Arparma, state: T_
         result = results[0]
         if result.status == "success" and result.image_data is not None:
             await MessageUtils.build_message(
-                _build_upload_success_message(result.image_data)
+                _build_upload_success_message(
+                    result.image_data,
+                    missing_auto_tags=result.missing_auto_tags,
+                )
             ).send(target=event, bot=bot)
         elif result.status == "duplicate":
             await bot.call_api(

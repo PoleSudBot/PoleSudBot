@@ -12,21 +12,25 @@ QQ群语录库插件，支持上传聊天截图、回复消息生成语录、关
 
 ## 文字识别配置
 
-普通上传继续使用 `AI_ENABLED`、`OCR_AI_MODEL`、`OCR_ENGINE` 和 `OCR_USE_GPU` 控制的 AI 优先、本地 OCR 降级策略。
+文字识别只使用视觉模型与 PaddleOCR API，两项配置分别控制普通上传和批量上传的优先级：
 
-合并转发批量上传使用独立配置 `BATCH_UPLOAD_OCR_MODE`：
+- `TEXT_RECOGNITION_PRIORITY`：普通上传，默认 `llm`。
+- `BATCH_TEXT_RECOGNITION_PRIORITY`：合并转发批量上传，默认 `paddleocr_api`。
 
-- `paddleocr`：仅使用 PaddleOCR，默认值。
-- `easyocr`：仅使用 EasyOCR。
-- `ai`：仅使用已配置的视觉模型。
-- `inherit`：继承普通上传的 AI 优先策略。
-- `disabled`：关闭批量上传的文字识别。
+两项配置都只接受 `llm` 或 `paddleocr_api`。`llm` 优先时，视觉模型未启用或调用失败才回退 API；视觉模型成功判定无文字时不继续回退。`paddleocr_api` 优先时，API 未配置、调用失败或清理后没有实际文字时，回退视觉模型。
 
-显式选择本地 OCR 时不会调用 AI。`paddleocr` 与 `easyocr` 共用 `OCR_USE_GPU` 配置。
+PaddleOCR API 返回的 HTML 或 Markdown 图片占位符会被丢弃，不会成为自动 tag。两种识别方式最终都没有生成自动 tag 时，图片仍会保存；单张上传会提示，批量上传会汇总空 tag 数量。
+
+PaddleOCR API 配置：
+
+- `PADDLEOCR_API_TOKEN`：官方 API Token；留空时不发起远端请求，并按优先级回退视觉模型。
+- `PADDLEOCR_API_JOB_URL`：异步任务 API 地址，默认使用官方 v2 地址。
+- `PADDLEOCR_API_MODEL`：模型名称，默认 `PaddleOCR-VL-1.6`。
+- `PADDLEOCR_API_TIMEOUT_SECONDS`：单张图片等待任务完成的最长时间，默认 180 秒。
 
 ## 依赖与限制
 
 - 仅支持 OneBot V11 群聊。
 - 合并转发只展开顶层节点，不递归读取节点中的嵌套合并转发。
 - 每张图片独立受 `QUOTE_MAX_IMAGE_SIZE_MB` 限制。
-- PaddleOCR 依赖由插件现有 `requirements.txt` 提供；EasyOCR 为可选依赖。
+- PaddleOCR API 请求复用项目 HTTP 服务，不需要本地 PaddleOCR/EasyOCR 依赖。

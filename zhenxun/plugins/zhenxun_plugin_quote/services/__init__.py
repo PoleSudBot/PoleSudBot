@@ -1,5 +1,5 @@
 from .image_service import ImageService
-from .ocr_service import OCRService
 from .quote_service import QuoteService
+from .text_recognition import TextRecognitionService
 
-__all__ = ["ImageService", "OCRService", "QuoteService"]
+__all__ = ["ImageService", "QuoteService", "TextRecognitionService"]

@@ -187,6 +187,31 @@ def test_upload_success_message_keeps_original_image_and_usage_hint():
     assert "上传语录 [图片] [tag/@用户 ...]" in message_parts[2]
 
 
+def test_upload_success_message_reports_missing_auto_tags():
+    message_parts = upload_commands._build_upload_success_message(
+        b"original-image",
+        missing_auto_tags=True,
+    )
+
+    assert "未识别到文字标签，图片已直接保存" in message_parts[1]
+
+
+def test_batch_upload_summary_reports_missing_auto_tag_count():
+    results = [
+        upload_commands._UploadImageResult(
+            status="success",
+            missing_auto_tags=True,
+        ),
+        upload_commands._UploadImageResult(status="success"),
+        upload_commands._UploadImageResult(status="duplicate"),
+    ]
+
+    summary = upload_commands._build_batch_upload_summary(results)
+
+    assert "成功 2/3 张" in summary
+    assert "其中 1 张未识别到文字标签，已直接保存" in summary
+
+
 def test_plugin_usage_text_is_updated_to_new_commands():
     usage_text = PLUGIN_INIT_PATH.read_text(encoding="utf-8")
 
@@ -199,6 +224,12 @@ def test_plugin_usage_text_is_updated_to_new_commands():
     assert "入典aaa bbb" in usage_text
     assert "上传语录xxx" in usage_text
     assert "上传xxx" not in usage_text
+    assert "`语录管理 检查`" in usage_text
+    assert "`语录管理 检查 全部`" in usage_text
     assert "回复合并转发" in usage_text
-    assert 'key="BATCH_UPLOAD_OCR_MODE"' in usage_text
-    assert 'version="v1.1.9"' in usage_text
+    assert 'key="TEXT_RECOGNITION_PRIORITY"' in usage_text
+    assert 'value="llm"' in usage_text
+    assert 'key="BATCH_TEXT_RECOGNITION_PRIORITY"' in usage_text
+    assert 'value="paddleocr_api"' in usage_text
+    assert 'key="BATCH_UPLOAD_OCR_MODE"' not in usage_text
+    assert 'version="v1.2.1"' in usage_text
