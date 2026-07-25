@@ -69,7 +69,8 @@ __plugin_meta__ = PluginMetadata(
         "`语录 -n 5 1969`、`语录 1969 五连`、`语录 x5`、"
         "`语录 *5`、`语录 xxx -3`\n\n"
         "`上传语录 [图片] [tag/@用户 ...]` - 上传图片作为语录，也可回复图片后发送 `上传语录`\n"
-        "示例：回复图片后发送 `上传语录 南极`、`上传语录 [图片] 南极 @南极`\n\n"
+        "回复合并转发后发送 `上传语录`，会批量上传其中所有顶层图片\n"
+        "示例：回复图片或合并转发后发送 `上传语录 南极`、`上传语录 [图片] 南极 @南极`\n\n"
         "`上传` - 迁移提示命令，会提示改用 `上传语录`\n\n"
         "`记录语录 [tag/@用户 ...]` - 回复文本消息后生成语录图片并保存，`记录` 为兼容别名\n"
         "示例：回复消息后发送 `记录语录 南极`、`记录语录`、`记录 @南极 经典`\n\n"
@@ -112,7 +113,7 @@ __plugin_meta__ = PluginMetadata(
     supported_adapters={"~onebot.v11"},
     extra=PluginExtraData(
         author="webjoin111",
-        version="v1.1.7",
+        version="v1.1.9",
         admin_level=0,
         configs=[
             RegisterConfig(
@@ -128,6 +129,16 @@ __plugin_meta__ = PluginMetadata(
                 value=True,
                 help="是否使用GPU加速OCR识别",
                 default_value=True,
+            ),
+            RegisterConfig(
+                module="quote",
+                key="BATCH_UPLOAD_OCR_MODE",
+                value="paddleocr",
+                help=(
+                    "合并转发批量上传时的文字识别模式，可选值: "
+                    "paddleocr, easyocr, ai, inherit, disabled"
+                ),
+                default_value="paddleocr",
             ),
             RegisterConfig(
                 module="quote",

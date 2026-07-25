@@ -89,11 +89,14 @@ class PaddleOCREngine(OCREngine):
 class OCRService:
     """OCR服务类"""
 
+    _VALID_MODES = {"inherit", "ai", "easyocr", "paddleocr", "disabled"}
+
     _instance = None
 
     _strategy: OCREngine | None = None
     _engine_name: str | None = None
     _use_gpu: bool = False
+    _strategies: ClassVar[dict[tuple[str, bool], OCREngine]] = {}
 
     _thread_executor = ThreadPoolExecutor(max_workers=2)
 
@@ -105,6 +108,29 @@ class OCRService:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
+
+    @classmethod
+    def normalize_mode(cls, mode: str | None) -> str:
+        normalized = str(mode or "inherit").strip().lower()
+        if normalized not in cls._VALID_MODES:
+            logger.warning(
+                f"无效的批量上传OCR模式: {mode}，使用默认模式 paddleocr",
+                "群聊语录",
+            )
+            return "paddleocr"
+        return normalized
+
+    @classmethod
+    def _get_strategy(cls, engine_name: str) -> OCREngine:
+        key = (engine_name, cls._use_gpu)
+        strategy = cls._strategies.get(key)
+        if strategy is None:
+            if engine_name == "paddleocr":
+                strategy = PaddleOCREngine(cls._use_gpu)
+            else:
+                strategy = EasyOCREngine(cls._use_gpu)
+            cls._strategies[key] = strategy
+        return strategy
 
     @classmethod
     async def initialize_engine(cls) -> None:
@@ -133,10 +159,7 @@ class OCRService:
                 "群聊语录",
             )
 
-            if cls._engine_name == "paddleocr":
-                cls._strategy = PaddleOCREngine(cls._use_gpu)
-            else:
-                cls._strategy = EasyOCREngine(cls._use_gpu)
+            cls._strategy = cls._get_strategy(cls._engine_name)
 
             cls._initialized = True
         except Exception as e:
@@ -153,27 +176,54 @@ class OCRService:
         )
 
     @classmethod
-    async def recognize_text(cls, image_path: str) -> str:
-        """识别图片中的文字"""
+    async def recognize_text(cls, image_path: str, *, mode: str = "inherit") -> str:
+        """按指定模式识别图片中的文字。"""
         if not cls._initialized:
             await cls.initialize_engine()
 
-        if image_path in cls._cache:
-            logger.debug(f"使用OCR缓存: {image_path}", "群聊语录")
-            return cls._cache[image_path]
+        normalized_mode = cls.normalize_mode(mode)
+        cache_key = (normalized_mode, image_path)
+        if cache_key in cls._cache:
+            logger.debug(
+                f"使用OCR缓存: mode={normalized_mode}, path={image_path}",
+                "群聊语录",
+            )
+            return cls._cache[cache_key]
 
         try:
+            if normalized_mode == "disabled":
+                cls._cache[cache_key] = ""
+                return ""
+
+            if normalized_mode == "ai":
+                ai_content = await AIService.recognize_image(image_path)
+                result = ai_content or ""
+                cls._cache[cache_key] = result
+                return result
+
+            if normalized_mode in {"easyocr", "paddleocr"}:
+                strategy = cls._get_strategy(normalized_mode)
+                ocr_content = await cls._execute_strategy(strategy, image_path)
+                if ocr_content:
+                    cls._cache[cache_key] = ocr_content
+                else:
+                    logger.warning(
+                        f"{normalized_mode}未能提取文本: {image_path}",
+                        "群聊语录",
+                    )
+                return ocr_content
+
             ai_content = await AIService.recognize_image(image_path)
 
             if ai_content is not None:
                 logger.debug(f"AI识别成功，文本长度: {len(ai_content)}", "群聊语录")
-                cls._cache[image_path] = ai_content
+                cls._cache[cache_key] = ai_content
                 return ai_content
             else:
                 logger.debug("AI识别失败或未启用，降级使用本地OCR引擎", "群聊语录")
 
                 if not cls._strategy:
-                    cls._strategy = EasyOCREngine(cls._use_gpu)
+                    cls._strategy = cls._get_strategy(cls._engine_name or "easyocr")
 
                 ocr_content = await cls._execute_strategy(cls._strategy, image_path)
 
@@ -187,17 +237,13 @@ class OCRService:
                         f"主引擎识别失败，尝试使用{fallback_engine}作为备选", "群聊语录"
                     )
 
-                    fallback_strategy = (
-                        EasyOCREngine(cls._use_gpu)
-                        if fallback_engine == "easyocr"
-                        else PaddleOCREngine(cls._use_gpu)
-                    )
+                    fallback_strategy = cls._get_strategy(fallback_engine)
                     ocr_content = await cls._execute_strategy(
                         fallback_strategy, image_path
                     )
 
                 if ocr_content:
-                    cls._cache[image_path] = ocr_content
+                    cls._cache[cache_key] = ocr_content
                     logger.debug(
                         f"本地OCR识别成功，文本长度: {len(ocr_content)}", "群聊语录"
                     )
@@ -230,5 +276,6 @@ class OCRService:
         """关闭OCR服务，释放资源"""
         cls._thread_executor.shutdown(wait=False)
         cls._strategy = None
+        cls._strategies.clear()
         cls._initialized = False
         logger.debug("OCR服务已关闭", "群聊语录")

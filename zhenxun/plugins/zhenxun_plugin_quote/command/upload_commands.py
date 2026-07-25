@@ -1,7 +1,9 @@
 import base64
+from dataclasses import dataclass
 import hashlib
-import os
 import html
+import json
+import os
 from pathlib import Path
 import re
 import uuid
@@ -444,19 +446,163 @@ async def _generate_sequence_from_history(
     return img_data, "\n".join(recorded_text_parts), last_quoted_user_id
 
 
-def _extract_target_image_from_parts(parts: list[Any]) -> UniImage | None:
-    for part in parts:
-        if isinstance(part, UniImage):
-            return part
-    return None
+@dataclass(slots=True)
+class _UploadImageResult:
+    status: str
+    image_data: bytes | None = None
+    error: str | None = None
 
 
-def _message_has_image_segment(message: Any) -> bool:
+def _extract_target_images_from_parts(parts: list[Any]) -> list[UniImage]:
+    return [part for part in parts if isinstance(part, UniImage)]
+
+
+def _iter_raw_segments(message: Any) -> list[Any]:
+    if not message or isinstance(message, str):
+        return []
+    if isinstance(message, dict):
+        return [message]
+    try:
+        return list(message)
+    except TypeError:
+        return []
+
+
+def _segment_type(segment: Any) -> str:
+    if isinstance(segment, dict):
+        return str(segment.get("type") or "")
+    return str(getattr(segment, "type", "") or "")
+
+
+def _segment_data(segment: Any) -> dict[str, Any]:
+    if isinstance(segment, dict):
+        data = segment.get("data", {})
+    else:
+        data = getattr(segment, "data", {})
+    return dict(data) if isinstance(data, dict) else {}
+
+
+def _to_v11_message(message: Any) -> Message:
+    if isinstance(message, Message):
+        return message
+    segments = []
+    for segment in _iter_raw_segments(message):
+        if isinstance(segment, MessageSegment):
+            segments.append(segment)
+        elif isinstance(segment, dict) and segment.get("type"):
+            segments.append(
+                MessageSegment(str(segment["type"]), dict(segment.get("data") or {}))
+            )
+    return Message(segments)
+
+
+async def _extract_direct_images(bot: Bot, message: Any) -> list[UniImage]:
+    v11_message = _to_v11_message(message)
+    if not v11_message:
+        return []
+    uni_message = await UniMessage.generate(message=v11_message, bot=bot)
+    return [segment for segment in uni_message if isinstance(segment, UniImage)]
+
+
+def _forward_nodes_from_response(response: Any) -> list[Any]:
+    if isinstance(response, list):
+        return response
+    if not isinstance(response, dict):
+        return []
+    for key in ("messages", "message"):
+        if isinstance(response.get(key), list):
+            return response[key]
+    data = response.get("data")
+    if isinstance(data, dict):
+        for key in ("messages", "message"):
+            if isinstance(data.get(key), list):
+                return data[key]
+    return []
+
+
+def _inline_forward_nodes(data: dict[str, Any]) -> list[Any]:
+    nodes = data.get("nodes") or data.get("content")
+    if isinstance(nodes, list):
+        return nodes
+    if isinstance(nodes, str):
+        try:
+            parsed = json.loads(nodes)
+        except json.JSONDecodeError:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []
+
+
+def _forward_node_message(node: Any) -> Any:
+    if not isinstance(node, dict):
+        return None
+    payload = node.get("data") if isinstance(node.get("data"), dict) else node
+    return payload.get("message") or payload.get("content")
+
+
+async def _extract_forward_images(
+    bot: Bot, message: Any
+) -> tuple[list[UniImage], bool]:
+    for segment in _iter_raw_segments(message):
+        if _segment_type(segment) != "forward":
+            continue
+
+        data = _segment_data(segment)
+        nodes = _inline_forward_nodes(data)
+        if not nodes:
+            forward_id = data.get("id") or data.get("resid")
+            if not forward_id:
+                return [], True
+            try:
+                response = await bot.call_api("get_forward_msg", id=str(forward_id))
+            except Exception as e:
+                raise ImageProcessError(f"获取合并转发内容失败: {e}") from e
+            nodes = _forward_nodes_from_response(response)
+
+        images: list[UniImage] = []
+        for node in nodes:
+            node_message = _forward_node_message(node)
+            if node_message:
+                images.extend(await _extract_direct_images(bot, node_message))
+        return images, True
+    return [], False
+
+
+async def _extract_images_from_source(
+    bot: Bot, message: Any
+) -> tuple[list[UniImage], bool]:
+    direct_images = await _extract_direct_images(bot, message)
+    forward_images, has_forward = await _extract_forward_images(bot, message)
+    return direct_images + forward_images, has_forward
+
+
+async def _collect_upload_images(
+    bot: Bot,
+    event: MessageEvent,
+    upload_parts: list[Any],
+) -> tuple[list[UniImage], bool]:
+    explicit_images = _extract_target_images_from_parts(upload_parts)
+    if explicit_images:
+        return explicit_images, False
+
+    if reply := await reply_fetch(event, bot):
+        if reply.msg:
+            images, has_forward = await _extract_images_from_source(bot, reply.msg)
+            if images or has_forward:
+                return images, has_forward
+
+    return await _extract_images_from_source(bot, event.message)
+
+
+def _message_has_upload_segment(message: Any) -> bool:
     if not message:
         return False
 
     try:
-        return any(getattr(seg, "type", None) == "image" for seg in message)
+        return any(
+            _segment_type(segment) in {"image", "forward"}
+            for segment in _iter_raw_segments(message)
+        )
     except TypeError:
         return False
 
@@ -527,7 +673,13 @@ def _has_style_override_parts(parts: list[Any]) -> bool:
     把 `-s/--style` 误吞成普通 tag，导致预设命令语义漂移。
     """
     for part in parts:
-        text = part.text if isinstance(part, Text) else part if isinstance(part, str) else None
+        text = (
+            part.text
+            if isinstance(part, Text)
+            else part
+            if isinstance(part, str)
+            else None
+        )
         if text is None:
             continue
         normalized = text.strip()
@@ -539,13 +691,15 @@ def _has_style_override_parts(parts: list[Any]) -> bool:
 
 
 async def _match_upload_with_image(event: MessageEvent) -> bool:
-    if _message_has_image_segment(event.message):
+    if _message_has_upload_segment(event.message):
         return True
 
     # 这里故意只看事件里已经携带的 reply.message，避免为了“静默让路”
     # 额外触发 reply_fetch/get_msg 这类重解析或网络调用。
     reply = getattr(event, "reply", None)
-    return reply is not None and _message_has_image_segment(getattr(reply, "message", None))
+    return reply is not None and _message_has_upload_segment(
+        getattr(reply, "message", None)
+    )
 
 
 def upload_has_image_rule(*, exclude_new_command: bool = False) -> Rule:
@@ -725,6 +879,138 @@ async def _set_pending_emoji_like(bot: Bot, event: MessageEvent) -> None:
         logger.debug(f"设置上传处理中表情失败，可能协议端不支持: {e}", "群聊语录")
 
 
+async def _read_upload_image_data(
+    bot: Bot,
+    target_image: UniImage,
+    temp_image_path: Path,
+    *,
+    max_bytes: int | None,
+    max_size_mb: int,
+) -> bytes:
+    if target_image.raw:
+        _validate_raw_upload_size(
+            target_image.raw,
+            max_bytes=max_bytes,
+            max_size_mb=max_size_mb,
+        )
+        return target_image.raw
+
+    if target_image.path and os.path.exists(target_image.path):
+        return await _read_local_upload_image(target_image.path, max_bytes)
+
+    if target_image.url:
+        downloaded = await AsyncHttpx.download_file(
+            target_image.url,
+            temp_image_path,
+            stream=True,
+            max_bytes=max_bytes,
+        )
+        if downloaded:
+            return await _read_local_upload_image(temp_image_path, max_bytes)
+
+    if target_image.id and hasattr(bot, "get_image"):
+        response = await bot.get_image(file=target_image.id)
+        if file_path := response.get("file"):
+            if os.path.exists(file_path):
+                return await _read_local_upload_image(file_path, max_bytes)
+        if url := response.get("url"):
+            downloaded = await AsyncHttpx.download_file(
+                url,
+                temp_image_path,
+                stream=True,
+                max_bytes=max_bytes,
+            )
+            if downloaded:
+                return await _read_local_upload_image(temp_image_path, max_bytes)
+
+    limit_hint = f"且不超过 {max_size_mb} MB" if max_bytes is not None else ""
+    raise ImageProcessError(f"未能成功获取图片数据，请检查图片是否有效{limit_hint}。")
+
+
+async def _process_upload_image(
+    bot: Bot,
+    target_image: UniImage,
+    *,
+    quote_path: Path,
+    group_id: str,
+    user_id: str,
+    manual_tags: list[str],
+    max_bytes: int | None,
+    max_size_mb: int,
+    ocr_mode: str,
+) -> _UploadImageResult:
+    temp_image_path = quote_path / f"temp_{uuid.uuid4().hex}.png"
+    try:
+        img_data = await _read_upload_image_data(
+            bot,
+            target_image,
+            temp_image_path,
+            max_bytes=max_bytes,
+            max_size_mb=max_size_mb,
+        )
+        async with aiofiles.open(temp_image_path, "wb") as file:
+            await file.write(img_data)
+
+        image_hash = await get_img_hash(temp_image_path)
+        if (
+            image_hash
+            and await Quote.filter(group_id=group_id, image_hash=image_hash).exists()
+        ):
+            return _UploadImageResult(status="duplicate")
+
+        ocr_content = await OCRService.recognize_text(
+            str(temp_image_path),
+            mode=ocr_mode,
+        )
+        image_name = hashlib.md5(img_data).hexdigest() + ".png"
+        final_image_path = get_quote_group_path(group_id) / image_name
+        quote, is_new = await _save_quote_image_and_record(
+            final_image_path,
+            img_data,
+            group_id=group_id,
+            ocr_content=ocr_content,
+            recorded_text=None,
+            uploader_user_id=user_id,
+            image_hash=image_hash,
+            manual_tags=manual_tags,
+        )
+        if quote and is_new:
+            return _UploadImageResult(status="success", image_data=img_data)
+        if quote and not is_new:
+            return _UploadImageResult(status="duplicate")
+        return _UploadImageResult(status="failed", error="保存失败，可能是数据库错误")
+    except ImageProcessError as e:
+        return _UploadImageResult(status="failed", error=str(e))
+    except Exception as e:
+        logger.warning(f"处理上传图片失败: {e}", "群聊语录", e=e)
+        return _UploadImageResult(status="failed", error="处理图片时发生异常")
+    finally:
+        temp_image_path.unlink(missing_ok=True)
+
+
+def _build_batch_upload_summary(results: list[_UploadImageResult]) -> str:
+    success_count = sum(result.status == "success" for result in results)
+    duplicate_count = sum(result.status == "duplicate" for result in results)
+    failed_results = [
+        (index, result)
+        for index, result in enumerate(results, 1)
+        if result.status == "failed"
+    ]
+    lines = [
+        (
+            f"批量上传完成：成功 {success_count}/{len(results)} 张，"
+            f"重复 {duplicate_count} 张，失败 {len(failed_results)} 张。"
+        )
+    ]
+    if failed_results:
+        details = "；".join(
+            f"第 {index} 张：{result.error or '未知错误'}"
+            for index, result in failed_results
+        )
+        lines.append(f"失败明细：{details}")
+    return "\n".join(lines)
+
+
 @upload_hint_cmd.handle()
 async def upload_hint_handle(bot: Bot, event: MessageEvent):
     """旧上传命令只负责提示迁移，不再触发 OCR 或保存。"""
@@ -748,179 +1034,91 @@ async def upload_hint_handle(bot: Bot, event: MessageEvent):
 async def save_img_handle(bot: Bot, event: MessageEvent, arp: Arparma, state: T_State):
     """上传语录处理函数"""
     session_id = event.get_session_id()
-    message_id = event.message_id
-    user_id = str(event.get_user_id())
-    upload_parts = collect_tag_parts(arp)
-    group_id = session_id.split("_")[1] if "group" in session_id else None
-    manual_tags = await extract_manual_tags_with_mention_names(bot, group_id, arp)
-    target_image: UniImage | None = _extract_target_image_from_parts(upload_parts)
-
-    # 1. 尝试从回复中获取图片
-    if not target_image:
-        if reply := await reply_fetch(event, bot):
-            if reply.msg:
-                reply_uni = await UniMessage.generate(message=reply.msg, bot=bot)
-                for seg in reply_uni:
-                    if isinstance(seg, UniImage):
-                        target_image = seg
-                        break
-
-    # 2. 尝试从当前消息中获取 (处理 Alconna 可能未捕获的情况)
-    if not target_image:
-        current_uni = await UniMessage.generate(event=event, bot=bot)
-        for seg in current_uni:
-            if isinstance(seg, UniImage):
-                target_image = seg
-                break
-
-    if not target_image:
-        await save_img_cmd.finish(
-            "请直接发送「上传语录+图片」或回复图片消息来上传语录"
-        )
-
-    # 3. 统一提取图片二进制数据，并在进入内存前限制外部资源大小。
-    max_size_mb = int(Config.get_config("quote", "QUOTE_MAX_IMAGE_SIZE_MB", 15) or 0)
-    max_bytes = max_size_mb * 1024 * 1024 if max_size_mb > 0 else None
-    quote_path = ensure_quote_path()
-    temp_image_path = quote_path / f"temp_{uuid.uuid4().hex}.png"
-    img_data = b""
-    try:
-        if target_image.raw:
-            _validate_raw_upload_size(
-                target_image.raw,
-                max_bytes=max_bytes,
-                max_size_mb=max_size_mb,
-            )
-            img_data = target_image.raw
-        elif target_image.path and os.path.exists(target_image.path):
-            img_data = await _read_local_upload_image(target_image.path, max_bytes)
-        elif target_image.url:
-            downloaded = await AsyncHttpx.download_file(
-                target_image.url,
-                temp_image_path,
-                stream=True,
-                max_bytes=max_bytes,
-            )
-            if downloaded:
-                img_data = await _read_local_upload_image(temp_image_path, max_bytes)
-        elif target_image.id and hasattr(bot, "get_image"):
-            # 针对 OneBot V11 本地路径/URL 的回退处理
-            resp = await bot.get_image(file=target_image.id)
-            if file_path := resp.get("file"):
-                if os.path.exists(file_path):
-                    img_data = await _read_local_upload_image(file_path, max_bytes)
-            if not img_data and (url := resp.get("url")):
-                downloaded = await AsyncHttpx.download_file(
-                    url,
-                    temp_image_path,
-                    stream=True,
-                    max_bytes=max_bytes,
-                )
-                if downloaded:
-                    img_data = await _read_local_upload_image(
-                        temp_image_path,
-                        max_bytes,
-                    )
-    except ImageProcessError as e:
-        temp_image_path.unlink(missing_ok=True)
-        await save_img_cmd.finish(str(e))
-    except Exception as e:
-        logger.warning(f"获取图片数据失败: {e}", "群聊语录")
-
-    if not img_data:
-        temp_image_path.unlink(missing_ok=True)
-        limit_hint = f"且不超过 {max_size_mb} MB" if max_bytes is not None else ""
-        await save_img_cmd.finish(
-            f"未能成功获取图片数据，请检查图片是否有效{limit_hint}。"
-        )
-
-    # 4. 创建临时文件以供后续 OCR 和哈希计算使用
-    try:
-        async with aiofiles.open(temp_image_path, "wb") as f:
-            await f.write(img_data)
-    except Exception as e:
-        await save_img_cmd.finish(f"写入临时文件失败: {e}")
-
-    if "group" in session_id:
-        assert group_id is not None
-        image_hash = await get_img_hash(temp_image_path)
-
-        if (
-            image_hash
-            and await Quote.filter(group_id=group_id, image_hash=image_hash).exists()
-        ):
-            if temp_image_path.name.startswith("temp_") and temp_image_path.exists():
-                try:
-                    os.remove(temp_image_path)
-                    logger.info(
-                        f"删除临时文件 (发现重复): {temp_image_path}", "群聊语录"
-                    )
-                except Exception as e:
-                    logger.error(f"删除临时文件失败: {e}", "群聊语录", e=e)
-            await bot.call_api(
-                "send_group_msg",
-                **{
-                    "group_id": int(group_id),
-                    "message": MessageSegment.reply(message_id) + "不要重复记录",
-                },
-            )
-            return
-
-        await _set_pending_emoji_like(bot, event)
-        ocr_content = await OCRService.recognize_text(str(temp_image_path))
-
-        image_name = hashlib.md5(img_data).hexdigest() + ".png"
-        final_image_path = get_quote_group_path(group_id) / image_name
-
-        if temp_image_path != final_image_path and os.path.exists(temp_image_path):
-            try:
-                os.remove(temp_image_path)
-                logger.info(f"删除临时文件: {temp_image_path}", "群聊语录")
-            except Exception as e:
-                logger.error(f"删除临时文件失败: {e}", "群聊语录", e=e)
-
-        quote, is_new = await _save_quote_image_and_record(
-            final_image_path,
-            img_data,
-            group_id=group_id,
-            ocr_content=ocr_content,
-            recorded_text=None,
-            uploader_user_id=user_id,
-            image_hash=image_hash,
-            manual_tags=manual_tags,
-        )
-
-        if quote:
-            if is_new:
-                await MessageUtils.build_message(
-                    _build_upload_success_message(img_data)
-                ).send(
-                    target=event,
-                    bot=bot,
-                )
-            else:
-                await bot.call_api(
-                    "send_group_msg",
-                    **{
-                        "group_id": int(group_id),
-                        "message": MessageSegment.reply(message_id) + "不要重复记录",
-                    },
-                )
-        else:
-            await bot.call_api(
-                "send_group_msg",
-                **{
-                    "group_id": int(group_id),
-                    "message": (
-                        MessageSegment.reply(message_id) + "保存失败，可能是数据库错误"
-                    ),
-                },
-            )
-    else:
+    if "group" not in session_id:
         logger.info(
             f"上传指令在非群聊环境 ({session_id}) 中被调用，未处理。", "群聊语录"
         )
         await save_img_cmd.send("上传功能目前仅支持群聊。")
+        return
+
+    user_id = str(event.get_user_id())
+    upload_parts = collect_tag_parts(arp)
+    group_id = session_id.split("_")[1]
+    manual_tags = await extract_manual_tags_with_mention_names(bot, group_id, arp)
+    try:
+        target_images, is_forward_batch = await _collect_upload_images(
+            bot,
+            event,
+            upload_parts,
+        )
+    except ImageProcessError as e:
+        await save_img_cmd.finish(str(e))
+        return
+
+    if not target_images:
+        message = (
+            "合并转发中没有找到可上传的图片"
+            if is_forward_batch
+            else "请直接发送「上传语录+图片」或回复图片/合并转发来上传语录"
+        )
+        await save_img_cmd.finish(message)
+        return
+
+    max_size_mb = int(Config.get_config("quote", "QUOTE_MAX_IMAGE_SIZE_MB", 15) or 0)
+    max_bytes = max_size_mb * 1024 * 1024 if max_size_mb > 0 else None
+    quote_path = ensure_quote_path()
+    ocr_mode = "inherit"
+    if is_forward_batch:
+        ocr_mode = OCRService.normalize_mode(
+            Config.get_config(
+                "quote",
+                "BATCH_UPLOAD_OCR_MODE",
+                "paddleocr",
+            )
+        )
+
+    await _set_pending_emoji_like(bot, event)
+    results = []
+    for target_image in target_images:
+        results.append(
+            await _process_upload_image(
+                bot,
+                target_image,
+                quote_path=quote_path,
+                group_id=group_id,
+                user_id=user_id,
+                manual_tags=manual_tags,
+                max_bytes=max_bytes,
+                max_size_mb=max_size_mb,
+                ocr_mode=ocr_mode,
+            )
+        )
+
+    if len(results) == 1 and not is_forward_batch:
+        result = results[0]
+        if result.status == "success" and result.image_data is not None:
+            await MessageUtils.build_message(
+                _build_upload_success_message(result.image_data)
+            ).send(target=event, bot=bot)
+        elif result.status == "duplicate":
+            await bot.call_api(
+                "send_group_msg",
+                **{
+                    "group_id": int(group_id),
+                    "message": MessageSegment.reply(event.message_id) + "不要重复记录",
+                },
+            )
+        else:
+            await MessageUtils.build_message(result.error or "保存失败").send(
+                target=event,
+                bot=bot,
+            )
+        return
+
+    await MessageUtils.build_message(_build_batch_upload_summary(results)).send(
+        target=event,
+        bot=bot,
+    )
 
 
 async def _handle_quote_generation(
@@ -1238,9 +1436,7 @@ async def idiom_record_handle(
         ).send(target=event, bot=bot)
         return
 
-    await _handle_record_command(
-        bot, event, arp, session, forced_variant="classic"
-    )
+    await _handle_record_command(bot, event, arp, session, forced_variant="classic")
 
 
 @generate_quote_cmd.handle()

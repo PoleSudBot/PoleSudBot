@@ -199,3 +199,6 @@ def test_plugin_usage_text_is_updated_to_new_commands():
     assert "入典aaa bbb" in usage_text
     assert "上传语录xxx" in usage_text
     assert "上传xxx" not in usage_text
+    assert "回复合并转发" in usage_text
+    assert 'key="BATCH_UPLOAD_OCR_MODE"' in usage_text
+    assert 'version="v1.1.9"' in usage_text

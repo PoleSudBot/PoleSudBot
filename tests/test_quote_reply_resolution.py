@@ -70,6 +70,7 @@ tag_utils = _load_module(
     PLUGIN_ROOT / "utils" / "tag_utils.py",
 )
 config_module = sys.modules[f"{PLUGIN_PACKAGE}.config"]
+ocr_service_module = sys.modules[f"{PLUGIN_PACKAGE}.services.ocr_service"]
 
 QuoteService = quote_service_module.QuoteService
 Image = manage_commands.Image
@@ -476,7 +477,7 @@ def test_idiom_record_alc_supports_compact_no_space_input():
 
 
 @pytest.mark.asyncio
-async def test_match_upload_with_image_requires_current_or_reply_image():
+async def test_match_upload_with_image_requires_current_or_reply_upload_segment():
     class _FakeEvent:
         def __init__(self, message, reply=None):
             self.message = message
@@ -492,6 +493,15 @@ async def test_match_upload_with_image_requires_current_or_reply_image():
         _FakeEvent(
             [SimpleNamespace(type="text")],
             reply=SimpleNamespace(message=[SimpleNamespace(type="image")]),
+        )
+    ) is True
+    assert await upload_commands._match_upload_with_image(
+        _FakeEvent([SimpleNamespace(type="forward")])
+    ) is True
+    assert await upload_commands._match_upload_with_image(
+        _FakeEvent(
+            [SimpleNamespace(type="text")],
+            reply=SimpleNamespace(message=[SimpleNamespace(type="forward")]),
         )
     ) is True
 
@@ -803,7 +813,8 @@ async def test_save_img_handle_writes_dual_mention_tags(monkeypatch, tmp_path: P
     async def _fake_get_img_hash(path):
         return "image-hash"
 
-    async def _fake_recognize_text(path: str):
+    async def _fake_recognize_text(path: str, *, mode: str = "inherit"):
+        assert mode == "inherit"
         return "ocr text"
 
     async def _fake_set_pending_emoji_like(*args, **kwargs):
@@ -876,6 +887,224 @@ async def test_save_img_handle_writes_dual_mention_tags(monkeypatch, tmp_path: P
     assert captured["manual_tags"] == ["user:114514", "群主_张三"]
     assert sent_messages
     assert sent_messages[0][0] == b"fake-image-bytes"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response_shape",
+    ["messages", "data_message", "lagrange_message"],
+)
+async def test_extract_forward_images_supports_onebot_response_shapes(
+    monkeypatch: pytest.MonkeyPatch,
+    response_shape: str,
+):
+    node_messages = [
+        [{"type": "image", "data": {"file": "first.png"}}],
+        [
+            {"type": "text", "data": {"text": "ignored"}},
+            {"type": "image", "data": {"file": "second.png"}},
+        ],
+    ]
+    napcat_nodes = [{"message": message} for message in node_messages]
+    if response_shape == "messages":
+        response = {"messages": napcat_nodes}
+    elif response_shape == "data_message":
+        response = {"data": {"message": napcat_nodes}}
+    else:
+        response = {
+            "message": [
+                {"data": {"content": message}} for message in node_messages
+            ]
+        }
+
+    async def _fake_extract_direct_images(bot, message):
+        return [
+            upload_commands.UniImage(id=segment["data"]["file"])
+            for segment in message
+            if segment["type"] == "image"
+        ]
+
+    class _Bot:
+        async def call_api(self, name: str, **kwargs):
+            assert name == "get_forward_msg"
+            assert kwargs == {"id": "forward-id"}
+            return response
+
+    monkeypatch.setattr(
+        upload_commands,
+        "_extract_direct_images",
+        _fake_extract_direct_images,
+    )
+
+    images, has_forward = await upload_commands._extract_forward_images(
+        _Bot(),
+        [{"type": "forward", "data": {"id": "forward-id"}}],
+    )
+
+    assert has_forward is True
+    assert [image.id for image in images] == ["first.png", "second.png"]
+
+
+@pytest.mark.asyncio
+async def test_save_img_handle_batch_uses_paddleocr_and_reports_partial_results(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    target_images = [
+        upload_commands.UniImage(raw=b"first"),
+        upload_commands.UniImage(raw=b"second"),
+        upload_commands.UniImage(raw=b"third"),
+    ]
+    pending_results = [
+        upload_commands._UploadImageResult(status="success", image_data=b"first"),
+        upload_commands._UploadImageResult(status="duplicate"),
+        upload_commands._UploadImageResult(status="failed", error="下载失败"),
+    ]
+    process_calls: list[dict[str, object]] = []
+    sent_messages: list[object] = []
+
+    async def _fake_extract_tags(bot, group_id, arp, arg_name="parts"):
+        return ["batch-tag"]
+
+    async def _fake_collect_upload_images(bot, event, upload_parts):
+        return target_images, True
+
+    async def _fake_process_upload_image(bot, target_image, **kwargs):
+        process_calls.append({"target": target_image, **kwargs})
+        return pending_results.pop(0)
+
+    async def _fake_set_pending_emoji_like(bot, event):
+        return None
+
+    def _fake_get_config(module, key, default=None):
+        return {
+            "QUOTE_MAX_IMAGE_SIZE_MB": 15,
+            "BATCH_UPLOAD_OCR_MODE": "paddleocr",
+        }.get(key, default)
+
+    class _FakeMessage:
+        def __init__(self, payload):
+            self.payload = payload
+
+        async def send(self, target=None, bot=None):
+            sent_messages.append(self.payload)
+
+    monkeypatch.setattr(
+        upload_commands,
+        "extract_manual_tags_with_mention_names",
+        _fake_extract_tags,
+    )
+    monkeypatch.setattr(
+        upload_commands,
+        "_collect_upload_images",
+        _fake_collect_upload_images,
+    )
+    monkeypatch.setattr(
+        upload_commands,
+        "_process_upload_image",
+        _fake_process_upload_image,
+    )
+    monkeypatch.setattr(
+        upload_commands,
+        "_set_pending_emoji_like",
+        _fake_set_pending_emoji_like,
+    )
+    monkeypatch.setattr(upload_commands, "ensure_quote_path", lambda: tmp_path)
+    monkeypatch.setattr(upload_commands.Config, "get_config", _fake_get_config)
+    monkeypatch.setattr(
+        upload_commands.MessageUtils,
+        "build_message",
+        lambda payload: _FakeMessage(payload),
+    )
+
+    event = SimpleNamespace(
+        get_session_id=lambda: "group_123_456",
+        get_user_id=lambda: "42",
+        message_id=1001,
+    )
+    arp = SimpleNamespace(all_matched_args={"parts": []}, main_args={})
+
+    await upload_commands.save_img_handle(SimpleNamespace(), event, arp, {})
+
+    assert [call["target"] for call in process_calls] == target_images
+    assert all(call["ocr_mode"] == "paddleocr" for call in process_calls)
+    assert all(call["manual_tags"] == ["batch-tag"] for call in process_calls)
+    assert sent_messages == [
+        "批量上传完成：成功 1/3 张，重复 1 张，失败 1 张。\n"
+        "失败明细：第 3 张：下载失败"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_process_upload_image_cleans_temp_file_after_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    async def _raise_hash_error(path):
+        raise RuntimeError("hash failed")
+
+    monkeypatch.setattr(upload_commands, "get_img_hash", _raise_hash_error)
+
+    result = await upload_commands._process_upload_image(
+        SimpleNamespace(),
+        upload_commands.UniImage(raw=b"image-bytes"),
+        quote_path=tmp_path,
+        group_id="123",
+        user_id="42",
+        manual_tags=[],
+        max_bytes=1024,
+        max_size_mb=1,
+        ocr_mode="paddleocr",
+    )
+
+    assert result.status == "failed"
+    assert list(tmp_path.glob("temp_*.png")) == []
+
+
+@pytest.mark.asyncio
+async def test_ocr_explicit_local_modes_bypass_ai_and_isolate_cache(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    service = ocr_service_module.OCRService
+    executed: list[str] = []
+
+    async def _fail_ai(image_path):
+        raise AssertionError("显式本地OCR模式不应调用AI")
+
+    async def _fake_execute_strategy(cls, strategy, image_path):
+        executed.append(strategy)
+        return strategy
+
+    monkeypatch.setattr(service, "_initialized", True)
+    monkeypatch.setattr(service, "_cache", {})
+    monkeypatch.setattr(
+        service,
+        "_get_strategy",
+        classmethod(lambda cls, engine_name: engine_name),
+    )
+    monkeypatch.setattr(
+        service,
+        "_execute_strategy",
+        classmethod(_fake_execute_strategy),
+    )
+    monkeypatch.setattr(
+        ocr_service_module.AIService,
+        "recognize_image",
+        _fail_ai,
+    )
+
+    paddle_result = await service.recognize_text(
+        "same-image.png", mode="paddleocr"
+    )
+    easy_result = await service.recognize_text("same-image.png", mode="easyocr")
+
+    assert paddle_result == "paddleocr"
+    assert easy_result == "easyocr"
+    assert executed == ["paddleocr", "easyocr"]
+
+
+def test_invalid_batch_ocr_mode_falls_back_to_paddleocr():
+    assert ocr_service_module.OCRService.normalize_mode("unknown") == "paddleocr"
 
 
 @pytest.mark.asyncio
