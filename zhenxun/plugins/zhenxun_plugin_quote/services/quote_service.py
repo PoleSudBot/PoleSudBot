@@ -26,7 +26,7 @@ from zhenxun.utils.echart_utils.models import Barh
 from zhenxun.utils.platform import PlatformUtils
 import aiofiles
 
-from ..config import DATA_PATH, resolve_quote_image_path
+from ..config import DATA_PATH, get_quote_path, resolve_quote_image_path
 from ..model import HotQuoteItemData, HotQuotesPageData, Quote, QuoteCardData
 
 try:
@@ -53,6 +53,28 @@ class TagMutationResult:
     success: bool
     tags: list[str]
     changed_tags: list[str]
+
+
+@dataclass(frozen=True)
+class QuoteAuditIssue:
+    """语录存储审计发现的单条异常。"""
+
+    id: int
+    group_id: str
+    image_path: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class QuoteAuditSummary:
+    """语录数据库与图片目录的只读审计汇总。"""
+
+    total: int
+    valid: int
+    missing: int
+    out_of_bounds: int
+    orphan_files: int
+    issues: list[QuoteAuditIssue]
 
 
 @dataclass
@@ -122,6 +144,72 @@ class QuoteService:
     def serialize_image_path(image_path: str | Path) -> str:
         """将实际图片路径转换为数据库使用的 DATA_PATH 相对路径。"""
         return Path(os.path.relpath(image_path, DATA_PATH)).as_posix()
+
+    @classmethod
+    async def audit_storage(cls, group_id: str | None = None) -> QuoteAuditSummary:
+        """只读检查数据库记录、图片路径和全局孤儿 PNG 文件。"""
+        filters = {"group_id": group_id} if group_id else {}
+        quotes = list(await Quote.filter(**filters))
+        valid = 0
+        missing = 0
+        out_of_bounds = 0
+        issues: list[QuoteAuditIssue] = []
+        referenced_paths: set[Path] = set()
+
+        # 每条记录只解析和检查文件状态，异常仅进入报告，不修改任何持久化数据。
+        for quote in quotes:
+            try:
+                absolute_path = resolve_quote_image_path(quote.image_path)
+            except ValueError:
+                out_of_bounds += 1
+                if len(issues) < 20:
+                    issues.append(
+                        QuoteAuditIssue(
+                            id=quote.id,
+                            group_id=str(quote.group_id),
+                            image_path=str(quote.image_path),
+                            reason="out_of_bounds",
+                        )
+                    )
+                continue
+
+            referenced_paths.add(absolute_path.resolve())
+            if absolute_path.is_file():
+                valid += 1
+                continue
+
+            missing += 1
+            if len(issues) < 20:
+                issues.append(
+                    QuoteAuditIssue(
+                        id=quote.id,
+                        group_id=str(quote.group_id),
+                        image_path=str(quote.image_path),
+                        reason="missing",
+                    )
+                )
+
+        orphan_files = 0
+        if group_id is None:
+            quote_path = get_quote_path()
+            if quote_path.is_dir():
+                # 临时上传文件不属于语录资产，避免把处理中间态误报为孤儿。
+                orphan_files = sum(
+                    1
+                    for image_path in quote_path.rglob("*.png")
+                    if not image_path.name.startswith("temp_")
+                    and ".deleting" not in image_path.name
+                    and image_path.resolve() not in referenced_paths
+                )
+
+        return QuoteAuditSummary(
+            total=len(quotes),
+            valid=valid,
+            missing=missing,
+            out_of_bounds=out_of_bounds,
+            orphan_files=orphan_files,
+            issues=issues,
+        )
 
     @classmethod
     async def delete_image_if_unreferenced(cls, image_path: str | Path) -> bool:

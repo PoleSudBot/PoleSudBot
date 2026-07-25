@@ -220,31 +220,24 @@ def _build_search_memory_key(
     return f"{group_id}_{user_id_filter or 'all'}_{keyword}"
 
 
-def _build_multi_quote_message(quotes: list[Quote]) -> UniMessage:
+async def _get_empty_quote_library_message(group_id: str) -> str:
+    """区分数据库真空和有记录但图片均不可用两种状态。"""
+    if await Quote.filter(group_id=group_id).exists():
+        return "语录记录存在，但图片暂时不可用，请联系管理员检查。"
+    return "当前无语录库"
+
+
+def _build_multi_quote_message(images: list[bytes]) -> UniMessage:
     message = UniMessage()
-    for quote in quotes:
-        # 普通多图发送直接走本地路径，避免 1-5 张场景额外把所有图片读成字节占内存。
-        message += Image(path=resolve_quote_image_path(quote.image_path))
+    for image_bytes in images:
+        message += Image(raw=image_bytes)
     return message
-
-
-async def _delete_invalid_quotes(invalid_quote_ids: list[int]) -> None:
-    if not invalid_quote_ids:
-        return
-
-    unique_invalid_ids = list(dict.fromkeys(invalid_quote_ids))
-    logger.warning(
-        f"检测到 {len(unique_invalid_ids)} 条语录文件缺失，将批量删除无效记录: {unique_invalid_ids}",
-        "群聊语录",
-    )
-    await Quote.filter(id__in=unique_invalid_ids).delete()
 
 
 async def _collect_valid_quotes_from_candidates(
     memory_key: str, candidate_quotes: list[Quote], target_count: int
 ) -> list[Quote]:
     valid_quotes: list[Quote] = []
-    invalid_quote_ids: list[int] = []
     remaining_candidates = list(candidate_quotes)
 
     while remaining_candidates and len(valid_quotes) < target_count:
@@ -266,14 +259,13 @@ async def _collect_valid_quotes_from_candidates(
                 if len(valid_quotes) < target_count:
                     valid_quotes.append(quote)
             else:
-                # 坏记录先集中回收，避免在循环里边查边删导致额外数据库抖动。
+                # 查询只跳过不可用图片，避免临时挂载或 IO 故障导致数据库记录被误删。
                 logger.warning(
-                    f"数据库中的语录 (ID: {quote.id}) 对应的图片文件不存在: {quote.image_path}",
+                    f"数据库中的语录 (ID: {quote.id}, 群: {quote.group_id}) "
+                    f"对应图片暂时不可用: {quote.image_path}",
                     "群聊语录",
                 )
-                invalid_quote_ids.append(quote.id)
 
-    await _delete_invalid_quotes(invalid_quote_ids)
     return valid_quotes
 
 
@@ -281,7 +273,6 @@ async def _collect_valid_quotes_from_random_ids(
     memory_key: str, candidate_ids: list[int], target_count: int
 ) -> list[Quote]:
     valid_quotes: list[Quote] = []
-    invalid_quote_ids: list[int] = []
     remaining_ids = list(candidate_ids)
 
     while remaining_ids and len(valid_quotes) < target_count:
@@ -305,13 +296,13 @@ async def _collect_valid_quotes_from_random_ids(
                 if len(valid_quotes) < target_count:
                     valid_quotes.append(quote)
             else:
+                # ID 随机池同样保持只读，文件恢复后原记录仍可继续使用。
                 logger.warning(
-                    f"数据库中的语录 (ID: {quote.id}) 对应的图片文件不存在: {quote.image_path}",
+                    f"数据库中的语录 (ID: {quote.id}, 群: {quote.group_id}) "
+                    f"对应图片暂时不可用: {quote.image_path}",
                     "群聊语录",
                 )
-                invalid_quote_ids.append(quote.id)
 
-    await _delete_invalid_quotes(invalid_quote_ids)
     return valid_quotes
 
 
@@ -319,7 +310,8 @@ async def _get_valid_random_quotes(
     group_id: str,
     target_count: int,
     user_id_filter: str | None = None,
-) -> tuple[list[Quote], str]:
+) -> tuple[list[Quote], str, bool]:
+    """返回可用语录、随机记忆键和是否存在匹配的数据库记录。"""
     memory_key = _build_random_memory_key(group_id, user_id_filter)
 
     if user_id_filter:
@@ -334,6 +326,7 @@ async def _get_valid_random_quotes(
                 memory_key, random_candidates, target_count
             ),
             memory_key,
+            bool(random_candidates),
         )
 
     random_quote_ids = await QuoteService.get_random_quote_ids(group_id)
@@ -342,6 +335,7 @@ async def _get_valid_random_quotes(
             memory_key, random_quote_ids, target_count
         ),
         memory_key,
+        bool(random_quote_ids),
     )
 
 
@@ -350,36 +344,67 @@ async def _send_quote_batch(
     target,
     group_id: str,
     quotes: list[Quote],
-) -> bool:
-    if len(quotes) <= 5:
-        await _build_multi_quote_message(quotes).send(target=target, bot=bot)
-        return True
+) -> list[Quote]:
+    # 发送前再次过滤可用文件，缩小存在性检查与实际读取之间的竞态窗口。
+    available_quotes = [
+        quote for quote in quotes if safe_file_exists(quote.image_path)
+    ]
+    if not available_quotes:
+        await MessageUtils.build_message(
+            "语录记录存在，但图片暂时不可用，请联系管理员检查。"
+        ).send(target=target, bot=bot)
+        return []
 
-    forward_messages: list[UniMessage] = []
-    for quote in quotes:
-        absolute_path = resolve_quote_image_path(quote.image_path)
-        async with aiofiles.open(absolute_path, "rb") as file:
-            image_bytes = await file.read()
-        forward_messages.append(UniMessage([Image(raw=image_bytes)]))
+    # 所有发送模式先逐图读取，确保单张在复查后失效时仍能发送其余图片。
+    image_payloads: list[bytes] = []
+    sent_quotes: list[Quote] = []
+    for quote in available_quotes:
+        try:
+            absolute_path = resolve_quote_image_path(quote.image_path)
+            async with aiofiles.open(absolute_path, "rb") as file:
+                image_bytes = await file.read()
+        except (OSError, ValueError) as e:
+            # 合并转发逐张读取，单图失效时保留其余可用结果。
+            logger.warning(
+                f"读取语录图片失败 - ID: {quote.id}, 群: {quote.group_id}, "
+                f"路径: {quote.image_path}, 错误: {e}",
+                "群聊语录",
+            )
+            continue
+        image_payloads.append(image_bytes)
+        sent_quotes.append(quote)
 
+    if not image_payloads:
+        await MessageUtils.build_message(
+            "语录记录存在，但图片暂时不可用，请联系管理员检查。"
+        ).send(target=target, bot=bot)
+        return []
+
+    if len(sent_quotes) <= 5:
+        await _build_multi_quote_message(image_payloads).send(target=target, bot=bot)
+        return sent_quotes
+
+    forward_messages = [
+        UniMessage([Image(raw=image_bytes)]) for image_bytes in image_payloads
+    ]
     try:
         await bot.call_api(
             "send_group_forward_msg",
             group_id=int(group_id),
             messages=MessageUtils.template2forward(forward_messages, bot.self_id),
         )
-        return True
+        return sent_quotes
     except (ActionFailed, AdapterException, asyncio.TimeoutError) as e:
         logger.error(
-            f"发送语录合并转发失败 - 群组: {group_id}, 数量: {len(quotes)}, 错误: {e}",
+            f"发送语录合并转发失败 - 群组: {group_id}, "
+            f"数量: {len(sent_quotes)}, 错误: {e}",
             "群聊语录",
             e=e,
         )
         await MessageUtils.build_message("合并转发发送失败，请稍后重试。").send(
             target=target, bot=bot
         )
-        return False
-
+        return []
 
 async def _send_history_quote(
     bot: Bot,
@@ -402,19 +427,20 @@ async def _send_history_quote(
 
     if not safe_file_exists(quote.image_path):
         logger.warning(
-            f"倒序指定的语录 (ID: {quote.id}) 对应图片文件不存在: {quote.image_path}",
+            f"倒序指定的语录 (ID: {quote.id}, 群: {quote.group_id}) "
+            f"对应图片暂时不可用: {quote.image_path}",
             "群聊语录",
         )
-        await _delete_invalid_quotes([quote.id])
         await MessageUtils.build_message(
-            "这条语录图片文件已缺失，已清理记录，请再试一次。"
+            "这条语录图片暂时不可用，请联系管理员检查。"
         ).send(target=target, bot=bot)
         return
 
-    if not await _send_quote_batch(bot, target, group_id, [quote]):
+    sent_quotes = await _send_quote_batch(bot, target, group_id, [quote])
+    if not sent_quotes:
         return
 
-    await QuoteService.increment_view_counts([quote.id])
+    await QuoteService.increment_view_counts([item.id for item in sent_quotes])
 
 
 @record_pool.handle()
@@ -467,10 +493,15 @@ async def record_pool_handle(bot: Bot, event: Event, arp: Arparma, state: T_Stat
         )
         if quotes:
             memory_key = search_memory_key
+        elif matched_quotes:
+            await MessageUtils.build_message(
+                "语录记录存在，但图片暂时不可用，请联系管理员检查。"
+            ).send(target=target, bot=bot)
+            return
         else:
             # 只有关键词有效命中为 0 时才回退随机，命中了但数量不足时只发命中的结果，
             # 避免把“查询结果”悄悄掺入无关随机图，破坏搜索语义。
-            quotes, memory_key = await _get_valid_random_quotes(
+            quotes, memory_key, has_candidates = await _get_valid_random_quotes(
                 group_id,
                 request_count,
                 user_id_filter=user_id_filter,
@@ -488,36 +519,47 @@ async def record_pool_handle(bot: Bot, event: Event, arp: Arparma, state: T_Stat
                     fallback_message = MessageUtils.build_message(
                         [f"当前查询无结果, 为您随机发送 {len(quotes)} 条语录。"]
                     )
+            elif has_candidates:
+                await MessageUtils.build_message(
+                    "语录记录存在，但图片暂时不可用，请联系管理员检查。"
+                ).send(target=target, bot=bot)
+                return
             elif user_id_filter:
                 await MessageUtils.build_message(
                     [At(target=user_id_filter, flag="user"), " 没有任何语录哦~"]
                 ).send(target=target, bot=bot)
                 return
             else:
-                await MessageUtils.build_message("当前无语录库").send(
-                    target=target, bot=bot
-                )
+                await MessageUtils.build_message(
+                    await _get_empty_quote_library_message(group_id)
+                ).send(target=target, bot=bot)
                 return
     else:
-        quotes, memory_key = await _get_valid_random_quotes(
+        quotes, memory_key, has_candidates = await _get_valid_random_quotes(
             group_id, request_count, user_id_filter=user_id_filter
         )
         if not quotes:
-            if user_id_filter:
+            if has_candidates:
+                await MessageUtils.build_message(
+                    "语录记录存在，但图片暂时不可用，请联系管理员检查。"
+                ).send(target=target, bot=bot)
+            elif user_id_filter:
                 await MessageUtils.build_message(
                     [At(target=user_id_filter, flag="user"), " 没有任何语录哦~"]
                 ).send(target=target, bot=bot)
             else:
-                await MessageUtils.build_message("当前无语录库").send(
-                    target=target, bot=bot
-                )
+                await MessageUtils.build_message(
+                    await _get_empty_quote_library_message(group_id)
+                ).send(target=target, bot=bot)
             return
 
     if fallback_message:
         await fallback_message.send(target=target, bot=bot)
 
-    if not await _send_quote_batch(bot, target, group_id, quotes):
+    sent_quotes = await _send_quote_batch(bot, target, group_id, quotes)
+    if not sent_quotes:
         return
+    quotes = sent_quotes
 
     if memory_key:
         QuoteService.record_recent_quote_ids(memory_key, [quote.id for quote in quotes])

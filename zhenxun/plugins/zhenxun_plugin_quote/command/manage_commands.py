@@ -558,6 +558,11 @@ quote_manage_cmd = on_alconna(
                 Args["target?", Literal["退群用户"], "退群用户"],
                 alias={"清理"},
             ),
+            Subcommand(
+                "check",
+                Args["group_id?", str],
+                alias={"检查"},
+            ),
         ),
         Subcommand("theme", Args["theme_name?", str]),
     ),
@@ -572,7 +577,9 @@ quote_manage_cmd.shortcut("语录主题", {"args": ["theme"]})
 
 @quote_manage_cmd.handle()
 async def _(bot: Bot, event: MessageEvent, arp: Arparma, session: Uninfo):
-    if arp.find("manager"):
+    if arp.find("manager.check"):
+        await handle_storage_audit(bot, event, arp, session)
+    elif arp.find("manager"):
         await handle_adv_delete(bot, event, arp, session)
     elif arp.find("theme"):
         await handle_theme(bot, event, arp, session)
@@ -594,6 +601,57 @@ def get_available_themes() -> list[str]:
                             available_themes_set.add(skin_dir.name)
 
     return sorted(list(available_themes_set))
+
+
+async def handle_storage_audit(
+    bot: Bot,
+    event: MessageEvent,
+    arp: Arparma,
+    session: Uninfo,
+) -> None:
+    """执行不会修改数据库或图片文件的语录存储审计。"""
+    requested_group_id: str | None = arp.query("manager.check.group_id")
+    if requested_group_id in {"全部", "all"}:
+        audit_group_id = None
+        scope_text = "全部语录"
+    elif requested_group_id:
+        audit_group_id = requested_group_id
+        scope_text = f"群 {requested_group_id}"
+    elif session.group:
+        audit_group_id = str(session.group.id)
+        scope_text = f"当前群 {audit_group_id}"
+    else:
+        await MessageUtils.build_message(
+            "私聊检查时请提供群号，或使用“语录管理 检查 全部”。"
+        ).send(target=event, bot=bot)
+        return
+
+    result = await QuoteService.audit_storage(audit_group_id)
+    message_lines = [
+        "语录存储只读检查",
+        f"范围：{scope_text}",
+        f"数据库记录：{result.total}",
+        f"正常：{result.valid}",
+        f"缺失：{result.missing}",
+        f"越界：{result.out_of_bounds}",
+    ]
+    if audit_group_id is None:
+        message_lines.append(f"孤儿图片：{result.orphan_files}")
+
+    if result.issues:
+        reason_text = {"missing": "缺失", "out_of_bounds": "越界"}
+        message_lines.append("异常明细（最多 20 条）：")
+        message_lines.extend(
+            f"ID {issue.id} | 群 {issue.group_id} | "
+            f"{reason_text.get(issue.reason, issue.reason)} | {issue.image_path}"
+            for issue in result.issues
+        )
+
+    message_lines.append("本操作只读，不会删除数据库或图片。")
+    await MessageUtils.build_message("\n".join(message_lines)).send(
+        target=event,
+        bot=bot,
+    )
 
 
 async def handle_theme(bot: Bot, event: MessageEvent, arp: Arparma, session: Uninfo):
