@@ -1,5 +1,6 @@
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 from typing import Optional, Literal, Union
@@ -33,9 +34,18 @@ from ..utils.tag_utils import (
     extract_manual_tags,
     extract_manual_tags_with_mention_names,
 )
+from ..utils.exceptions import ImageProcessError
+from ..utils.reply_images import extract_direct_images, extract_forward_images
 
 _IMAGE_STEM_MD5_RE = re.compile(r"(?i)[0-9a-f]{32}")
 _REPLY_QUOTE_STATE_KEY = "reply_quote"
+
+
+@dataclass(frozen=True)
+class ReplyQuoteResolution:
+    quotes: list[Quote]
+    image_count: int = 0
+    unresolved_count: int = 0
 
 
 async def _get_image_from_reply(event: Event, bot: Bot) -> Optional[Image]:
@@ -137,25 +147,92 @@ def _extract_reply_image_identifiers(image_seg: Image) -> tuple[str | None, str 
     return None, fallback_basename
 
 
+async def _get_images_from_reply(
+    event: Event, bot: Bot
+) -> tuple[list[Image], int]:
+    if not (reply := await reply_fetch(event, bot)):
+        return [], 0
+
+    if not isinstance(bot, V11Bot):
+        logger.warning(
+            f"当前 Bot 类型 ({type(bot)}) 不支持通过API获取消息，无法从回复中提取图片。"
+        )
+        return [], 0
+
+    try:
+        msg_info = await bot.get_msg(message_id=int(reply.id))
+        raw_message_data = msg_info.get("message")
+    except Exception as e:
+        logger.error(
+            f"通过 API get_msg(id={reply.id}) 获取回复消息失败: {e}", "群聊语录", e=e
+        )
+        return [], 0
+
+    direct_images = await extract_direct_images(bot, raw_message_data)
+    unresolved_count = 0
+    try:
+        forward_images, has_forward = await extract_forward_images(
+            bot, raw_message_data
+        )
+    except ImageProcessError as e:
+        logger.warning(f"解析回复中的合并转发失败: {e}", "群聊语录", e=e)
+        forward_images, has_forward = [], True
+
+    if has_forward and not forward_images:
+        unresolved_count += 1
+    return direct_images + forward_images, unresolved_count
+
+
+async def _get_quotes_from_reply(
+    bot: Bot, event: MessageEvent, session: Uninfo
+) -> ReplyQuoteResolution:
+    if not session.group or not await is_reply_to_bot(event):
+        return ReplyQuoteResolution([])
+
+    image_segments, unresolved_count = await _get_images_from_reply(event, bot)
+    quotes: list[Quote] = []
+    seen_quote_ids: set[int] = set()
+
+    for image_seg in image_segments:
+        image_md5, image_basename = _extract_reply_image_identifiers(image_seg)
+        if not image_md5 and not image_basename:
+            unresolved_count += 1
+            continue
+
+        quote = await QuoteService.find_quote_by_reply_image(
+            session.group.id,
+            reply_image_md5=image_md5,
+            reply_image_basename=image_basename,
+        )
+        if not quote:
+            unresolved_count += 1
+            continue
+        if quote.id not in seen_quote_ids:
+            seen_quote_ids.add(quote.id)
+            quotes.append(quote)
+
+    return ReplyQuoteResolution(
+        quotes=quotes,
+        image_count=len(image_segments),
+        unresolved_count=unresolved_count,
+    )
+
+
 async def _get_quote_from_reply(
     bot: Bot, event: MessageEvent, session: Uninfo
 ) -> Quote | None:
-    if not session.group or not await is_reply_to_bot(event):
-        return None
+    resolution = await _get_quotes_from_reply(bot, event, session)
+    return resolution.quotes[0] if resolution.quotes else None
 
-    image_seg = await _get_image_from_reply(event, bot)
-    if not image_seg:
-        return None
 
-    image_md5, image_basename = _extract_reply_image_identifiers(image_seg)
-    if not image_md5 and not image_basename:
-        return None
-
-    return await QuoteService.find_quote_by_reply_image(
-        session.group.id,
-        reply_image_md5=image_md5,
-        reply_image_basename=image_basename,
-    )
+def _as_quotes(
+    value: Quote | list[Quote] | ReplyQuoteResolution | None,
+) -> list[Quote]:
+    if isinstance(value, ReplyQuoteResolution):
+        return value.quotes
+    if isinstance(value, list):
+        return value
+    return [value] if value else []
 
 
 async def uploader_or_admin_check(
@@ -198,7 +275,7 @@ def reply_to_quote_rule() -> Rule:
     async def _rule(bot: Bot, event: Event, session: Uninfo):
         if not isinstance(event, MessageEvent):
             return False
-        return await _get_quote_from_reply(bot, event, session) is not None
+        return bool((await _get_quotes_from_reply(bot, event, session)).quotes)
 
     return Rule(_rule)
 
@@ -221,9 +298,10 @@ async def _match_reply_quote_delete(
     if event.get_plaintext().strip() != "删除":
         return False
 
-    if quote := await _get_quote_from_reply(bot, event, session):
-        # 规则阶段就已经完成一次回复解析，缓存下来可以避免同一条消息重复 get_msg / 查库。
-        state[_REPLY_QUOTE_STATE_KEY] = quote
+    resolution = await _get_quotes_from_reply(bot, event, session)
+    if resolution.quotes:
+        # 规则阶段已完成解析，缓存结果避免重复请求历史消息。
+        state[_REPLY_QUOTE_STATE_KEY] = resolution
         return True
     return False
 
@@ -250,34 +328,64 @@ async def _require_reply_quote(
     return None
 
 
-def _build_tag_view_message(quote: Quote, show_all: bool) -> list[object]:
-    manual_tags = QuoteService.get_manual_tags(quote)
-    if not show_all:
-        return ["手动 tag：", *QuoteService.format_tags_for_message(manual_tags)]
+async def _require_reply_quotes(
+    bot: Bot, event: MessageEvent, session: Uninfo
+) -> ReplyQuoteResolution | None:
+    resolution = await _get_quotes_from_reply(bot, event, session)
+    if resolution.quotes:
+        return resolution
 
-    auto_tags = QuoteService.get_auto_tags(quote)
-    return [
-        "手动 tag：",
-        *QuoteService.format_tags_for_message(manual_tags),
-        "\n自动 tag：",
-        *QuoteService.format_tags_for_message(auto_tags),
-    ]
+    await MessageUtils.build_message(
+        "请回复 Bot 发出的语录图片或合并转发后再使用该命令。"
+    ).send(target=event, bot=bot)
+    return None
+
+
+def _build_tag_view_message(
+    quotes: Quote | list[Quote], show_all: bool = True
+) -> list[object]:
+    quote_list = _as_quotes(quotes)
+    message: list[object] = []
+    for index, quote in enumerate(quote_list, start=1):
+        if index > 1:
+            message.append("\n")
+        if len(quote_list) > 1:
+            message.append(f"{index}. ")
+        message.extend(
+            [
+                "自动 tag：",
+                *QuoteService.format_tags_for_message(QuoteService.get_auto_tags(quote)),
+                "\n手动 tag：",
+                *QuoteService.format_tags_for_message(
+                    QuoteService.get_manual_tags(quote)
+                ),
+            ]
+        )
+    return message or ["没有可显示的 tag。"]
 
 
 async def _show_quote_tags(
-    bot: Bot, event: MessageEvent, quote: Quote, show_all: bool
+    bot: Bot,
+    event: MessageEvent,
+    quotes: Quote | list[Quote],
+    show_all: bool = True,
+    unresolved_count: int = 0,
 ):
+    message = _build_tag_view_message(quotes, show_all=show_all)
+    if unresolved_count:
+        message.append(f"\n未识别图片/转发节点：{unresolved_count}")
     await MessageUtils.build_message(
-        _build_tag_view_message(quote, show_all=show_all)
+        message
     ).send(target=event, bot=bot)
 
 
 async def _update_quote_manual_tags(
     bot: Bot,
     event: MessageEvent,
-    quote: Quote,
+    quotes: Quote | list[Quote],
     tags: list[str],
     action: Literal["add", "del"],
+    unresolved_count: int = 0,
 ):
     normalized_tags = QuoteService.normalize_tags(tags)
     if not normalized_tags:
@@ -286,41 +394,67 @@ async def _update_quote_manual_tags(
         ).send(target=event, bot=bot)
         return
 
-    if action == "add":
-        result = await QuoteService.add_manual_tags(quote, normalized_tags)
-    else:
-        result = await QuoteService.delete_manual_tags(quote, normalized_tags)
+    quote_list = _as_quotes(quotes)
+    results = []
+    for quote in quote_list:
+        if action == "add":
+            result = await QuoteService.add_manual_tags(quote, normalized_tags)
+        else:
+            result = await QuoteService.delete_manual_tags(quote, normalized_tags)
+        results.append(result)
 
-    if not result.success:
-        await MessageUtils.build_message("修改手动 tag 失败，请稍后再试。").send(
-            target=event,
-            bot=bot,
-        )
-        return
-
-    after_tags = result.tags
-    changed_tags = result.changed_tags
-    if action == "add":
-        prefix = "已添加手动 tag：" if changed_tags else "这些手动 tag 已经都在了："
-    else:
-        prefix = "已删除手动 tag：" if changed_tags else "这些手动 tag 当前都不存在："
-    display_tags = changed_tags or normalized_tags
-
-    await MessageUtils.build_message(
-        [
+    if len(quote_list) == 1:
+        result = results[0]
+        if not result.success:
+            await MessageUtils.build_message("修改手动 tag 失败，请稍后再试。").send(
+                target=event, bot=bot
+            )
+            return
+        changed_tags = result.changed_tags
+        if action == "add":
+            prefix = "已添加手动 tag：" if changed_tags else "这些手动 tag 已经都在了："
+        else:
+            prefix = (
+                "已删除手动 tag："
+                if changed_tags
+                else "这些手动 tag 当前都不存在："
+            )
+        display_tags = changed_tags or normalized_tags
+        message = [
             prefix,
             *QuoteService.format_tags_for_message(display_tags),
             "\n当前手动 tag：",
-            *QuoteService.format_tags_for_message(after_tags),
+            *QuoteService.format_tags_for_message(result.tags),
         ]
-    ).send(target=event, bot=bot)
+    else:
+        action_text = "添加" if action == "add" else "删除"
+        success_count = sum(result.success for result in results)
+        message = [
+            f"已为 {success_count}/{len(quote_list)} 条语录{action_text}手动 tag："
+        ]
+        message.extend(QuoteService.format_tags_for_message(normalized_tags))
+        for index, result in enumerate(results, start=1):
+            message.append(f"\n{index}. 当前手动 tag：")
+            message.extend(
+                QuoteService.format_tags_for_message(
+                    result.tags if result.success else []
+                )
+            )
+        failed_count = len(quote_list) - success_count
+        if failed_count:
+            message.append(f"\n修改失败：{failed_count} 条")
+
+    if unresolved_count:
+        message.append(f"\n未识别图片/转发节点：{unresolved_count}")
+
+    await MessageUtils.build_message(message).send(target=event, bot=bot)
 
 
 async def _handle_delete_reply_quote(
     bot: Bot,
     event: MessageEvent,
     session: Uninfo,
-    quote: Quote | None = None,
+    quote: Quote | list[Quote] | ReplyQuoteResolution | None = None,
     state: T_State | None = None,
 ):
     """处理回复语录图片后的删除逻辑"""
@@ -329,31 +463,59 @@ async def _handle_delete_reply_quote(
 
     # 回复删除的规则阶段已经做过一次解析，这里优先复用缓存，避免重复请求历史消息。
     cached_quote = state.get(_REPLY_QUOTE_STATE_KEY) if state else None
-    quote = quote or cached_quote or await _get_quote_from_reply(bot, event, session)
-    if not quote:
+    quote_value = quote or cached_quote
+    if quote_value is None:
+        quote_value = await _get_quotes_from_reply(bot, event, session)
+    unresolved_count = (
+        quote_value.unresolved_count
+        if isinstance(quote_value, ReplyQuoteResolution)
+        else 0
+    )
+    quotes = _as_quotes(quote_value)
+    if not quotes:
         logger.info(
             f"尝试删除语录失败，回复内容未能定位到群组 {group_id} 中的语录。",
             "群聊语录",
         )
         return
 
-    if not await uploader_or_admin_check(bot, event, session, quote=quote):
+    authorized = [
+        await uploader_or_admin_check(bot, event, session, quote=item)
+        for item in quotes
+    ]
+    if not all(authorized):
+        unauthorized_count = authorized.count(False)
         await MessageUtils.build_message(
-            [At(target=user_id, flag="user"), " 仅上传者或满足删除权限的管理员可删除此语录"]
+            [
+                At(target=user_id, flag="user"),
+                f" 其中 {unauthorized_count} 条语录无删除权限，已取消整批删除",
+                *(
+                    [f"；另有 {unresolved_count} 个图片/转发节点未识别"]
+                    if unresolved_count
+                    else []
+                ),
+            ]
         ).send(target=event, bot=bot)
         return
 
-    is_deleted = await QuoteService.delete_quote_instance(quote)
+    deleted_count = 0
+    for item in quotes:
+        if await QuoteService.delete_quote_instance(item):
+            deleted_count += 1
 
-    if is_deleted:
-        await MessageUtils.build_message(
-            [At(target=user_id, flag="user"), " 删除成功"]
-        ).send(target=event, bot=bot)
-        return
-
-    await MessageUtils.build_message("删除失败，请稍后再试。").send(
-        target=event, bot=bot
-    )
+    if deleted_count == len(quotes):
+        message = [At(target=user_id, flag="user"), f" 删除成功，共 {deleted_count} 条"]
+    else:
+        message = [
+            At(target=user_id, flag="user"),
+            (
+                f" 删除完成：成功 {deleted_count} 条，"
+                f"失败 {len(quotes) - deleted_count} 条"
+            ),
+        ]
+    if unresolved_count:
+        message.append(f"；未识别图片/转发节点：{unresolved_count}")
+    await MessageUtils.build_message(message).send(target=event, bot=bot)
 
 
 async def _handle_delete_last_quote(bot: Bot, event: MessageEvent, session: Uninfo):
@@ -390,7 +552,9 @@ delete_quote_reply_cmd = on_message(
     block=True,
     rule=reply_to_quote_delete_rule(),
 )
-delete_quote_cmd = on_alconna(Alconna("删除语录"), aliases={"del"}, priority=11, block=True)
+delete_quote_cmd = on_alconna(
+    Alconna("删除语录"), aliases={"del"}, priority=11, block=True
+)
 quote_tag_cmd = on_alconna(
     Alconna("tag", Args["action?", str]["parts?", MultiVar(At | Text)]),
     priority=4,
@@ -437,13 +601,13 @@ async def handle_delete_quote_standalone(
         logger.debug("删除命令在非群聊环境中使用，已忽略。", "群聊语录")
         return
 
-    reply_quote = await _get_quote_from_reply(bot, event, session)
-    if reply_quote is not None:
+    resolution = await _get_quotes_from_reply(bot, event, session)
+    if resolution.quotes:
         await _handle_delete_reply_quote(
             bot,
             event,
             session,
-            quote=reply_quote,
+            quote=resolution,
         )
         return
 
@@ -457,14 +621,19 @@ async def handle_delete_quote_standalone(
 async def handle_quote_tag(
     bot: Bot, event: MessageEvent, arp: Arparma, session: Uninfo
 ):
-    quote = await _get_quote_from_reply(bot, event, session)
-    if not quote:
+    resolution = await _require_reply_quotes(bot, event, session)
+    if not resolution:
         return
 
     action = str(arp.query("action", "") or "").strip().lower()
 
     if not action:
-        await _show_quote_tags(bot, event, quote, show_all=False)
+        await _show_quote_tags(
+            bot,
+            event,
+            resolution.quotes,
+            unresolved_count=resolution.unresolved_count,
+        )
         return
 
     if action == "all":
@@ -473,16 +642,22 @@ async def handle_quote_tag(
                 "tag all 仅用于查看全部 tag，请不要额外附带参数。"
             ).send(target=event, bot=bot)
             return
-        await _show_quote_tags(bot, event, quote, show_all=True)
+        await _show_quote_tags(
+            bot,
+            event,
+            resolution.quotes,
+            unresolved_count=resolution.unresolved_count,
+        )
         return
 
     if action in {"add", "del"}:
         await _update_quote_manual_tags(
             bot,
             event,
-            quote,
+            resolution.quotes,
             await extract_manual_tags_with_mention_names(bot, session.group.id, arp),
             action,
+            resolution.unresolved_count,
         )
         return
 
@@ -493,27 +668,33 @@ async def handle_quote_tag(
 
 @quote_alltag_cmd.handle()
 async def handle_quote_alltag(bot: Bot, event: MessageEvent, session: Uninfo):
-    quote = await _require_reply_quote(bot, event, session)
-    if not quote:
+    resolution = await _require_reply_quotes(bot, event, session)
+    if not resolution:
         return
 
-    await _show_quote_tags(bot, event, quote, show_all=True)
+    await _show_quote_tags(
+        bot,
+        event,
+        resolution.quotes,
+        unresolved_count=resolution.unresolved_count,
+    )
 
 
 @quote_addtag_cmd.handle()
 async def handle_quote_addtag(
     bot: Bot, event: MessageEvent, arp: Arparma, session: Uninfo
 ):
-    quote = await _require_reply_quote(bot, event, session)
-    if not quote:
+    resolution = await _require_reply_quotes(bot, event, session)
+    if not resolution:
         return
 
     await _update_quote_manual_tags(
         bot,
         event,
-        quote,
+        resolution.quotes,
         await extract_manual_tags_with_mention_names(bot, session.group.id, arp),
         action="add",
+        unresolved_count=resolution.unresolved_count,
     )
 
 
@@ -521,16 +702,17 @@ async def handle_quote_addtag(
 async def handle_quote_deltag(
     bot: Bot, event: MessageEvent, arp: Arparma, session: Uninfo
 ):
-    quote = await _require_reply_quote(bot, event, session)
-    if not quote:
+    resolution = await _require_reply_quotes(bot, event, session)
+    if not resolution:
         return
 
     await _update_quote_manual_tags(
         bot,
         event,
-        quote,
+        resolution.quotes,
         await extract_manual_tags_with_mention_names(bot, session.group.id, arp),
         action="del",
+        unresolved_count=resolution.unresolved_count,
     )
 
 

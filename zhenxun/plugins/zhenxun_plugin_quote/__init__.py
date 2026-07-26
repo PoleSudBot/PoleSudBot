@@ -65,11 +65,11 @@ __plugin_meta__ = PluginMetadata(
         "`语录统计 [热门/高产上传/高产被录] [数量]` - 查看群内语录统计\n"
         "示例：`语录统计 热门`、`语录统计 高产上传 5`、`quote stats 热门 10`\n\n"
         "### 管理功能\n"
-        "`删除` - 仅在回复 Bot 发出的语录图片时删除该语录，需为上传者或满足删除权限\n"
-        "`删除语录` / `del` - 回复语录图片后删除对应语录，需满足删除权限\n\n"
-        "`tag` - 回复语录图片后查看手动 tag\n"
-        "`tag all` / `alltag` - 回复语录图片后查看全部 tag\n"
-        "`tag add` / `tag del` - 回复语录图片后添加或删除手动 tag\n"
+        "`删除` - 回复 Bot 发出的单图、多图或合并转发语录后删除，需为上传者或满足删除权限\n"
+        "`删除语录` / `del` - 回复语录图片或合并转发后删除对应语录，需满足删除权限\n\n"
+        "`tag` - 回复语录图片后查看自动与手动 tag（多图按 1.、2.、3. 编号）\n"
+        "`tag all` / `alltag` - `tag` 的兼容写法，查看相同的全部 tag\n"
+        "`tag add` / `tag del` - 为回复中的全部语录图片添加或删除手动 tag\n"
         "`addtag` / `deltag` / `tagadd` / `tagdel` - `tag add/del` 的等价别名\n\n"
         "`语录管理 keyword 词1 ...` - 删除包含任一关键词的语录，仅超级用户可用\n"
         "`语录管理 clear --uploader @用户/QQ号` - 清空指定上传者的语录，仅超级用户可用\n"
@@ -84,8 +84,8 @@ __plugin_meta__ = PluginMetadata(
         "会被当成数量请求；如果要查关键词“五连/三连”，请使用 `语录 -n 1 五连`\n"
         "`语录 -1`、`语录 xxx -3` 会按入库倒序取指定语录，不会随机补发\n"
         "`语录` 一次最多获取 10 张；1-5 张会合并成一条消息，6-10 张会使用合并转发\n"
-        "`tag` 系列只在回复语录图时生效，非回复场景会静默让路\n"
-        "`删除` 只在回复语录图时有效，不会接管普通聊天里的“删除”\n"
+        "`tag` 系列只在回复语录图或合并转发时生效，非回复场景会静默让路；反馈只发送文字，不重复原图\n"
+        "`删除` 只在回复语录图或合并转发时有效，不会接管普通聊天里的“删除”\n"
         "手动 tag 与 OCR/AI/记录文本生成的自动 tag 分层存储，但查询时会合并匹配"
     ),
     type="application",
@@ -93,7 +93,7 @@ __plugin_meta__ = PluginMetadata(
     supported_adapters={"~onebot.v11"},
     extra=PluginExtraData(
         author="webjoin111",
-        version="v1.2.1",
+        version="v1.3.0",
         admin_level=0,
         configs=[
             RegisterConfig(

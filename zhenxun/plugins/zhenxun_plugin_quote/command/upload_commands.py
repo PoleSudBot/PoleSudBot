@@ -2,7 +2,6 @@ import base64
 from dataclasses import dataclass
 import hashlib
 import html
-import json
 import os
 from pathlib import Path
 import re
@@ -40,6 +39,17 @@ from ..services.text_recognition import TextRecognitionService
 from ..services.quote_service import QuoteService
 from ..utils.exceptions import ImageProcessError, NetworkError
 from ..utils.image_utils import get_img_hash
+from ..utils.reply_images import (
+    extract_direct_images,
+    extract_forward_images,
+    forward_node_message,
+    forward_nodes_from_response,
+    inline_forward_nodes,
+    iter_raw_segments,
+    segment_data,
+    segment_type,
+    to_v11_message,
+)
 from ..utils.tag_utils import (
     collect_tag_parts,
     extract_manual_tags_with_mention_names,
@@ -458,115 +468,24 @@ def _extract_target_images_from_parts(parts: list[Any]) -> list[UniImage]:
     return [part for part in parts if isinstance(part, UniImage)]
 
 
-def _iter_raw_segments(message: Any) -> list[Any]:
-    if not message or isinstance(message, str):
-        return []
-    if isinstance(message, dict):
-        return [message]
-    try:
-        return list(message)
-    except TypeError:
-        return []
-
-
-def _segment_type(segment: Any) -> str:
-    if isinstance(segment, dict):
-        return str(segment.get("type") or "")
-    return str(getattr(segment, "type", "") or "")
-
-
-def _segment_data(segment: Any) -> dict[str, Any]:
-    if isinstance(segment, dict):
-        data = segment.get("data", {})
-    else:
-        data = getattr(segment, "data", {})
-    return dict(data) if isinstance(data, dict) else {}
-
-
-def _to_v11_message(message: Any) -> Message:
-    if isinstance(message, Message):
-        return message
-    segments = []
-    for segment in _iter_raw_segments(message):
-        if isinstance(segment, MessageSegment):
-            segments.append(segment)
-        elif isinstance(segment, dict) and segment.get("type"):
-            segments.append(
-                MessageSegment(str(segment["type"]), dict(segment.get("data") or {}))
-            )
-    return Message(segments)
-
-
-async def _extract_direct_images(bot: Bot, message: Any) -> list[UniImage]:
-    v11_message = _to_v11_message(message)
-    if not v11_message:
-        return []
-    uni_message = await UniMessage.generate(message=v11_message, bot=bot)
-    return [segment for segment in uni_message if isinstance(segment, UniImage)]
-
-
-def _forward_nodes_from_response(response: Any) -> list[Any]:
-    if isinstance(response, list):
-        return response
-    if not isinstance(response, dict):
-        return []
-    for key in ("messages", "message"):
-        if isinstance(response.get(key), list):
-            return response[key]
-    data = response.get("data")
-    if isinstance(data, dict):
-        for key in ("messages", "message"):
-            if isinstance(data.get(key), list):
-                return data[key]
-    return []
-
-
-def _inline_forward_nodes(data: dict[str, Any]) -> list[Any]:
-    nodes = data.get("nodes") or data.get("content")
-    if isinstance(nodes, list):
-        return nodes
-    if isinstance(nodes, str):
-        try:
-            parsed = json.loads(nodes)
-        except json.JSONDecodeError:
-            return []
-        return parsed if isinstance(parsed, list) else []
-    return []
-
-
-def _forward_node_message(node: Any) -> Any:
-    if not isinstance(node, dict):
-        return None
-    payload = node.get("data") if isinstance(node.get("data"), dict) else node
-    return payload.get("message") or payload.get("content")
+_iter_raw_segments = iter_raw_segments
+_segment_type = segment_type
+_segment_data = segment_data
+_to_v11_message = to_v11_message
+_extract_direct_images = extract_direct_images
+_forward_nodes_from_response = forward_nodes_from_response
+_inline_forward_nodes = inline_forward_nodes
+_forward_node_message = forward_node_message
 
 
 async def _extract_forward_images(
     bot: Bot, message: Any
 ) -> tuple[list[UniImage], bool]:
-    for segment in _iter_raw_segments(message):
-        if _segment_type(segment) != "forward":
-            continue
-
-        data = _segment_data(segment)
-        nodes = _inline_forward_nodes(data)
-        if not nodes:
-            forward_id = data.get("id") or data.get("resid")
-            if not forward_id:
-                return [], True
-            try:
-                response = await bot.call_api("get_forward_msg", id=str(forward_id))
-            except Exception as e:
-                raise ImageProcessError(f"获取合并转发内容失败: {e}") from e
-            nodes = _forward_nodes_from_response(response)
-
-        images: list[UniImage] = []
-        for node in nodes:
-            node_message = _forward_node_message(node)
-            if node_message:
-                images.extend(await _extract_direct_images(bot, node_message))
-        return images, True
-    return [], False
+    return await extract_forward_images(
+        bot,
+        message,
+        direct_image_extractor=_extract_direct_images,
+    )
 
 
 async def _extract_images_from_source(
