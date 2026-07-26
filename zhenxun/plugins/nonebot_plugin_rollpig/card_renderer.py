@@ -127,7 +127,7 @@ def _draw_centered_line(
     draw.text(((CANVAS_SIZE[0] - width) // 2, y), text, font=font, fill=fill)
 
 
-def _prepare_card(pig_data: Mapping[str, Any], *, is_new: bool) -> _PreparedCard:
+def _prepare_card(pig_data: Mapping[str, Any]) -> _PreparedCard:
     """生成不含头像的静态卡片层，供 PNG 和每一帧 GIF 复用。"""
 
     desc_lines, analysis_lines, analysis_size = _layout_text(pig_data)
@@ -170,12 +170,15 @@ def _prepare_card(pig_data: Mapping[str, Any], *, is_new: bool) -> _PreparedCard
         _draw_centered_line(draw, line, y, analysis_font, (51, 51, 51, 255))
         y += analysis_line_height
 
-    if is_new and NEW_ICON_FILE.exists():
+    return _PreparedCard(canvas=canvas, avatar_y=avatar_y)
+
+
+def _paste_new_icon(canvas: Image.Image, avatar_y: int) -> None:
+    if NEW_ICON_FILE.exists():
         with Image.open(NEW_ICON_FILE) as opened:
             new_icon = opened.convert("RGBA")
             new_icon.thumbnail((180, 180), Image.Resampling.LANCZOS)
             canvas.alpha_composite(new_icon, (390, max(0, avatar_y - 50)))
-    return _PreparedCard(canvas=canvas, avatar_y=avatar_y)
 
 
 def _paste_avatar(canvas: Image.Image, avatar: Image.Image, avatar_y: int) -> None:
@@ -214,11 +217,15 @@ def _load_gif_frames(image_file: Path | None) -> list[tuple[Image.Image, int]]:
 def _encode_png(
     prepared: _PreparedCard,
     image_file: Path | None,
+    *,
+    is_new: bool,
 ) -> PigCardRenderResult:
     canvas = prepared.canvas.copy()
     if image_file is not None:
         with Image.open(image_file) as opened:
             _paste_avatar(canvas, opened, prepared.avatar_y)
+    if is_new:
+        _paste_new_icon(canvas, prepared.avatar_y)
     output = BytesIO()
     canvas.convert("RGB").save(output, format="PNG", optimize=True)
     return PigCardRenderResult(output.getvalue(), "png", "pillow")
@@ -227,12 +234,16 @@ def _encode_png(
 def _encode_gif(
     prepared: _PreparedCard,
     avatar_frames: list[tuple[Image.Image, int]],
+    *,
+    is_new: bool,
 ) -> PigCardRenderResult:
     rgb_frames: list[Image.Image] = []
     durations: list[int] = []
     for avatar, duration in avatar_frames:
         frame = prepared.canvas.copy()
         _paste_avatar(frame, avatar, prepared.avatar_y)
+        if is_new:
+            _paste_new_icon(frame, prepared.avatar_y)
         rgb_frames.append(frame.convert("RGB"))
         durations.append(duration)
 
@@ -277,11 +288,11 @@ def _render_sync(
     *,
     is_new: bool,
 ) -> PigCardRenderResult:
-    prepared = _prepare_card(pig_data, is_new=is_new)
+    prepared = _prepare_card(pig_data)
     gif_frames = _load_gif_frames(image_file)
     if gif_frames:
-        return _encode_gif(prepared, gif_frames)
-    return _encode_png(prepared, image_file)
+        return _encode_gif(prepared, gif_frames, is_new=is_new)
+    return _encode_png(prepared, image_file, is_new=is_new)
 
 
 async def render_pig_card_image(

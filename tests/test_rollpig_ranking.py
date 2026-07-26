@@ -2435,7 +2435,10 @@ async def test_rollpig_overlay_sync_continues_after_one_pack_fails(
 async def test_rollpig_pillow_card_renders_static_png(tmp_path):
     module = load_rollpig_card_renderer_module()
     image_file = tmp_path / "pig.png"
+    new_icon_file = tmp_path / "new.png"
     Image.new("RGBA", (240, 240), (255, 120, 160, 255)).save(image_file)
+    Image.new("RGBA", (180, 180), (20, 200, 80, 255)).save(new_icon_file)
+    module.NEW_ICON_FILE = new_icon_file
 
     result = await module.render_pig_card_image(
         {
@@ -2452,6 +2455,7 @@ async def test_rollpig_pillow_card_renders_static_png(tmp_path):
     assert result.image_format == "png"
     assert result.renderer == "pillow"
     assert rendered.size == (800, 800)
+    assert rendered.getpixel((400, 200)) == (20, 200, 80)
 
 
 def test_rollpig_pillow_avatar_preserves_original_canvas_size():
